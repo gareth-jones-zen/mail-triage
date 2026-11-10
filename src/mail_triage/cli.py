@@ -8,8 +8,10 @@
     mail-triage delete 2 5          delete queued emails, by number (or by Graph id)
     mail-triage keep 1 3            take them off the queue and leave them in the folder
     mail-triage clear               empty the queue (each email stays in its folder, never raised again)
+    mail-triage deleted             what the rules deleted since the last clear, by rule (--all: the last 60 days)
     mail-triage which <sender> [subject]   which rule an email would meet
-    mail-triage autostart on        run daily at run_at and at logon, and now (off, status)
+    mail-triage watch               run now, then every every_minutes in working hours; what autostart runs
+    mail-triage autostart on        the watcher at every logon, and now (off, status)
 """
 
 from __future__ import annotations
@@ -51,6 +53,9 @@ def main(argv: list | None = None) -> int:
                        ("keep", "take them off the queue, leave them in the folder")):
         sub.add_parser(name, help=text).add_argument("refs", nargs="+", help="numbers from `list`, or Graph ids")
     sub.add_parser("clear", help="empty the queue")
+    sub.add_parser("watch", help="run now, then every every_minutes in working hours")
+    p = sub.add_parser("deleted", help="what the rules deleted since the queue was last cleared")
+    p.add_argument("--all", action="store_true", help="everything kept (60 days)")
     sub.add_parser("raised", help="the old name for clear")
     p = sub.add_parser("which", help="which rule an email would meet")
     p.add_argument("sender")
@@ -71,6 +76,9 @@ def main(argv: list | None = None) -> int:
 
     if args.command == "autostart":
         return _autostart(args.action, config)
+    if args.command == "watch":
+        from .watch import watch
+        return watch(config, lambda c: client(c, interactive=False))
     if args.command == "which":
         rule = config.rule_for(args.sender, args.subject)
         print(f"{rule.name}: {rule.action}" + (f" ({rule.check})" if rule.check else "") + (f"\n  {rule.why}" if rule.why else "")
@@ -85,12 +93,19 @@ def main(argv: list | None = None) -> int:
                   f"     [{item['rule']}]" + (f" {item['check']}" if item.get("check") else ""))
         if not items and not args.json:
             print("Nothing waiting.")
+        gone = triage.deleted(config)
+        if gone and not args.json:
+            print(f"\n{len(gone)} deleted by the rules since the queue was last cleared: `mail-triage deleted`.")
         return 0
-    if args.command in ("clear", "raised"):
-        triage.clear(config, log)
-        return 0
-    if args.command == "keep":
-        triage.keep(config, args.refs, log)
+    if args.command == "deleted":
+        return _deleted(triage.deleted(config, args.all))
+    if args.command in ("clear", "raised", "keep"):
+        # Locked like a run, so a run in progress can't write back a queue that's just been cleared (10 Nov 2026).
+        with exclusive(f"mail-triage-run-{key(config.path)}", 600, cfg.LOCAL, what="triage run"):
+            if args.command == "keep":
+                triage.keep(config, args.refs, log)
+            else:
+                triage.clear(config, log)
         return 0
 
     try:
@@ -122,10 +137,26 @@ def main(argv: list | None = None) -> int:
         return 1
 
 
+def _deleted(items: list) -> int:
+    if not items:
+        print("Nothing deleted by the rules since the queue was last cleared.")
+        return 0
+    by_rule = {}
+    for item in items:
+        by_rule.setdefault(item["rule"] or "(no rule)", []).append(item)
+    print(f"{len(items)} deleted, {items[0]['when'][:16].replace('T', ' ')} to {items[-1]['when'][:16].replace('T', ' ')}:")
+    for rule, group in sorted(by_rule.items(), key=lambda kv: -len(kv[1])):
+        print(f"\n  {rule} ({len(group)})")
+        for item in group:
+            print(f"    {item['received'][:10]}  {item['from']}: {item['subject'][:90]}")
+    return 0
+
+
 def _autostart(action: str, config: cfg.Config) -> int:
     if action == "on":
-        command = autostart.enable(config.path, config.run_at)
-        print(f"Autostart is on: '{autostart.TASK}' runs daily at {config.run_at} and at logon, and has started now.\n"
+        command = autostart.enable(config.path)
+        print(f"Autostart is on: '{autostart.TASK}' runs at every logon, and has started now. It triages at once, then "
+              f"every {config.every_minutes} minutes, {'-'.join(config.hours)}{' Mon-Fri' if config.weekdays else ''}.\n"
               f"  {command}")
     elif action == "off":
         print("Autostart is off." if autostart.disable() else "Autostart was already off.")

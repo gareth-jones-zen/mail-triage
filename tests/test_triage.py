@@ -16,6 +16,7 @@ from mail_triage import checks, config as cfg, triage  # noqa: E402
 SETTINGS = """
 queue_file = "queue.json"
 state_file = "raised.json"
+deleted_file = "deleted.json"
 log_file = "triage.log"
 
 [[folder]]
@@ -142,6 +143,20 @@ class Run(Base):
         self.assertFalse([c for c in graph.calls if c[0] != "GET"])
         self.assertFalse(self.config.queue_file.exists() or self.config.state_file.exists())
 
+    def test_rule_deletions_are_recorded_until_the_queue_is_cleared(self):
+        graph = FakeGraph([message(1, "a@news.example.com", "Daily news"), message(2, "boss@example.com")])
+        self.run_triage(graph, dry_run=True)
+        self.assertEqual(triage.deleted(self.config), [])   # a dry run deletes nothing, so records nothing
+        self.run_triage(graph)
+        gone = triage.deleted(self.config)
+        self.assertEqual([(i["rule"], i["subject"]) for i in gone], [("News", "Daily news")])
+        triage.clear(self.config, self.lines.append)
+        self.assertEqual(triage.deleted(self.config), [])
+        self.assertEqual(len(triage.deleted(self.config, everything=True)), 1)
+        graph.messages.append(message(6, "b@news.example.com", "More news"))
+        self.run_triage(graph)
+        self.assertEqual([i["subject"] for i in triage.deleted(self.config)], ["More news"])
+
     def test_delete_and_keep_by_number(self):
         graph = FakeGraph([message(2, "boss@example.com"), message(3, "x@example.org"), message(4, "y@example.org")])
         self.run_triage(graph)
@@ -190,6 +205,49 @@ class FlowFailures(Base):
         self.touch("out/a.html", time.time())
         self.assertTrue(checks.flow_recovered(check, dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1))[0])
         self.assertFalse(checks.flow_recovered(check, dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1))[0])
+
+
+class Watching(Base):
+    def test_working_hours_and_weekdays(self):
+        import datetime as dt
+        from mail_triage.watch import due
+        monday = dt.datetime(2026, 11, 9)
+        self.assertEqual(self.config.hours, ("07:00", "19:00"))
+        self.assertTrue(due(self.config, monday.replace(hour=7)))
+        self.assertFalse(due(self.config, monday.replace(hour=19)))
+        self.assertFalse(due(self.config, monday.replace(hour=6, minute=59)))
+        self.assertFalse(due(self.config, dt.datetime(2026, 11, 14, 10)))   # Saturday
+        self.config.weekdays = False
+        self.assertTrue(due(self.config, dt.datetime(2026, 11, 14, 10)))
+
+    def test_bad_hours_are_refused(self):
+        (self.dir / "bad.toml").write_text('hours = "7am-7pm"\n[[folder]]\nname = "x"\n', encoding="utf-8")
+        with self.assertRaises(ValueError):
+            cfg.load(self.dir / "bad.toml")
+
+
+class Commands(Base):
+    """The command line, end to end, on everything that doesn't need Graph."""
+
+    def cli(self, *args):
+        import contextlib, io
+        from mail_triage import cli
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = cli.main(["--config", str(self.dir / "config.toml"), *args])
+        return code, out.getvalue()
+
+    def test_list_deleted_which_and_clear(self):
+        self.run_triage(FakeGraph([message(1, "a@news.example.com", "Daily news"), message(2, "boss@example.com")]))
+        code, out = self.cli("list")
+        self.assertIn("1 deleted by the rules", out)
+        code, out = self.cli("deleted")
+        self.assertIn("News (1)", out)
+        self.assertIn("Daily news", out)
+        self.assertIn("Boss: review", self.cli("which", "boss@example.com")[1])
+        self.assertEqual(self.cli("clear")[0], 0)
+        self.assertIn("Nothing deleted", self.cli("deleted")[1])
+        self.assertIn("Nothing waiting", self.cli("list")[1])
 
 
 if __name__ == "__main__":

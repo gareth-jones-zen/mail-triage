@@ -15,6 +15,7 @@ mail-triage list
      [Power Automate failure digests] Weekly report (3 failures): 2 request(s) since its last success haven't been picked up
 mail-triage delete 1     # mark read, move to Deleted Items
 mail-triage keep 2       # off the queue, left in the folder
+mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule
 ```
 
 It works on Microsoft 365 mail through Microsoft Graph, and runs on Windows (anything else with
@@ -41,7 +42,7 @@ mail-triage config        # create the settings file and say where it is
 mail-triage sign-in       # once: a browser opens to sign in to Microsoft
 mail-triage run --dry-run # what it would do; nothing changes
 mail-triage run
-mail-triage autostart on  # daily at run_at, and at every logon
+mail-triage autostart on  # a watcher: at once, then every 15 minutes in working hours
 ```
 
 ## Settings
@@ -50,8 +51,10 @@ mail-triage autostart on  # daily at run_at, and at every logon
 
 ```toml
 login_hint = "you@example.com"
-run_at = "08:30"          # autostart's daily run (it also runs at logon)
-notify = "new"            # "new": a scheduled run notifies new emails to review; "errors": only problems
+every_minutes = 15        # the watcher runs this often...
+hours = "07:00-19:00"     # ...between these times, and once at start whatever the time...
+weekdays = true           # ...Monday to Friday
+notify = "new"            # "new": the watcher notifies new emails to review; "errors": only problems
 
 [[folder]]
 name = "Newsletters"      # display name, found anywhere in your folder tree
@@ -90,8 +93,10 @@ quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-
 - **Each email is raised once.** Every email ever queued is recorded by its internet message ID (Graph's own id changes when an email moves), so one you've seen and kept in the folder doesn't come back. The first version re-queued everything still in the folders on every run, and the same six emails were put to their owner twice. **What's waiting stays in the queue until you `delete`, `keep` or `clear` it**, and an email deleted in Outlook drops out by itself.
 - **The test for a rule is "does this need me to do something?"** A notification that only says something happened should be a delete rule. Hence the flow-failures check: a failure digest only matters if the flow is still failing.
 - **flow-failures never guesses that a flow is fine.** Power Automate doesn't say whether a flow has worked since, so each flow needs a `[[flow_check]]` saying what a good run leaves behind. With `pending`, a flow has recovered if nothing pending is newer than its newest output. Without it, if its output is newer than the digest. A flow without a check is raised.
-- **One run at a time**, so a scheduled run and one started by hand can't both act on the same email.
-- **A scheduled run never opens a browser.** A lapsed sign-in is notified, and `mail-triage sign-in` at a console fixes it.
+- **One run at a time**, so the watcher and a run started by hand can't both act on the same email. `clear` and `keep` take the same lock, so a run in progress can't write back a queue you've just cleared.
+- **Unattended deletes stay visible.** Everything the rules delete is recorded, and `mail-triage deleted` lists what went since you last cleared the queue, grouped by rule (`--all` for the last 60 days). `list` says how many. A rule that starts catching the wrong mail shows up there, and the email is still in Deleted Items.
+- **The watcher runs once at start, then every `every_minutes` within `hours`**, so logging on in the evening still clears the day's mail, and checking Outlook in the afternoon finds the folders already tidy. One watcher per settings file; it logs `alive` hourly and notifies a failure once, until a run succeeds.
+- **The watcher never opens a browser.** A lapsed sign-in is notified, and `mail-triage sign-in` at a console fixes it.
 
 ## The queue file
 

@@ -8,6 +8,9 @@
   message ID (Graph's own id changes when an email is moved), so one you've seen and kept in the
   folder doesn't come back. The queue keeps what's still waiting, run after run, until you
   `delete`, `keep` or `clear` it.
+- **What the rules delete is recorded** (deleted_file), so it can be reviewed: `mail-triage deleted` lists
+  what went since the queue was last cleared, by rule. Running unattended, that's how a rule that has
+  started catching the wrong mail gets noticed (10 Nov 2026). Kept for KEEP_DAYS.
 
 The queue file is JSON, so another program (an assistant, a script) can read it:
 
@@ -26,6 +29,7 @@ import urllib.parse
 from .checks import CHECKS
 from .config import Config
 
+KEEP_DAYS = 60
 SCOPES = ["Mail.ReadWrite"]
 READ_ONLY = ["Mail.Read"]   # a dry run only reads, so it works before Mail.ReadWrite is granted
 FIELDS = "id,internetMessageId,subject,from,receivedDateTime,isRead,bodyPreview,webLink"
@@ -98,6 +102,7 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
     raised = _load(config.state_file, {})
     previous = queue(config)
     seen, new, deleted, again = set(), [], 0, 0
+    record = _load(config.deleted_file, {"items": []})
     for folder in config.folders:
         for message in mailbox.messages(mailbox.folder_id(folder.name), folder.since):
             seen.add(key(message))
@@ -115,6 +120,10 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
             if action == "delete":
                 if not dry_run:
                     mailbox.delete(message["id"])
+                    record["items"].append({"when": dt.datetime.now().isoformat(timespec="microseconds"), "folder": folder.name,
+                                            "received": message.get("receivedDateTime"), "from": sender(message),
+                                            "subject": message.get("subject", ""), "rule": rule.name if rule else "",
+                                            **({"check": note} if note else {})})
                 log(f"{'would delete' if dry_run else 'deleted'}  {label}")
                 deleted += 1
                 continue
@@ -129,6 +138,9 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
     carried = [item for item in previous if item.get("key") in seen and item["key"] not in {i["key"] for i in new}]
     if not dry_run:
         _save(config.state_file, raised)
+        cutoff = (dt.datetime.now() - dt.timedelta(days=KEEP_DAYS)).isoformat()
+        record["items"] = [i for i in record["items"] if i["when"] >= cutoff]
+        _save(config.deleted_file, record)
         save_queue(config, carried + new)
     report = {"deleted": deleted, "new": len(new), "waiting": len(carried), "kept": again - len(carried)}
     log(f"done: {deleted} deleted, {len(new)} new to review, {len(carried)} still waiting from earlier runs, "
@@ -174,8 +186,19 @@ def keep(config: Config, refs: list, log=print) -> int:
 
 
 def clear(config: Config, log=print) -> int:
-    """The whole queue has been decided (or put to whoever decides): empty it."""
+    """The whole queue has been decided (or put to whoever decides): empty it. What the rules deleted
+    counts as seen too, so `deleted` starts again from here."""
     count = len(queue(config))
     save_queue(config, [])
+    record = _load(config.deleted_file, {"items": []})
+    record["seen_until"] = dt.datetime.now().isoformat(timespec="microseconds")
+    _save(config.deleted_file, record)
     log(f"queue cleared: {count}")
     return count
+
+
+def deleted(config: Config, everything: bool = False) -> list:
+    """What the rules deleted since the queue was last cleared (or all that's kept), oldest first."""
+    record = _load(config.deleted_file, {"items": []})
+    since = "" if everything else record.get("seen_until", "")
+    return [i for i in record["items"] if i["when"] > since]

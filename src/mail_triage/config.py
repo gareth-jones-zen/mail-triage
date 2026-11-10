@@ -5,10 +5,13 @@
     msal_cache = "..."                      # optional: share another tool's sign-in
     queue_file = "..."                      # optional: the emails waiting for a decision (JSON)
     state_file = "..."                      # optional: every email ever queued, so none is raised twice
+    deleted_file = "..."                    # optional: what the rules deleted, for `mail-triage deleted`
     log_file = "..."                        # optional
     notify = "new"                          # optional: "new" (default) also notifies new emails to review
                                             #   after a scheduled run; "errors" only notifies problems
-    run_at = "08:30"                        # optional: when autostart's daily run is (it also runs at logon)
+    every_minutes = 15                      # optional: watch mode (autostart) runs this often...
+    hours = "07:00-19:00"                   # ...between these times (and once at start, whatever the time)...
+    weekdays = true                         # ...on Monday to Friday
 
     [[folder]]
     name = "Newsletters"                    # a mail folder's display name, anywhere in the tree
@@ -100,9 +103,12 @@ class Config:
     msal_cache: pathlib.Path | None = None
     queue_file: pathlib.Path = LOCAL / "queue.json"
     state_file: pathlib.Path = LOCAL / "raised.json"
+    deleted_file: pathlib.Path = LOCAL / "deleted.json"
     log_file: pathlib.Path = LOCAL / "mail-triage.log"
     notify: str = "new"
-    run_at: str = "08:30"
+    every_minutes: int = 15
+    hours: tuple = ("07:00", "19:00")
+    weekdays: bool = True
 
     def rule_for(self, sender: str, text: str) -> Rule | None:
         return next((rule for rule in self.rules if rule.matches(sender, text)), None)
@@ -125,9 +131,12 @@ def load(path: pathlib.Path | str | None = None) -> Config:
         raise FileNotFoundError(f"No settings file at {path}. Run `mail-triage config` to create one.")
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     base = path.parent
-    run_at = str(raw.get("run_at", "08:30"))
-    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", run_at):
-        raise ValueError(f"run_at in {path} should be a time such as \"08:30\".")
+    hours = str(raw.get("hours", "07:00-19:00"))
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-4]):[0-5]\d", hours):
+        raise ValueError(f"hours in {path} should look like \"07:00-19:00\".")
+    every = int(raw.get("every_minutes", 15))
+    if every < 1:
+        raise ValueError(f"every_minutes in {path} should be at least 1.")
     notify = raw.get("notify", "new")
     if notify not in ("new", "errors"):
         raise ValueError(f"notify in {path} should be \"new\" or \"errors\".")
@@ -136,8 +145,9 @@ def load(path: pathlib.Path | str | None = None) -> Config:
         msal_cache=_path(raw["msal_cache"], base) if raw.get("msal_cache") else None,
         queue_file=_path(raw["queue_file"], base) if raw.get("queue_file") else LOCAL / "queue.json",
         state_file=_path(raw["state_file"], base) if raw.get("state_file") else LOCAL / "raised.json",
+        deleted_file=_path(raw["deleted_file"], base) if raw.get("deleted_file") else LOCAL / "deleted.json",
         log_file=_path(raw["log_file"], base) if raw.get("log_file") else LOCAL / "mail-triage.log",
-        notify=notify, run_at=run_at)
+        notify=notify, every_minutes=every, hours=tuple(hours.split("-")), weekdays=bool(raw.get("weekdays", True)))
 
     for item in raw.get("folder", []):
         if not item.get("name"):
