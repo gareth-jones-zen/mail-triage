@@ -5,7 +5,8 @@
 - **One watcher per settings file.** A second exits at once (code 3).
 - **The settings file is re-read each run**, so a new rule needs no restart.
 - **It never opens a browser.** A lapsed sign-in is logged and notified once, and it keeps trying.
-- **A failure is notified once, until a run succeeds again**, not every 15 minutes.
+- **A failure is notified only after three in a row** (a sign-in problem at once), and once until a run
+  succeeds. A single dropped connection that the next run gets past isn't something to act on (11 Nov 2026).
 - **It logs `alive` once an hour**, so a silent log means a stuck watcher, not a quiet inbox.
 - **With notify = "new"**, new emails to review are notified (one notification per run that found any).
 """
@@ -40,6 +41,7 @@ def watch(config: cfg.Config, client_for) -> int:
     log(f"watching {len(config.folders)} folder(s) every {config.every_minutes} min, "
         f"{'-'.join(config.hours)}{' Mon-Fri' if config.weekdays else ''}, and once now")
     next_run, beat, failing, first = 0.0, time.time(), None, True
+    streak = 0   # failures in a row
     while True:
         if time.time() >= next_run:
             next_run = time.time() + config.every_minutes * 60
@@ -51,7 +53,7 @@ def watch(config: cfg.Config, client_for) -> int:
                         report = triage.run(config, triage.Mailbox(client_for(config)), False, log)
                     if report["new"] and config.notify == "new":
                         notify(f"{report['new']} email{'s' if report['new'] > 1 else ''} to review", ["mail-triage list"])
-                    failing = None
+                    failing, streak = None, 0
                 except SignInNeeded as error:
                     log(f"sign-in needed: {error}")
                     if failing != "sign-in":
@@ -59,7 +61,8 @@ def watch(config: cfg.Config, client_for) -> int:
                     failing = "sign-in"
                 except Exception as error:
                     log(f"run failed: {type(error).__name__}: {error}")
-                    if failing != type(error).__name__:
+                    streak += 1
+                    if streak == 3:
                         notify("mail-triage couldn't run", [f"{type(error).__name__}: {error}"[:300], f"Log: {config.log_file}"])
                     failing = type(error).__name__
         if time.time() - beat >= 3600:
