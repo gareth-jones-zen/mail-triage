@@ -61,6 +61,17 @@ notify = "new"            # "new": the watcher notifies new emails to review; "e
 name = "Newsletters"      # display name, found anywhere in your folder tree
 since = "2026-09-17"      # optional: never touch older mail, which you may be keeping
 
+[[folder]]
+name = "Inbox"
+unmatched = "leave"       # only rules that name this folder act here; nothing else is touched or queued
+
+[[rule]]
+name = "Meeting acceptances"
+sender = '@example\.com$'
+match = '^Accepted: '
+action = "delete"
+folders = ["Inbox"]       # optional: only in these folders
+
 [[rule]]                  # first match wins, top to bottom
 name = "Vendor newsletters"
 sender = '@news\.example\.com$'          # regular expression on the sender's address, ignoring case
@@ -91,6 +102,7 @@ quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-
 
 - **Delete** marks the email read and moves it to Deleted Items, so it's recoverable.
 - **Review** leaves it where it is and queues it.
+- **Your inbox can take a few rules without being triaged.** A folder with `unmatched = "leave"` gets only the rules that name it in `folders`, and mail no rule names is left alone, never queued: tidy the noise (meeting acceptances) without every email becoming a question. A rule with `folders` acts only there; one without acts in every folder except those.
 - **File** moves it to the folder in `to` (a path such as `Inbox/Projects`), left unread: for mail you keep but needn't decide on. `deleted` lists what was filed too.
 - **Check** runs a test on the email and deletes it only if there's nothing to do; otherwise it's queued with what the test found.
 - **Each email is raised once.** Every email ever queued is recorded by its internet message ID (Graph's own id changes when an email moves), so one you've seen and kept in the folder doesn't come back. The first version re-queued everything still in the folders on every run, and the same six emails were put to their owner twice. **What's waiting stays in the queue until you `delete`, `keep` or `clear` it**, and an email deleted in Outlook drops out by itself.

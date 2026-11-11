@@ -16,6 +16,8 @@
     [[folder]]
     name = "Newsletters"                    # a mail folder's display name, anywhere in the tree
     since = "2026-09-17"                    # optional: never look at mail older than this
+    unmatched = "leave"                     # optional: only the rules act; mail no rule names is left alone
+                                            #   (for an inbox). Default "review": queue it.
 
     [[rule]]                                # first match wins
     name = "Vendor newsletters"
@@ -23,6 +25,8 @@
     match = 'newsletter|digest'             # optional: a regular expression on the subject and preview
     action = "delete"                       # delete (mark read, move to Deleted Items) | review | check | file
     to = 'Inbox/Projects'                   # for action = "file": the folder to move it to, left unread
+    folders = ["Inbox"]                     # optional: only in these folders. Without it, a rule acts in
+                                            #   every folder except one with unmatched = "leave"
     check = "flow-failures"                 # for action = "check": which check
     why = "News, not action."               # optional, but say why: it's what makes a rule maintainable
 
@@ -71,6 +75,7 @@ TEMPLATE = """\
 class Folder:
     name: str
     since: str | None = None
+    unmatched: str = "review"   # "leave": only the rules act here; mail no rule names is left alone (an inbox)
 
 
 @dataclass
@@ -82,6 +87,7 @@ class Rule:
     check: str | None = None
     why: str = ""
     to: str | None = None   # action "file": move it here, left unread
+    folders: list | None = None   # only in these folders (by name); none: every folder except an inbox
 
     def matches(self, sender: str, text: str) -> bool:
         return bool(re.search(self.sender, sender, re.I)) and (self.match is None or bool(re.search(self.match, text, re.I)))
@@ -154,8 +160,15 @@ class Config:
     email: str | None = None             # your address (default: login_hint), for telling you from others in invites
     invites: Invites | None = None       # [invites]: triage meeting invites too (invites.py)
 
-    def rule_for(self, sender: str, text: str) -> Rule | None:
-        return next((rule for rule in self.rules if rule.matches(sender, text)), None)
+    def rule_for(self, sender: str, text: str, folder: Folder | None = None) -> Rule | None:
+        """The first rule that matches and applies in this folder. A rule naming folders applies only in
+        them; a folder with unmatched = "leave" (an inbox) gets only the rules that name it."""
+        def applies(rule):
+            if folder is None:
+                return True
+            named = [f.lower() for f in rule.folders or []]
+            return folder.name.lower() in named if (named or folder.unmatched == "leave") else True
+        return next((rule for rule in self.rules if applies(rule) and rule.matches(sender, text)), None)
 
 
 def _path(value: str, base: pathlib.Path) -> pathlib.Path:
@@ -199,7 +212,10 @@ def load(path: pathlib.Path | str | None = None) -> Config:
         since = item.get("since")
         if since is not None and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(since)):
             raise ValueError(f"since for folder {item['name']} in {path} should be a date such as \"2026-09-17\".")
-        config.folders.append(Folder(item["name"], str(since) if since else None))
+        unmatched = item.get("unmatched", "review")
+        if unmatched not in ("review", "leave"):
+            raise ValueError(f'unmatched for folder {item["name"]} in {path} should be "review" or "leave".')
+        config.folders.append(Folder(item["name"], str(since) if since else None, unmatched))
 
     from .checks import CHECKS   # here, not at the top: checks imports nothing from config at load time
     for i, item in enumerate(raw.get("rule", []), 1):
@@ -220,7 +236,8 @@ def load(path: pathlib.Path | str | None = None) -> Config:
                 except re.error as error:
                     raise ValueError(f"Rule {name!r} in {path}: {key} isn't a valid regular expression ({error}).")
         config.rules.append(Rule(name=name, sender=item["sender"], action=action, match=item.get("match"),
-                                 check=item.get("check"), why=item.get("why", ""), to=item.get("to")))
+                                 check=item.get("check"), why=item.get("why", ""), to=item.get("to"),
+                                 folders=list(item["folders"]) if item.get("folders") else None))
 
     for item in raw.get("flow_check", []):
         if not item.get("flow") or not item.get("output"):

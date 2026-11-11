@@ -127,6 +127,20 @@ class Run(Base):
         queued = triage.queue(self.config)
         self.assertEqual([(i["n"], i["rule"]) for i in queued], [(1, "Boss"), (2, "no rule matched")])
 
+    def test_an_inbox_folder_gets_only_the_rules_that_name_it(self):
+        self.config.folders[0].unmatched = "leave"
+        self.config.rules.insert(0, cfg.Rule(name="Accepts", sender="@example\\.org$", action="delete",
+                                             match="^Accepted: ", folders=["triage"]))
+        graph = FakeGraph([message(1, "a@news.example.com"), message(3, "stranger@example.org"),
+                           message(5, "colleague@example.org", "Accepted: Weekly 1-2-1")])
+        report = self.run_triage(graph)
+        self.assertEqual((report["deleted"], report["new"]), (1, 0))       # only the accept
+        self.assertEqual(triage.queue(self.config), [])
+        self.assertEqual(sorted(m["id"] for m in graph.messages), ["graph-1", "graph-3"])   # the rest left alone
+        normal = cfg.Folder("Other")
+        self.assertIsNone(self.config.rule_for("colleague@example.org", "Accepted: x", normal))   # named elsewhere
+        self.assertEqual(self.config.rule_for("a@news.example.com", "x", normal).name, "News")
+
     def test_file_moves_it_to_a_folder_by_path_left_unread(self):
         graph = FakeGraph([message(4, "plans@example.com", "Sprint 04 Plan")])
         report = self.run_triage(graph)

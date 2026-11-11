@@ -126,7 +126,9 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
                 again += 1
                 continue
             text = f"{message.get('subject', '')}\n{message.get('bodyPreview', '')}"
-            rule = config.rule_for(sender(message), text)
+            rule = config.rule_for(sender(message), text, folder)
+            if rule is None and folder.unmatched == "leave":
+                continue   # an inbox: only the rules act there
             action, note = (rule.action if rule else "review"), None
             if action == "check":
                 needs_body, check = CHECKS[rule.check]
