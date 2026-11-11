@@ -134,6 +134,13 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
                         "webLink": message.get("webLink")})
             raised.setdefault(key(message), dt.datetime.now().isoformat(timespec="seconds"))
             log(f"{'would queue' if dry_run else 'queued'}  {label}")
+    invites_new = 0
+    if config.invites:
+        from . import invites
+        items, pending_keys, _ = invites.triage(config, invites.Calendar(mailbox.graph), raised, log)
+        seen |= pending_keys   # an invite answered elsewhere (in Outlook) drops off the queue
+        new += items
+        invites_new = len(items)
     # Still waiting from earlier runs, and still in the folder (one deleted by hand in Outlook drops out).
     carried = [item for item in previous if item.get("key") in seen and item["key"] not in {i["key"] for i in new}]
     if not dry_run:
@@ -142,9 +149,10 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
         record["items"] = [i for i in record["items"] if i["when"] >= cutoff]
         _save(config.deleted_file, record)
         save_queue(config, carried + new)
-    report = {"deleted": deleted, "new": len(new), "waiting": len(carried), "kept": again - len(carried)}
-    log(f"done: {deleted} deleted, {len(new)} new to review, {len(carried)} still waiting from earlier runs, "
-        f"{report['kept']} seen before and kept")
+    report = {"deleted": deleted, "new": len(new), "waiting": len(carried), "kept": max(0, again - len(carried)),
+              "invites": invites_new}
+    log(f"done: {deleted} deleted, {len(new)} new to review" + (f" ({invites_new} invites)" if invites_new else "")
+        + f", {len(carried)} still waiting from earlier runs, {report['kept']} seen before and kept")
     return report
 
 
@@ -169,12 +177,31 @@ def delete(config: Config, mailbox: Mailbox, refs: list, log=print) -> int:
             ids.append(pick(config, [ref])[0]["id"])
         else:
             ids.append(ref)
+    invites = [items[i]["subject"] for i in ids if items.get(i, {}).get("type") == "invite"]
+    if invites:
+        raise LookupError(f"{invites[0]} is an invite, not an email: answer it with `mail-triage invite decline <n>`.")
     for message_id in ids:
         mailbox.delete(message_id)
         item = items.get(message_id)
         log(f"deleted by hand  {item['from'] + ': ' + item['subject'] if item else message_id[:24] + '…'}")
     save_queue(config, [i for i in queue(config) if i["id"] not in ids])
     return len(ids)
+
+
+def answer(config: Config, calendar, refs: list, action: str, note: str = "", send: bool = True, log=print) -> int:
+    """Answer queued invites (by number): accept, tentative or decline. A series is answered as a whole."""
+    chosen = pick(config, refs)
+    wrong = [i["subject"] for i in chosen if i.get("type") != "invite"]
+    if wrong:
+        raise LookupError(f"{wrong[0]} is an email, not an invite.")
+    for item in chosen:
+        calendar.respond(item["id"], action, note, send)
+        done = {"accept": "accepted", "tentative": "accepted tentatively", "decline": "declined"}[action]
+        log(f"invite {done}{'' if send else ' (no response sent)'}  "
+            f"{item['from']}: {item['subject']}" + (f" | note: {note}" if note else ""))
+    gone = {i["id"] for i in chosen}
+    save_queue(config, [i for i in queue(config) if i["id"] not in gone])
+    return len(chosen)
 
 
 def keep(config: Config, refs: list, log=print) -> int:

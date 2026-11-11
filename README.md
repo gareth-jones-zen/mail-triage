@@ -1,6 +1,6 @@
 # mail-triage
 
-Standing rules for your mail. Outlook rules file the noise into folders; mail-triage goes through
+Standing rules for your mail, and advice on your meeting invites. Outlook rules file the noise into folders; mail-triage goes through
 those folders, deletes what your rules say is routine, and queues the rest for you to decide, each
 email once. **Anything no rule names is queued, never deleted.**
 
@@ -98,9 +98,65 @@ quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-
 - **The watcher runs once at start, then every `every_minutes` within `hours`**, so logging on in the evening still clears the day's mail, and checking Outlook in the afternoon finds the folders already tidy. One watcher per settings file; it logs `alive` hourly and notifies a failure once, until a run succeeds.
 - **The watcher never opens a browser.** A lapsed sign-in is notified, and `mail-triage sign-in` at a console fixes it.
 
+## Meeting invites
+
+With an `[invites]` section, each run also looks at your calendar for the next `days_ahead` days and
+queues every invite you haven't answered, with a recommendation. **Who sent an invite says little about
+whether to go**, so unlike mail it's judged on time and context. On three months of one person's calendar,
+every decline was either leave (10) or a clash with something already accepted (17); with no clash, 78 of
+100 invites were accepted.
+
+```
+mail-triage list
+  4. 2026-11-17T00:00  HR Team
+     Pay changes due: Tue 17 Nov 00:00–00:00
+     [invite] ACCEPT: holds no time (all-day or shown as free): a marker, not a meeting (you're invited through a group)
+  5. 2026-11-25T14:00  HR Team
+     Wellbeing webinar: Wed 25 Nov 14:00–15:00
+     [invite] DECLINE: clashes with Design review (accepted, Wed 25 Nov 13:30–15:20) (you're invited through a group)
+mail-triage invite decline 5 --note "Clashes, sorry"
+mail-triage move <event id> 2026-11-11T16:00        # move one of your own meetings or blocks, keeping its length
+mail-triage leave                                   # meetings in your leave you haven't declined
+mail-triage leave --decline --note "On leave"
+```
+
+| What it finds | Recommends |
+|---|---|
+| Falls in your leave (your own entries matching `leave_pattern`: Holiday, Annual leave, Bank holiday) | Decline |
+| Clashes with something fixed: a meeting you've accepted, anything `protected`, a block in `fixed_blocks` | Decline (or propose another time) |
+| Clashes only with things you can move: your own blocks, meetings you organise | Accept, and move them |
+| A series where only some occurrences clash, or fall in leave | Accept, and decline those |
+| All-day, or shown as free (a deadline marker, a notice) | Accept: it holds no time, so nothing clashes |
+| No clash | Accept, noting a recurring series, being optional or invited through a group, over 50 people, or an outside organiser |
+
+- **Nothing answers on its own.** The recommendation is advice; `invite accept|tentative|decline <n>` answers. Rules that act come later, one class of invite at a time, once the advice has proved itself.
+- **`[[invite_rule]]` with `action = "skip"`** drops invites that need no response at all, such as a colleague's leave sent as an invite. Every condition given must hold.
+- **Blocked-out time is assumed movable** unless it's there for something with a due date: name those in `fixed_blocks`. A meeting you organise counts as movable too (moving it sends attendees an update), so put any you never move, such as your own manager's 1:1 if you send it, in `protected`.
+- **Each invite is raised once:** a recurring series once as a whole, a one-off once per start time, so a moved meeting comes back. An invite answered in Outlook drops off the queue by itself.
+- **`delete` refuses an invite**; answer it instead. **`move` refuses someone else's meeting.**
+- It needs `Calendars.ReadWrite`.
+
+```toml
+email = "you@example.com"        # defaults to login_hint
+[invites]
+days_ahead = 42
+fixed_blocks = ['^Travel', '^Weekly report prep']
+protected = ['^1:1 with my manager$']
+# leave_pattern = '^(\w+ )?(holidays?|annual leave|leave|bank holiday)\b'
+
+[[invite_rule]]
+name = "Colleagues' leave sent as invites"
+subject = 'holiday|annual leave'
+all_day = true
+show_as = ["free", "oof"]
+action = "skip"                  # or "review": always raise
+# also: organiser, via_group, optional, min_people (all must hold)
+```
+
 ## The queue file
 
-JSON, so another program (an assistant, a script) can work from it:
+JSON, so another program (an assistant, a script) can work from it. An invite's item also has
+`"type": "invite"`, `"recommendation"`, `"clashes"` and `"occurrence"`, and its `folder` is `"Calendar"`:
 
 ```json
 {"checked": "2026-11-10T09:00:00", "review": [{"n": 1, "folder": "Newsletters", "id": "<Graph id>",

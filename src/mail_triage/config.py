@@ -93,6 +93,32 @@ class FlowCheck:
 
 
 @dataclass
+class InviteRule:
+    """Which invites need no response (action "skip"), or must always be raised ("review"). Every condition
+    given must hold. Kept separate from mail rules: an invite is judged on time and who else is going, not
+    on its sender (invites.py)."""
+    name: str
+    action: str = "skip"
+    subject: str | None = None      # regular expression on the subject, ignoring case
+    organiser: str | None = None    # regular expression on the organiser's name or address
+    all_day: bool | None = None
+    show_as: list | None = None     # e.g. ["free", "oof"]: how it would show in your calendar
+    via_group: bool | None = None   # you're invited through a distribution list, not by name
+    optional: bool | None = None    # you're listed as optional
+    min_people: int | None = None
+    why: str = ""
+
+
+@dataclass
+class Invites:
+    days_ahead: int = 42
+    fixed_blocks: list = field(default_factory=list)   # own blocks that can't move (regular expressions on subject)
+    protected: list = field(default_factory=list)      # meetings never moved or declined for anything
+    leave_pattern: str = r"^(\w+ )?(holidays?|annual leave|leave|bank holiday)\b"
+    rules: list = field(default_factory=list)
+
+
+@dataclass
 class Config:
     path: pathlib.Path
     folders: list[Folder] = field(default_factory=list)
@@ -109,6 +135,8 @@ class Config:
     every_minutes: int = 15
     hours: tuple = ("07:00", "19:00")
     weekdays: bool = True
+    email: str | None = None             # your address (default: login_hint), for telling you from others in invites
+    invites: Invites | None = None       # [invites]: triage meeting invites too (invites.py)
 
     def rule_for(self, sender: str, text: str) -> Rule | None:
         return next((rule for rule in self.rules if rule.matches(sender, text)), None)
@@ -181,8 +209,32 @@ def load(path: pathlib.Path | str | None = None) -> Config:
             raise ValueError(f"A [[flow_check]] in {path} needs flow and output.")
         config.flow_checks.append(FlowCheck(item["flow"], _pattern(item["output"], base),
                                             _pattern(item["pending"], base) if item.get("pending") else None))
-    if not config.folders:
-        raise ValueError(f"{path} names no [[folder]] to triage.")
+    config.email = (raw.get("email") or raw.get("login_hint") or "").lower() or None
+    if "invites" in raw:
+        section = raw["invites"]
+        if not config.email:
+            raise ValueError(f"[invites] in {path} needs email (or login_hint) set, to tell you from other attendees.")
+        rules = []
+        for i, item in enumerate(raw.get("invite_rule", []), 1):
+            name = item.get("name", f"invite rule {i}")
+            if item.get("action", "skip") not in ("skip", "review"):
+                raise ValueError(f"Invite rule {name!r} in {path}: action is skip or review (nothing acts on its own yet).")
+            for key in ("subject", "organiser"):
+                if item.get(key):
+                    try:
+                        re.compile(item[key])
+                    except re.error as error:
+                        raise ValueError(f"Invite rule {name!r} in {path}: {key} isn't a valid regular expression ({error}).")
+            rules.append(InviteRule(name=name, action=item.get("action", "skip"), subject=item.get("subject"),
+                                    organiser=item.get("organiser"), all_day=item.get("all_day"),
+                                    show_as=item.get("show_as"), via_group=item.get("via_group"),
+                                    optional=item.get("optional"), min_people=item.get("min_people"), why=item.get("why", "")))
+        config.invites = Invites(days_ahead=int(section.get("days_ahead", 42)),
+                                 fixed_blocks=list(section.get("fixed_blocks", [])),
+                                 protected=list(section.get("protected", [])),
+                                 leave_pattern=section.get("leave_pattern", Invites.leave_pattern), rules=rules)
+    if not config.folders and not config.invites:
+        raise ValueError(f"{path} names no [[folder]] to triage, and no [invites].")
     return config
 
 

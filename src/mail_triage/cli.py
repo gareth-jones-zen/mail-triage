@@ -10,7 +10,14 @@
     mail-triage clear               empty the queue (each email stays in its folder, never raised again)
     mail-triage deleted             what the rules deleted since the last clear, by rule (--all: the last 60 days)
     mail-triage which <sender> [subject]   which rule an email would meet
-    mail-triage watch               run now, then every every_minutes in working hours; what autostart runs
+
+    With [invites] in the settings, unanswered meeting invites are queued too, each with a recommendation:
+    mail-triage invite accept 3     answer a queued invite: accept, tentative or decline (a series as a whole)
+        --note "..."                    a note to the organiser; --silent answers without telling them
+    mail-triage move <event id> 2026-11-11T16:00 [16:50]   move one of your own meetings or blocks
+    mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
+
+    mail-triage watch              run now, then every every_minutes in working hours; what autostart runs
     mail-triage autostart on        the watcher at every logon, and now (off, status)
 """
 
@@ -60,6 +67,19 @@ def main(argv: list | None = None) -> int:
     p = sub.add_parser("which", help="which rule an email would meet")
     p.add_argument("sender")
     p.add_argument("subject", nargs="?", default="")
+    p = sub.add_parser("invite", help="answer queued invites")
+    p.add_argument("action", choices=["accept", "tentative", "decline"])
+    p.add_argument("refs", nargs="+", help="numbers from `list`")
+    p.add_argument("--note", default="", help="a note to the organiser")
+    p.add_argument("--silent", action="store_true", help="answer without sending a response")
+    p = sub.add_parser("move", help="move one of your own meetings or blocks")
+    p.add_argument("event")
+    p.add_argument("start", help="yyyy-mm-ddTHH:MM")
+    p.add_argument("end", nargs="?", help="HH:MM (default: keep its length)")
+    p = sub.add_parser("leave", help="meetings in your leave you haven't declined")
+    p.add_argument("--days", type=int, default=60)
+    p.add_argument("--decline", action="store_true", help="decline them (each occurrence)")
+    p.add_argument("--note", default="", help="a note to each organiser")
     p = sub.add_parser("autostart", help="run daily and at logon (Task Scheduler)")
     p.add_argument("action", choices=["on", "off", "status"])
     args = parser.parse_args(argv)
@@ -114,6 +134,11 @@ def main(argv: list | None = None) -> int:
             graph.token(triage.SCOPES, interactive=True)
             print("Signed in.")
             return 0
+        if args.command in ("invite", "move", "leave"):
+            if not config.invites:
+                print(f"{config.path} has no [invites] section.", file=sys.stderr)
+                return 2
+            return _calendar(args, config, graph, log)
         with exclusive(f"mail-triage-run-{key(config.path)}", 600, cfg.LOCAL, what="triage run"):
             if args.command in ("delete", "resolve"):
                 triage.delete(config, triage.Mailbox(graph), args.refs, log)
@@ -135,6 +160,42 @@ def main(argv: list | None = None) -> int:
         if getattr(args, "scheduled", False):
             notify("mail-triage failed", [f"{type(error).__name__}: {error}"[:300], f"Log: {config.log_file}"])
         return 1
+
+
+def _calendar(args, config: cfg.Config, graph, log) -> int:
+    import datetime as dt
+    from . import invites
+    calendar = invites.Calendar(graph)
+    if args.command == "invite":
+        with exclusive(f"mail-triage-run-{key(config.path)}", 600, cfg.LOCAL, what="triage run"):
+            triage.answer(config, calendar, args.refs, args.action, args.note, not args.silent, log)
+        return 0
+    if args.command == "move":
+        event = calendar.event(args.event)
+        if not event.get("isOrganizer"):
+            print("That's someone else's meeting: it can't be moved, only declined with a proposed time.", file=sys.stderr)
+            return 2
+        old_start, old_end = invites._times(event)
+        start = dt.datetime.fromisoformat(args.start)
+        end = dt.datetime.combine(start.date(), dt.time.fromisoformat(args.end)) if args.end else start + (old_end - old_start)
+        calendar.move(args.event, start, end)
+        log(f"moved  {event.get('subject')}: {old_start:%a %d %b %H:%M} -> {start:%a %d %b %H:%M}–{end:%H:%M}"
+            + ("" if len(invites._people(event)) <= 1 else " (attendees get an update)"))
+        return 0
+    found = invites.leave_sweep(config, calendar, dt.date.today(), args.days)
+    if not found:
+        print(f"Nothing in your leave over the next {args.days} days that you haven't declined.")
+        return 0
+    for e in found:
+        start, end = invites._times(e)
+        print(f"  {start:%a %d %b %H:%M}–{end:%H:%M}  {e.get('subject')}  ({invites._organiser(e)[0]}; "
+              f"{(e.get('responseStatus') or {}).get('response')})")
+        if args.decline:
+            calendar.respond(e["id"], "decline", args.note)
+    print(f"{len(found)} meeting(s) in your leave" + (": declined." if args.decline else ". `--decline` declines them."))
+    if args.decline:
+        log(f"leave sweep: declined {len(found)} meeting(s)")
+    return 0
 
 
 def _deleted(items: list) -> int:
