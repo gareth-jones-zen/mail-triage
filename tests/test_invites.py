@@ -205,5 +205,29 @@ class Invites(unittest.TestCase):
         self.assertEqual(invites.leave_note(self.config, dt.date(2026, 11, 20), away), "On annual leave 20/11 to 23/11")
 
 
+class RequestGraph:
+    """Invitation emails in one folder, each linked to its meeting (or to none: declined, so removed)."""
+    def __init__(self):
+        req = "#microsoft.graph.eventMessageRequest"
+        self.messages = [{"@odata.type": req, "id": "m1", "subject": "Accepted one"},
+                         {"@odata.type": req, "id": "m2", "subject": "Declined one"},
+                         {"@odata.type": req, "id": "m3", "subject": "Not answered yet"},
+                         {"@odata.type": "#microsoft.graph.message", "id": "m4", "subject": "An ordinary email"}]
+        self.events = {"m1": {"id": "e1", "responseStatus": {"response": "accepted"}}, "m2": {},
+                       "m3": {"id": "e3", "responseStatus": {"response": "notResponded"}}}
+
+    def pages(self, url, scopes=None):
+        return iter(self.messages)
+
+    def request(self, url, method="GET", body=None, scopes=None):
+        return {"id": url.split("/")[3].split("?")[0], "event": self.events[url.split("/")[3].split("?")[0]]}
+
+
+class Requests(unittest.TestCase):
+    def test_answered_or_removed_invitations_are_found_and_the_rest_left(self):
+        found = invites.answered_requests(RequestGraph(), "folder")
+        self.assertEqual([(m["id"], m["answer"]) for m in found], [("m1", "accepted"), ("m2", "gone")])
+
+
 if __name__ == "__main__":
     unittest.main()

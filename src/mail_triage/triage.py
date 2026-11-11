@@ -168,6 +168,15 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
         seen |= pending_keys   # an invite answered elsewhere (in Outlook) drops off the queue
         new += items
         invites_new = len(items)
+        for name in config.invites.requests_folders:
+            for m in invites.answered_requests(mailbox.graph, mailbox.folder_id(name)):
+                if not dry_run:
+                    mailbox.delete(m["id"])
+                    record["items"].append({"when": dt.datetime.now().isoformat(timespec="microseconds"), "folder": name,
+                                            "received": m.get("receivedDateTime"), "from": sender(m),
+                                            "subject": m.get("subject", ""), "rule": "Answered invitations"})
+                log(f"{'would delete' if dry_run else 'deleted'}  [answered invitation: {m['answer']}] {m.get('subject')}")
+                deleted += 1
     # Still waiting from earlier runs, and still in the folder (one deleted by hand in Outlook drops out).
     carried = [item for item in previous if item.get("key") in seen and item["key"] not in {i["key"] for i in new}]
     if not dry_run:

@@ -328,6 +328,27 @@ def triage(config: Config, calendar: Calendar, raised: dict, log=print, now: dt.
     return items, seen, skipped
 
 
+ANSWERED = ("accepted", "tentativelyAccepted", "declined")
+
+
+def answered_requests(graph, folder_id: str) -> list:
+    """Invitation emails in a folder whose meeting is answered, cancelled or gone (a decline removes it).
+    Outlook deletes the invitation when you respond there; a response through Graph leaves it behind."""
+    out = []
+    query = "$top=50&$select=id,subject,from,receivedDateTime"
+    for m in graph.pages(f"/me/mailFolders/{folder_id}/messages?{query}", scopes=["Mail.ReadWrite"]):
+        if m.get("@odata.type") != "#microsoft.graph.eventMessageRequest":
+            continue
+        full = graph.request(f"/me/messages/{m['id']}?$select=id&$expand=microsoft.graph.eventMessage/event"
+                             "($select=id,responseStatus,isCancelled)", scopes=["Mail.ReadWrite", *SCOPES])
+        event = full.get("event") or {}
+        response = (event.get("responseStatus") or {}).get("response")
+        if not event.get("id") or event.get("isCancelled") or response in ANSWERED:
+            m["answer"] = "gone" if not event.get("id") else ("cancelled" if event.get("isCancelled") else response)
+            out.append(m)
+    return out
+
+
 def leave_sweep(config: Config, calendar: Calendar, start: dt.date, days: int) -> list:
     """Meetings others organise that fall in your leave and that you haven't declined: what to decline before
     you go. Each is an occurrence (calendarView), so declining one never touches the rest of its series.
