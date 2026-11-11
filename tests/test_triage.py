@@ -44,6 +44,12 @@ name = "Boss"
 sender = 'boss@example\\.com'
 action = "review"
 
+[[rule]]
+name = "Plans"
+sender = 'plans@example\\.com'
+action = "file"
+to = 'Inbox/Triage'
+
 [[flow_check]]
 flow = "Weekly report"
 output = 'out/report-*.html'
@@ -94,7 +100,7 @@ class Base(unittest.TestCase):
 
 class Settings(Base):
     def test_loads_rules_in_order_with_the_old_action_name(self):
-        self.assertEqual([r.name for r in self.config.rules], ["News", "Old name", "Digest", "Boss"])
+        self.assertEqual([r.name for r in self.config.rules], ["News", "Old name", "Digest", "Boss", "Plans"])
         self.assertEqual(self.config.rules[1].action, "delete")
         self.assertEqual(self.config.queue_file, self.dir / "queue.json")
 
@@ -120,6 +126,17 @@ class Run(Base):
         self.assertIn(("POST", "/me/messages/graph-1/move", {"destinationId": "deleteditems"}), graph.calls)
         queued = triage.queue(self.config)
         self.assertEqual([(i["n"], i["rule"]) for i in queued], [(1, "Boss"), (2, "no rule matched")])
+
+    def test_file_moves_it_to_a_folder_by_path_left_unread(self):
+        graph = FakeGraph([message(4, "plans@example.com", "Sprint 04 Plan")])
+        report = self.run_triage(graph)
+        self.assertEqual((report["filed"], report["new"], report["deleted"]), (1, 0, 0))
+        self.assertIn(("POST", "/me/messages/graph-4/move", {"destinationId": "f1"}), graph.calls)
+        self.assertFalse(any(method == "PATCH" for method, _, _ in graph.calls))   # not marked read
+        self.assertEqual(triage.deleted(self.config)[0]["to"], "Inbox/Triage")
+        (self.dir / "bad.toml").write_text('[[folder]]\nname="x"\n[[rule]]\nname="r"\nsender="a"\naction="file"\n', encoding="utf-8")
+        with self.assertRaises(ValueError):   # file needs a folder
+            cfg.load(self.dir / "bad.toml")
 
     def test_each_email_is_raised_once(self):
         graph = FakeGraph([message(2, "boss@example.com")])

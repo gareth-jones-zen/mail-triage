@@ -12,8 +12,11 @@
     mail-triage which <sender> [subject]   which rule an email would meet
 
     With [invites] in the settings, unanswered meeting invites are queued too, each with a recommendation:
-    mail-triage invite accept 3     answer a queued invite: accept, tentative or decline (a series as a whole)
+    mail-triage file 4 --to Inbox/Projects   move queued emails to a folder, left unread
+    mail-triage invite accept 3     answer a queued invite: accept, tentative or decline
         --note "..."                    a note to the organiser; --silent answers without telling them
+        --move                          with accept: move each clash you can move to its suggested slot
+        --series                        with decline: the whole series (otherwise only the instances)
     mail-triage move <event id> 2026-11-11T16:00 [16:50]   move one of your own meetings or blocks
     mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
 
@@ -72,6 +75,11 @@ def main(argv: list | None = None) -> int:
     p.add_argument("refs", nargs="+", help="numbers from `list`")
     p.add_argument("--note", default="", help="a note to the organiser")
     p.add_argument("--silent", action="store_true", help="answer without sending a response")
+    p.add_argument("--series", action="store_true", help="decline the whole series (otherwise only instances)")
+    p.add_argument("--move", action="store_true", help="with accept: move each movable clash to its suggested slot")
+    p = sub.add_parser("file", help="move queued emails to a folder, left unread")
+    p.add_argument("refs", nargs="+", help="numbers from `list`")
+    p.add_argument("--to", required=True, help="the folder's path, such as Inbox/Projects")
     p = sub.add_parser("move", help="move one of your own meetings or blocks")
     p.add_argument("event")
     p.add_argument("start", help="yyyy-mm-ddTHH:MM")
@@ -143,6 +151,9 @@ def main(argv: list | None = None) -> int:
             if args.command in ("delete", "resolve"):
                 triage.delete(config, triage.Mailbox(graph), args.refs, log)
                 return 0
+            if args.command == "file":
+                triage.file(config, triage.Mailbox(graph), args.refs, args.to, log)
+                return 0
             report = triage.run(config, triage.Mailbox(graph, args.dry_run), args.dry_run, log)
         if args.scheduled and report["new"] and config.notify == "new":
             notify(f"{report['new']} email{'s' if report['new'] > 1 else ''} to review", ["mail-triage list"])
@@ -168,7 +179,8 @@ def _calendar(args, config: cfg.Config, graph, log) -> int:
     calendar = invites.Calendar(graph)
     if args.command == "invite":
         with exclusive(f"mail-triage-run-{key(config.path)}", 600, cfg.LOCAL, what="triage run"):
-            triage.answer(config, calendar, args.refs, args.action, args.note, not args.silent, log)
+            triage.answer(config, calendar, args.refs, args.action, args.note, not args.silent, log,
+                          series=args.series, move=args.move)
         return 0
     if args.command == "move":
         event = calendar.event(args.event)
@@ -188,11 +200,14 @@ def _calendar(args, config: cfg.Config, graph, log) -> int:
         return 0
     for e in found:
         start, end = invites._times(e)
+        send = e.get("responseRequested", True)
+        note = args.note or e["note"]
         print(f"  {start:%a %d %b %H:%M}–{end:%H:%M}  {e.get('subject')}  ({invites._organiser(e)[0]}; "
-              f"{(e.get('responseStatus') or {}).get('response')})")
+              f"{(e.get('responseStatus') or {}).get('response')})" + (f'  note: "{note}"' if send else "  (no response requested)"))
         if args.decline:
-            calendar.respond(e["id"], "decline", args.note)
-    print(f"{len(found)} meeting(s) in your leave" + (": declined." if args.decline else ". `--decline` declines them."))
+            calendar.respond(e["id"], "decline", note, send)   # the occurrence: the rest of the series is untouched
+    print(f"{len(found)} meeting(s) in your leave" + (": declined, each occurrence on its own." if args.decline
+                                                      else ". `--decline` declines them (each occurrence, not the series)."))
     if args.decline:
         log(f"leave sweep: declined {len(found)} meeting(s)")
     return 0
@@ -209,7 +224,8 @@ def _deleted(items: list) -> int:
     for rule, group in sorted(by_rule.items(), key=lambda kv: -len(kv[1])):
         print(f"\n  {rule} ({len(group)})")
         for item in group:
-            print(f"    {item['received'][:10]}  {item['from']}: {item['subject'][:90]}")
+            print(f"    {item['received'][:10]}  {item['from']}: {item['subject'][:90]}"
+                  + (f"  -> filed to {item['to']}" if item.get("to") else ""))
     return 0
 
 

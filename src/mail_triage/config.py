@@ -21,7 +21,8 @@
     name = "Vendor newsletters"
     sender = '@news\\.example\\.com$'       # a regular expression on the sender's address, ignoring case
     match = 'newsletter|digest'             # optional: a regular expression on the subject and preview
-    action = "delete"                       # delete (mark read, move to Deleted Items) | review | check
+    action = "delete"                       # delete (mark read, move to Deleted Items) | review | check | file
+    to = 'Inbox/Projects'                   # for action = "file": the folder to move it to, left unread
     check = "flow-failures"                 # for action = "check": which check
     why = "News, not action."               # optional, but say why: it's what makes a rule maintainable
 
@@ -46,7 +47,7 @@ from dataclasses import dataclass, field
 APPDATA = pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home()))
 LOCAL = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / "mail-triage"
 DEFAULT_CONFIG = APPDATA / "mail-triage" / "config.toml"
-ACTIONS = {"delete", "review", "check"}
+ACTIONS = {"delete", "review", "check", "file"}
 ALIASES = {"resolve": "delete"}   # the first name for delete
 
 TEMPLATE = """\
@@ -80,6 +81,7 @@ class Rule:
     match: str | None = None
     check: str | None = None
     why: str = ""
+    to: str | None = None   # action "file": move it here, left unread
 
     def matches(self, sender: str, text: str) -> bool:
         return bool(re.search(self.sender, sender, re.I)) and (self.match is None or bool(re.search(self.match, text, re.I)))
@@ -110,10 +112,24 @@ class InviteRule:
 
 
 @dataclass
+class MovableBlock:
+    """Where one of your blocks can move to: within its day, or before the next meeting named `before`."""
+    subject: str
+    within: str | None = None    # "day"
+    before: str | None = None    # regular expression on a later meeting's subject
+
+
+@dataclass
 class Invites:
     days_ahead: int = 42
-    fixed_blocks: list = field(default_factory=list)   # own blocks that can't move (regular expressions on subject)
-    protected: list = field(default_factory=list)      # meetings never moved or declined for anything
+    fixed_blocks: list = field(default_factory=list)    # own blocks that can't move (regular expressions on subject)
+    commute_blocks: list = field(default_factory=list)  # own blocks (travel) that move only at either end of the day
+    movable: list = field(default_factory=list)         # [[movable_block]]: limits on where a block can move
+    protected: list = field(default_factory=list)       # meetings never moved or declined for anything
+    leave_note: str = "On annual leave"                 # the decline note; "<note> <start> to <end>" if over a day
+    date_format: str = "%d/%m"
+    working_hours: tuple = ("08:00", "18:00")           # where a moved block or meeting can go
+    travel_hours: tuple = ("06:00", "21:00")            # where travel can go (earlier in, later home)
     leave_pattern: str = r"^(\w+ )?(holidays?|annual leave|leave|bank holiday)\b"
     rules: list = field(default_factory=list)
 
@@ -192,7 +208,9 @@ def load(path: pathlib.Path | str | None = None) -> Config:
             raise ValueError(f"Rule {name!r} in {path} has no sender.")
         action = ALIASES.get(item.get("action", ""), item.get("action", ""))
         if action not in ACTIONS:
-            raise ValueError(f"Rule {name!r} in {path} has action {item.get('action')!r}: use delete, review or check.")
+            raise ValueError(f"Rule {name!r} in {path} has action {item.get('action')!r}: use delete, review, check or file.")
+        if action == "file" and not item.get("to"):
+            raise ValueError(f"Rule {name!r} in {path} has action file but no `to` folder.")
         if action == "check" and item.get("check") not in CHECKS:
             raise ValueError(f"Rule {name!r} in {path} needs check = one of {', '.join(sorted(CHECKS))}.")
         for key in ("sender", "match"):
@@ -202,7 +220,7 @@ def load(path: pathlib.Path | str | None = None) -> Config:
                 except re.error as error:
                     raise ValueError(f"Rule {name!r} in {path}: {key} isn't a valid regular expression ({error}).")
         config.rules.append(Rule(name=name, sender=item["sender"], action=action, match=item.get("match"),
-                                 check=item.get("check"), why=item.get("why", "")))
+                                 check=item.get("check"), why=item.get("why", ""), to=item.get("to")))
 
     for item in raw.get("flow_check", []):
         if not item.get("flow") or not item.get("output"):
@@ -229,10 +247,26 @@ def load(path: pathlib.Path | str | None = None) -> Config:
                                     organiser=item.get("organiser"), all_day=item.get("all_day"),
                                     show_as=item.get("show_as"), via_group=item.get("via_group"),
                                     optional=item.get("optional"), min_people=item.get("min_people"), why=item.get("why", "")))
+        movable = []
+        for item in raw.get("movable_block", []):
+            if not item.get("subject") or item.get("within") not in (None, "day"):
+                raise ValueError(f'A [[movable_block]] in {path} needs subject, and within (if given) is "day".')
+            movable.append(MovableBlock(item["subject"], item.get("within"), item.get("before")))
+
+        def span(name, default):
+            value = str(section.get(name, "-".join(default)))
+            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-4]):[0-5]\d", value):
+                raise ValueError(f'{name} in [invites] in {path} should look like "08:00-18:00".')
+            return tuple(value.split("-"))
         config.invites = Invites(days_ahead=int(section.get("days_ahead", 42)),
                                  fixed_blocks=list(section.get("fixed_blocks", [])),
+                                 commute_blocks=list(section.get("commute_blocks", [])), movable=movable,
                                  protected=list(section.get("protected", [])),
-                                 leave_pattern=section.get("leave_pattern", Invites.leave_pattern), rules=rules)
+                                 leave_pattern=section.get("leave_pattern", Invites.leave_pattern),
+                                 leave_note=section.get("leave_note", Invites.leave_note),
+                                 date_format=section.get("date_format", Invites.date_format),
+                                 working_hours=span("working_hours", Invites.working_hours),
+                                 travel_hours=span("travel_hours", Invites.travel_hours), rules=rules)
     if not config.folders and not config.invites:
         raise ValueError(f"{path} names no [[folder]] to triage, and no [invites].")
     return config

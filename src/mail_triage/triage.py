@@ -24,6 +24,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import pathlib
+import re
 import urllib.parse
 
 from .checks import CHECKS
@@ -84,6 +85,21 @@ class Mailbox:
                     waiting.append(f"/me/mailFolders/{folder['id']}/childFolders?$top=100")
         raise LookupError(f"No mail folder called {name!r}")
 
+    def folder_path(self, path: str) -> str:
+        """A folder by its path from the top, such as "Inbox/Projects" (/ or \\ between)."""
+        parts = [p for p in re.split(r"[/\\]", path) if p]
+        url, found = "/me/mailFolders?$top=100", None
+        for part in parts:
+            found = next((f["id"] for f in self.graph.pages(url, scopes=self.scopes)
+                          if f["displayName"].lower() == part.lower()), None)
+            if found is None:
+                raise LookupError(f"No mail folder {path!r} (no {part!r})")
+            url = f"/me/mailFolders/{found}/childFolders?$top=100"
+        return found
+
+    def file(self, message_id: str, folder_id: str) -> None:
+        self.graph.request(f"/me/messages/{message_id}/move", "POST", {"destinationId": folder_id}, scopes=SCOPES)
+
     def messages(self, folder_id: str, since: str | None) -> list:
         query = urllib.parse.urlencode({
             **({"$filter": f"receivedDateTime ge {since}T00:00:00Z"} if since else {}),
@@ -101,7 +117,7 @@ class Mailbox:
 def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> dict:
     raised = _load(config.state_file, {})
     previous = queue(config)
-    seen, new, deleted, again = set(), [], 0, 0
+    seen, new, deleted, again, filed = set(), [], 0, 0, 0
     record = _load(config.deleted_file, {"items": []})
     for folder in config.folders:
         for message in mailbox.messages(mailbox.folder_id(folder.name), folder.since):
@@ -127,6 +143,15 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
                 log(f"{'would delete' if dry_run else 'deleted'}  {label}")
                 deleted += 1
                 continue
+            if action == "file":
+                if not dry_run:
+                    mailbox.file(message["id"], mailbox.folder_path(rule.to))
+                    record["items"].append({"when": dt.datetime.now().isoformat(timespec="microseconds"), "folder": folder.name,
+                                            "received": message.get("receivedDateTime"), "from": sender(message),
+                                            "subject": message.get("subject", ""), "rule": rule.name, "to": rule.to})
+                log(f"{'would file' if dry_run else 'filed'} to {rule.to}  {label}")
+                filed += 1
+                continue
             new.append({"folder": folder.name, "id": message["id"], "key": key(message),
                         "received": message.get("receivedDateTime"), "from": sender(message),
                         "subject": message.get("subject", ""), "preview": message.get("bodyPreview", "")[:300],
@@ -149,9 +174,9 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
         record["items"] = [i for i in record["items"] if i["when"] >= cutoff]
         _save(config.deleted_file, record)
         save_queue(config, carried + new)
-    report = {"deleted": deleted, "new": len(new), "waiting": len(carried), "kept": max(0, again - len(carried)),
-              "invites": invites_new}
-    log(f"done: {deleted} deleted, {len(new)} new to review" + (f" ({invites_new} invites)" if invites_new else "")
+    report = {"deleted": deleted, "filed": filed, "new": len(new), "waiting": len(carried),
+              "kept": max(0, again - len(carried)), "invites": invites_new}
+    log(f"done: {deleted} deleted, " + (f"{filed} filed, " if filed else "") + f"{len(new)} new to review" + (f" ({invites_new} invites)" if invites_new else "")
         + f", {len(carried)} still waiting from earlier runs, {report['kept']} seen before and kept")
     return report
 
@@ -188,18 +213,63 @@ def delete(config: Config, mailbox: Mailbox, refs: list, log=print) -> int:
     return len(ids)
 
 
-def answer(config: Config, calendar, refs: list, action: str, note: str = "", send: bool = True, log=print) -> int:
-    """Answer queued invites (by number): accept, tentative or decline. A series is answered as a whole."""
+def file(config: Config, mailbox: Mailbox, refs: list, to: str, log=print) -> int:
+    """Move queued emails to a folder (left unread), and off the queue."""
+    chosen = pick(config, refs)
+    if any(i.get("type") == "invite" for i in chosen):
+        raise LookupError("An invite can't be filed: answer it with `mail-triage invite`.")
+    folder_id = mailbox.folder_path(to)
+    for item in chosen:
+        mailbox.file(item["id"], folder_id)
+        log(f"filed to {to} by hand  {item['from']}: {item['subject']}")
+    gone = {i["id"] for i in chosen}
+    save_queue(config, [i for i in queue(config) if i["id"] not in gone])
+    return len(chosen)
+
+
+def answer(config: Config, calendar, refs: list, action: str, note: str = "", send: bool = True, log=print,
+           series: bool = False, move: bool = False) -> int:
+    """Answer queued invites (by number): accept, tentative or decline.
+
+    - **Accepting a series accepts the whole series.**
+    - **Declining declines instances, never the series**: the occurrences the recommendation names (leave or
+      a fixed clash), or else the first one queued. `series=True` declines the whole series.
+    - **A decline uses the recommendation's note** (the leave note) unless one is given.
+    - **No response is sent where the organiser didn't ask for one** (Graph refuses it otherwise).
+    - `move=True` with accept also moves each movable clash to its suggested slot.
+    - An accepted series whose recommendation also declines some occurrences stays queued until they're declined.
+    """
     chosen = pick(config, refs)
     wrong = [i["subject"] for i in chosen if i.get("type") != "invite"]
     if wrong:
         raise LookupError(f"{wrong[0]} is an email, not an invite.")
+    if series and any(not i.get("series") for i in chosen):
+        raise LookupError("--series is for a recurring meeting; that one isn't.")
+    keep = []
     for item in chosen:
-        calendar.respond(item["id"], action, note, send)
+        respond = send and item.get("responseRequested", True)
+        if action == "decline":
+            targets = [item["series"]] if series else (item.get("decline") or [item["occurrence"]])
+            text = note or item.get("note", "")
+        else:
+            targets, text = [item.get("series") or item["occurrence"]], note
+        for target in targets:
+            calendar.respond(target, action, text, respond)
         done = {"accept": "accepted", "tentative": "accepted tentatively", "decline": "declined"}[action]
-        log(f"invite {done}{'' if send else ' (no response sent)'}  "
-            f"{item['from']}: {item['subject']}" + (f" | note: {note}" if note else ""))
-    gone = {i["id"] for i in chosen}
+        what = ("the whole series" if series or (action != "decline" and item.get("series"))
+                else f"{len(targets)} occurrence{'s' if len(targets) > 1 else ''}")
+        log(f"invite {done} ({what}){'' if respond else ' (no response sent)'}  "
+            f"{item['from']}: {item['subject']}" + (f" | note: {text}" if text and respond else ""))
+        if move and action == "accept":
+            for c in item.get("clashes", []):
+                if c.get("to"):
+                    start, end = dt.datetime.fromisoformat(c["to"]), dt.datetime.fromisoformat(c["to_end"])
+                    calendar.move(c["id"], start, end)
+                    log(f"moved  {c['subject']}: {c['start'][5:16]} -> {start:%a %d %b %H:%M}–{end:%H:%M}")
+        if action != "decline" and item.get("decline") and item.get("recommendation", "").startswith("accept, and decline"):
+            keep.append(item["id"])
+            log(f"  still queued: decline {len(item['decline'])} occurrence(s) with `mail-triage invite decline {item.get('n')}`")
+    gone = {i["id"] for i in chosen} - set(keep)
     save_queue(config, [i for i in queue(config) if i["id"] not in gone])
     return len(chosen)
 
