@@ -208,7 +208,7 @@ mail-triage deleted              # each one cancelled or moved (or, with act = f
 |---|---|
 | Nobody's off (a half day counts only if it overlaps the meeting) | Does nothing |
 | Whoever's off is off at least `cancel_days` (3) of that Monday-to-Friday week | Cancels the occurrence, with the note for whoever's off: `report_note`, `my_note`, or `bank_holiday_note` on a bank holiday |
-| Whoever's off is off for less of the week | Moves it to the nearest free slot that week: same length, within `working_hours`, on a day neither of you is off, with nothing busy, out of office or tentative in either calendar. Nearest by time from the original start; on a tie, the later |
+| Whoever's off is off for less of the week | Moves it to the nearest free slot that week: same length, within `working_hours`, on a day neither of you is off, with nothing busy, out of office or tentative in either calendar. **The same time of day on the nearest day** (a Wednesday 11:00 goes to Tuesday or Thursday 11:00); only if that time is free on no day, the slot nearest in time. On a tie, the later |
 | No such slot, or a half day whose half isn't known, or their free/busy can't be read | Queues it, once, with the reason and a suggestion: cancel, or the nearest free slot in the week either side |
 
 - **Who's off.** A report: your own diary entries named `<Full Name> annual leave` or `<Full Name> on leave`,

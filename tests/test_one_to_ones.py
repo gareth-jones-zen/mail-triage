@@ -126,15 +126,22 @@ class OneToOnes(Base):
 
     def test_off_less_of_the_week_moves_to_the_nearest_free_slot(self):
         found = self.plan([away("l", "Jordan Lee on leave", "2026-11-25", "2026-11-25")])
-        # Nearest in time: first thing Thursday (16.5h after) beats the end of Tuesday (22.5h before)
+        # The same time on the nearest day: Tue and Thu 15:30 are both a day away, so the later, Thursday
         self.assertEqual(found["jordan-11-25"]["action"], "move")
-        self.assertEqual(found["jordan-11-25"]["to"], (at("2026-11-26", "08:00"), at("2026-11-26", "08:50")))
+        self.assertEqual(found["jordan-11-25"]["to"], (at("2026-11-26", "15:30"), at("2026-11-26", "16:20")))
+
+    def test_same_time_taken_on_the_nearest_days_falls_back_to_nearest_in_time(self):
+        busy = [ev(f"w{d}", "Workshop", f"2026-11-{d}", "15:00", "17:00", response="accepted") for d in (23, 24, 26, 27)]
+        found = self.plan([away("l", "Jordan Lee on leave", "2026-11-25", "2026-11-25")] + busy)
+        # 15:30 isn't free on any day, so the nearest slot in time: Thu 17:00 (25.5h) vs Tue 14:10 (25.3h)
+        to = found["jordan-11-25"]["to"][0]
+        self.assertNotEqual(to.time(), dt.time(15, 30))
 
     def test_on_a_tie_the_later_slot(self):
         busy = [ev("am", "Workshop", "2026-11-26", "08:00", "14:00", response="accepted")]
         found = self.plan([away("l", "Jordan Lee on leave", "2026-11-25", "2026-11-25")] + busy)
-        # Tue 17:00 and Thu 14:00 are both 22.5h away
-        self.assertEqual(found["jordan-11-25"]["to"], (at("2026-11-26", "14:00"), at("2026-11-26", "14:50")))
+        # Thursday morning's workshop doesn't touch 15:30, so still Thursday 15:30 (the later of Tue and Thu)
+        self.assertEqual(found["jordan-11-25"]["to"], (at("2026-11-26", "15:30"), at("2026-11-26", "16:20")))
 
     def test_a_move_needs_both_calendars_free(self):
         # Alex: Monday and Friday taken, Thursday out of the office (oof) in the morning and tentative after
@@ -208,7 +215,7 @@ class OneToOnes(Base):
         d = found["jordan-11-25"]
         self.assertEqual(d["action"], "raise")
         self.assertIn("no time that week when you're both free", d["why"])
-        self.assertIn("Mon 30 Nov 08:00–08:50 (outside its week)", d["suggest"])     # nearest in time, either side
+        self.assertIn("Mon 30 Nov 15:30–16:20 (outside its week)", d["suggest"])     # the same time, nearest day either side
 
     def test_unreadable_free_busy_is_raised(self):
         self.config.one_to_ones.reports[0].email = "unreadable@example.com"
@@ -247,9 +254,9 @@ class Runs(Base):
         items, acted, _, _ = self.run_with(self.LEAVE)
         self.assertEqual(items, [])
         self.assertEqual(self.calendar.cancels, [("jordan-11-18", "Cancelling as you're on leave - enjoy the time off")])
-        self.assertEqual(self.calendar.moves, [("robin-11-25", at("2026-11-24", "17:00"), at("2026-11-24", "17:50"))])
+        self.assertEqual(self.calendar.moves, [("robin-11-25", at("2026-11-26", "11:00"), at("2026-11-26", "11:50"))])
         self.assertEqual([a["rule"] for a in acted], ["1:1 cancelled: leave", "1:1 moved: leave"])
-        self.assertIn("moved to Tue 24 Nov 17:00–17:50", acted[1]["why"])
+        self.assertIn("moved to Thu 26 Nov 11:00–11:50", acted[1]["why"])
         self.assertEqual(self.calendar.answers, [])
 
     def test_act_false_records_each_would_do_once_and_changes_nothing(self):

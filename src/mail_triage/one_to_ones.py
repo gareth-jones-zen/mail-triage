@@ -152,7 +152,9 @@ def _busy(events: list, meeting: dict) -> list:
 
 def nearest(config: Config, start: dt.datetime, length: dt.timedelta, days: list, busy: list,
             now: dt.datetime) -> tuple | None:
-    """The free slot nearest `start` on these days, within working hours; on a tie, the later one."""
+    """The free slot to move a meeting to: the same time of day on the nearest day (GJ, 12 Nov 2026: a
+    Wednesday 11:00 goes to Tuesday or Thursday 11:00, not Tuesday 17:00), and only if that time isn't free on
+    any of these days, the slot nearest in time. Within working hours; on a tie, the later one."""
     hours = config.invites.working_hours
     options = []
     for day in days:
@@ -164,7 +166,11 @@ def nearest(config: Config, start: dt.datetime, length: dt.timedelta, days: list
             t += STEP
     if not options:
         return None
-    best = min(options, key=lambda t: (abs((t - start).total_seconds()), -t.timestamp()))
+    same = [t for t in options if t.time() == start.time()]
+    if same:
+        best = min(same, key=lambda t: (abs((t.date() - start.date()).days), -t.timestamp()))
+    else:
+        best = min(options, key=lambda t: (abs((t - start).total_seconds()), -t.timestamp()))
     return best, best + length
 
 
