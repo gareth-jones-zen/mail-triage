@@ -212,7 +212,7 @@ public sealed class Shortened : IDisposable
     private readonly Settings config;
     private readonly DateTime now = new(2026, 11, 11, 9, 0, 0);
 
-    public Shortened() => config = dir.Settings(InviteSettings.Replace("[invites]\n", "[invites]\naccept_shortened = true\n"));
+    public Shortened() => config = dir.Settings(InviteSettings.Replace("[invites]", "[invites]\naccept_shortened = true"));
 
     public void Dispose() => dir.Dispose();
 
@@ -420,7 +420,7 @@ public sealed class Proposals_ : IDisposable
 
     public Proposals_()
     {
-        config = dir.Settings(InviteSettings.Replace("[invites]\n", "[invites]\nproposals_folders = ['Inbox']\naccept_proposals = true\n"));
+        config = dir.Settings(InviteSettings.Replace("[invites]", "[invites]\nproposals_folders = ['Inbox']\naccept_proposals = true"));
         (string, string, string)[] yahya = [("Alex Smith", Me, "required"), ("Yahya Patel", "yahya@example.com", "required")];
         diary =
         [

@@ -416,7 +416,8 @@ public sealed class Settings
         if (!File.Exists(path))
         {
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, Template.Replace("\n", "\r\n"), new UTF8Encoding(false));
+            // CRLF, as Python's text mode wrote it, whatever line ends the source file has.
+            File.WriteAllText(path, Template.Replace("\r\n", "\n").Replace("\n", "\r\n"), new UTF8Encoding(false));
         }
         return path;
     }
