@@ -37,6 +37,9 @@ removes every future occurrence from your calendar. A series is accepted as a wh
 An invite is raised once: a recurring series once for the whole series, a one-off once per start time (so a
 moved meeting comes back). One week changed on its own (an exception) of an answered series is raised and
 answered like a one-off; answering a series doesn't answer its exceptions, so accepting one accepts them too. Answering one takes it off the queue. Graph with Calendars.ReadWrite.
+
+Calendar also cancels your own meetings and reads other people's free/busy (getSchedule), for one_to_ones.py:
+your 1:1s with your reports, cancelled or moved when either of you is on leave (12 Nov 2026).
 """
 
 from __future__ import annotations
@@ -48,7 +51,7 @@ import urllib.parse
 from .config import Config, InviteRule
 
 FIELDS = ("id,subject,start,end,isAllDay,showAs,isCancelled,isOrganizer,responseStatus,responseRequested,"
-          "organizer,attendees,type,seriesMasterId,webLink,bodyPreview")
+          "organizer,attendees,type,seriesMasterId,webLink,bodyPreview,categories")
 PENDING = ("none", "notResponded")
 SCOPES = ["Calendars.ReadWrite"]
 COMMITTED = ("accepted", "tentativelyAccepted", "organizer")
@@ -76,6 +79,23 @@ class Calendar:
     def move(self, event_id: str, start: dt.datetime, end: dt.datetime) -> None:
         when = lambda t: {"dateTime": t.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": self.timezone}   # noqa: E731
         self.graph.request(f"/me/events/{event_id}", "PATCH", {"start": when(start), "end": when(end)}, scopes=SCOPES)
+
+    def cancel(self, event_id: str, comment: str = "") -> None:
+        """Cancel a meeting you organise; attendees get the comment. An occurrence's id cancels that one only."""
+        self.graph.request(f"/me/events/{event_id}/cancel", "POST", {"comment": comment}, scopes=SCOPES)
+
+    def schedule(self, address: str, start: dt.datetime, end: dt.datetime) -> list | None:
+        """Someone's free/busy between two local times, as (start, end, status) in local time; None if Graph
+        couldn't read it (it reports that per person, not as an error)."""
+        when = lambda t: {"dateTime": t.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": self.timezone}   # noqa: E731
+        body = {"schedules": [address], "startTime": when(start), "endTime": when(end), "availabilityViewInterval": 15}
+        found = self.graph.request("/me/calendar/getSchedule", "POST", body, scopes=SCOPES,
+                                   headers={"Prefer": f'outlook.timezone="{self.timezone}"'})
+        person = (found.get("value") or [{}])[0]
+        if person.get("error") or "scheduleItems" not in person:
+            return None
+        return [(dt.datetime.fromisoformat(i["start"]["dateTime"][:19]), dt.datetime.fromisoformat(i["end"]["dateTime"][:19]),
+                 i.get("status")) for i in person["scheduleItems"]]
 
     def event(self, event_id: str) -> dict:
         return self.graph.request(f"/me/events/{event_id}?$select={FIELDS}", scopes=SCOPES,

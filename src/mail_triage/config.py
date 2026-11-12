@@ -35,6 +35,21 @@
     output = '~/OneDrive/Reports/report-*.html'      # what a successful run writes
     pending = '~/OneDrive/Reports/requests/*.txt'    # optional: what a run consumes
 
+    [one_to_ones]                           # needs [invites]: your weekly 1:1s, when either of you is on leave
+    act = false                             # false: only record what it would do (`mail-triage deleted`)
+    max_actions = 20                        # at most this many cancels or moves a run
+    cancel_days = 3                         # cancel if whoever's off is off this many days of the week; else move
+    midday = "13:00"                        # a morning half day ends here, an afternoon one starts
+    bank_holiday_categories = ["Holiday"]   # your all-day entries in these categories are bank holidays
+    report_note = "Cancelling as you're on leave - enjoy the time off"
+    my_note = "Cancelling as I'm on leave"
+    bank_holiday_note = "Cancelling for the bank holiday"
+
+    [[one_to_one]]
+    name = "Sam Jones"                      # as in your "Sam Jones annual leave" / "Sam Jones on leave" entries
+    email = "sam@example.com"               # must be in the meeting
+    subject = "Weekly 1-2-1 - Sam"          # optional: default subject_format, "Weekly 1-2-1 - {first}"
+
 An email no rule matches is queued, never deleted. Paths may use ~ and %VARIABLES%; relative paths
 are relative to the settings file. Regular expressions are Python's; write them in TOML's 'literal
 strings' so backslashes are taken as they are.
@@ -145,6 +160,30 @@ class Invites:
 
 
 @dataclass
+class OneToOne:
+    """One report's weekly 1:1: matched by its exact subject, a meeting you organise with them in it."""
+    name: str          # their full name, as in your "<name> annual leave" entries
+    email: str
+    subject: str
+
+
+@dataclass
+class OneToOnes:
+    """[one_to_ones]: cancel or move your 1:1s with your reports when either of you is off (one_to_ones.py)."""
+    reports: list = field(default_factory=list)
+    act: bool = False                    # false: record what it would do, change nothing
+    max_actions: int = 20
+    cancel_days: float = 3
+    midday: str = "13:00"
+    days_ahead: int | None = None        # default: [invites] days_ahead
+    bank_holiday_categories: list = field(default_factory=lambda: ["Holiday"])
+    leave_pattern: str = r"^{name}\s+(annual leave|on leave)\b"
+    report_note: str = "Cancelling as you're on leave - enjoy the time off"
+    my_note: str = "Cancelling as I'm on leave"
+    bank_holiday_note: str = "Cancelling for the bank holiday"
+
+
+@dataclass
 class Config:
     path: pathlib.Path
     folders: list[Folder] = field(default_factory=list)
@@ -164,6 +203,7 @@ class Config:
     weekdays: bool = True
     email: str | None = None             # your address (default: login_hint), for telling you from others in invites
     invites: Invites | None = None       # [invites]: triage meeting invites too (invites.py)
+    one_to_ones: OneToOnes | None = None # [one_to_ones]: your 1:1s and leave (one_to_ones.py)
 
     def rule_for(self, sender: str, text: str, folder: Folder | None = None) -> Rule | None:
         """The first rule that matches and applies in this folder. A rule naming folders applies only in
@@ -294,6 +334,30 @@ def load(path: pathlib.Path | str | None = None) -> Config:
                                  accept_shortened=bool(section.get("accept_shortened", False)),
                                  proposals_folders=list(section.get("proposals_folders", [])),
                                  accept_proposals=bool(section.get("accept_proposals", False)), rules=rules)
+    if "one_to_ones" in raw:
+        section = raw["one_to_ones"]
+        if not config.invites:
+            raise ValueError(f"[one_to_ones] in {path} needs an [invites] section (your email, working_hours, leave_pattern).")
+        midday = str(section.get("midday", OneToOnes.midday))
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", midday):
+            raise ValueError(f'midday in [one_to_ones] in {path} should look like "13:00".')
+        form = section.get("subject_format", "Weekly 1-2-1 - {first}")
+        reports = []
+        for item in raw.get("one_to_one", []):
+            if not item.get("name") or not item.get("email"):
+                raise ValueError(f"A [[one_to_one]] in {path} needs name and email.")
+            reports.append(OneToOne(item["name"], item["email"].lower(),
+                                    item.get("subject") or form.format(first=item["name"].split()[0], name=item["name"])))
+        pattern = section.get("leave_pattern", OneToOnes.leave_pattern)
+        if "{name}" not in pattern:
+            raise ValueError(f"leave_pattern in [one_to_ones] in {path} needs {{name}}, where the person's name goes.")
+        config.one_to_ones = OneToOnes(
+            reports=reports, act=bool(section.get("act", False)), max_actions=int(section.get("max_actions", 20)),
+            cancel_days=float(section.get("cancel_days", 3)), midday=midday,
+            days_ahead=int(section["days_ahead"]) if section.get("days_ahead") else None,
+            bank_holiday_categories=list(section.get("bank_holiday_categories", ["Holiday"])), leave_pattern=pattern,
+            report_note=section.get("report_note", OneToOnes.report_note), my_note=section.get("my_note", OneToOnes.my_note),
+            bank_holiday_note=section.get("bank_holiday_note", OneToOnes.bank_holiday_note))
     if not config.folders and not config.invites:
         raise ValueError(f"{path} names no [[folder]] to triage, and no [invites].")
     return config

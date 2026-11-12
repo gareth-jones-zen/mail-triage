@@ -19,6 +19,7 @@
         --series                        with decline: the whole series (otherwise only the instances)
     mail-triage move <event id> 2026-11-11T16:00 [16:50]   move one of your own meetings or blocks
     mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
+    mail-triage one-to-ones         with [one_to_ones]: what each run would do with your 1:1s and leave (changes nothing)
 
     mail-triage watch              run now, then every every_minutes in working hours; what autostart runs
     mail-triage autostart on        the watcher at every logon, and now (off, status)
@@ -88,6 +89,9 @@ def main(argv: list | None = None) -> int:
     p.add_argument("--days", type=int, default=60)
     p.add_argument("--decline", action="store_true", help="decline them (each occurrence)")
     p.add_argument("--note", default="", help="a note to each organiser")
+    p = sub.add_parser("one-to-ones", help="what a run would do with your 1:1s and leave; changes nothing")
+    p.add_argument("--days", type=int, help="how far ahead (default: days_ahead)")
+    p.add_argument("--dry-run", action="store_true", help="the default: this command never changes anything")
     p = sub.add_parser("autostart", help="run daily and at logon (Task Scheduler)")
     p.add_argument("action", choices=["on", "off", "status"])
     args = parser.parse_args(argv)
@@ -142,6 +146,8 @@ def main(argv: list | None = None) -> int:
             graph.token(triage.SCOPES, interactive=True)
             print("Signed in.")
             return 0
+        if args.command == "one-to-ones":
+            return _one_to_ones(args, config, graph)
         if args.command in ("invite", "move", "leave"):
             if not config.invites:
                 print(f"{config.path} has no [invites] section.", file=sys.stderr)
@@ -213,6 +219,25 @@ def _calendar(args, config: cfg.Config, graph, log) -> int:
     return 0
 
 
+def _one_to_ones(args, config: cfg.Config, graph) -> int:
+    """A preview: it only reads (your calendar, and your reports' free/busy)."""
+    from . import invites, one_to_ones
+    if not config.one_to_ones:
+        print(f"{config.path} has no [one_to_ones] section.", file=sys.stderr)
+        return 2
+    found = one_to_ones.plan(config, invites.Calendar(graph), days_ahead=args.days)
+    days = args.days or config.one_to_ones.days_ahead or config.invites.days_ahead
+    if not found:
+        print(f"Nobody's off for any of your 1:1s in the next {days} days.")
+        return 0
+    for d in found:
+        print("  " + one_to_ones.describe(d))
+    mode = "acts on these" if config.one_to_ones.act else "only records these (act = false)"
+    print(f"{len(found)} 1:1(s) in the next {days} days; a run {mode}"
+          + (f", up to {config.one_to_ones.max_actions} changes at a time." if config.one_to_ones.act else "."))
+    return 0
+
+
 def _deleted(items: list) -> int:
     if not items:
         print("Nothing deleted by the rules since the queue was last cleared.")
@@ -226,7 +251,8 @@ def _deleted(items: list) -> int:
         for item in group:
             print(f"    {item['received'][:10]}  {item['from']}: {item['subject'][:90]}"
                   + (f"  -> filed to {item['to']}" if item.get("to") else "")
-                  + (f"  -> accepted ({item['accepted']})" if item.get("accepted") else ""))
+                  + (f"  -> accepted ({item['accepted']})" if item.get("accepted") else "")
+                  + (f"  -> {item['did']}" if item.get("did") else ""))
     return 0
 
 

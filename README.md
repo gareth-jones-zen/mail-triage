@@ -189,12 +189,67 @@ action = "skip"                  # or "review": always raise
 # also: organiser, via_group, optional, min_people (all must hold)
 ```
 
+## Your 1:1s, when someone's on leave
+
+With a `[one_to_ones]` section (it needs `[invites]`), each run also looks after the weekly 1:1s you hold with
+your reports: when either of you is off, the occurrence is cancelled or moved. **The first rule that changes your
+own meetings rather than answering someone else's**, so it starts with `act = false`, which only records what it
+would do.
+
+```
+mail-triage one-to-ones          # what a run would do in the next days_ahead days; changes nothing
+  Wed 18 Nov 15:30–16:20  Sam Jones: CANCEL (Sam Jones is on leave Wed 18 Nov (Sam off 3 of 5 days that week)) note: "Cancelling as you're on leave - enjoy the time off"
+  Wed 02 Dec 08:45–09:35  Sam Jones: MOVE to Tue 01 Dec 08:15–09:05 (Sam Jones is on leave Wed 02 Dec (Sam off 1 of 5 days that week))
+  Wed 09 Dec 15:30–16:20  Sam Jones: ASK (you have a half day Wed 09 Dec and which half isn't known). Suggest: cancel it, or move it to ...
+mail-triage deleted              # each one cancelled or moved (or, with act = false, that would have been), by rule
+```
+
+| At the 1:1's time | It |
+|---|---|
+| Nobody's off (a half day counts only if it overlaps the meeting) | Does nothing |
+| Whoever's off is off at least `cancel_days` (3) of that Monday-to-Friday week | Cancels the occurrence, with the note for whoever's off: `report_note`, `my_note`, or `bank_holiday_note` on a bank holiday |
+| Whoever's off is off for less of the week | Moves it to the nearest free slot that week: same length, within `working_hours`, on a day neither of you is off, with nothing busy, out of office or tentative in either calendar. Nearest by time from the original start; on a tie, the later |
+| No such slot, or a half day whose half isn't known, or their free/busy can't be read | Queues it, once, with the reason and a suggestion: cancel, or the nearest free slot in the week either side |
+
+- **Who's off.** A report: your own diary entries named `<Full Name> annual leave` or `<Full Name> on leave`,
+  optionally with a half: `on leave PM`, `annual leave (AM)`, and on longer leave `(from PM)` (the first day is
+  the afternoon only) or `(to AM)` (the last day is the morning only); `half` with no half is a half day of
+  unknown half. You: your `leave_pattern` entries. People First enters leave as `Holiday (<job title>)`, 00:00
+  to 23:59 and not all-day: every day it touches is a full day, and `Holiday (half day) (<job title>)` is a half
+  day of unknown half. Bank holidays: your all-day entries in a `bank_holiday_categories` category (Outlook's
+  UK holidays are in "Holiday"), and entries named "Bank holiday". They count as a day off for both of you.
+- **Their free/busy** comes from Graph's getSchedule, one week at a time. Like yours, anything busy, out of
+  office or tentative holds the time; the 1:1 itself doesn't.
+- **Only the occurrence, never the series**, and only meetings you organise with that report in them, matched by
+  their exact subject. Anything `protected` (your manager's 1:1, if you send it) is never touched.
+- **`act = false`** records each "would be cancelled" or "would be moved" once, for `mail-triage deleted`, and
+  changes nothing. **At most `max_actions` changes a run** (20). It's idempotent: a cancelled occurrence is
+  gone, and a moved one no longer clashes with the leave.
+- A queued one can't be deleted, filed or answered like an email or an invite: change it in Outlook (or with
+  `mail-triage move`), then `keep` it.
+
+```toml
+[one_to_ones]
+act = false                       # true: cancel and move; false: only record what it would do
+# max_actions = 20; cancel_days = 3; midday = "13:00"; days_ahead = 42 (default: [invites] days_ahead)
+# bank_holiday_categories = ["Holiday"]; subject_format = "Weekly 1-2-1 - {first}"
+# leave_pattern = '^{name}\s+(annual leave|on leave)\b'
+# report_note = "Cancelling as you're on leave - enjoy the time off"
+# my_note = "Cancelling as I'm on leave"; bank_holiday_note = "Cancelling for the bank holiday"
+
+[[one_to_one]]
+name = "Sam Jones"                # as in your "Sam Jones annual leave" entries
+email = "sam@example.com"         # must be in the meeting
+# subject = "Weekly 1-2-1 - Sam"  # default: subject_format
+```
+
 ## The queue file
 
 JSON, so another program (an assistant, a script) can work from it. An invite's item also has
 `"type": "invite"`, `"recommendation"`, `"series"`, `"occurrence"`, `"occurrences"`, `"decline"` (the occurrences to
 decline), `"note"`, `"responseRequested"` and `"clashes"` (each with `"to"` and `"to_end"` if it can move), and its
-`folder` is `"Calendar"`:
+`folder` is `"Calendar"`. A 1:1 that `[one_to_ones]` couldn't settle has `"type": "one-to-one"`, the occurrence's id,
+the report's name in `"from"`, and the reason and suggestion in `"check"`:
 
 ```json
 {"checked": "2026-11-10T09:00:00", "review": [{"n": 1, "folder": "Newsletters", "id": "<Graph id>",

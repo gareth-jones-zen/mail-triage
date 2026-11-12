@@ -10,7 +10,11 @@
   `delete`, `keep` or `clear` it.
 - **What the rules delete is recorded** (deleted_file), so it can be reviewed: `mail-triage deleted` lists
   what went since the queue was last cleared, by rule. Running unattended, that's how a rule that has
-  started catching the wrong mail gets noticed (10 Nov 2026). Kept for KEEP_DAYS.
+  started catching the wrong mail gets noticed (10 Nov 2026). Kept for KEEP_DAYS. So is everything the
+  calendar rules did on their own (accepted, moved, cancelled), and with [one_to_ones] `act = false`, what
+  they would have done.
+- **[one_to_ones]** (one_to_ones.py): each run also cancels or moves your 1:1s with your reports when either
+  of you is on leave, and queues any it can't settle.
 
 The queue file is JSON, so another program (an assistant, a script) can read it:
 
@@ -185,6 +189,15 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
         seen |= pending_keys   # an invite answered elsewhere (in Outlook) drops off the queue
         new += items
         invites_new = len(items)
+        if config.one_to_ones:
+            from . import one_to_ones
+            o_items, o_acted, o_seen = one_to_ones.run(config, invites.Calendar(mailbox.graph), raised, log, dry_run)
+            new += o_items
+            seen |= o_seen
+            for a in o_acted:
+                record["items"].append({"when": dt.datetime.now().isoformat(timespec="microseconds"), "folder": "Calendar",
+                                        "received": a["received"], "from": a["from"], "subject": a["subject"],
+                                        "rule": a["rule"], "did": a["why"]})
         for name in config.invites.requests_folders:
             for m in invites.answered_requests(mailbox.graph, mailbox.folder_id(name)):
                 if not dry_run:
@@ -233,6 +246,10 @@ def delete(config: Config, mailbox: Mailbox, refs: list, log=print) -> int:
     invites = [items[i]["subject"] for i in ids if items.get(i, {}).get("type") == "invite"]
     if invites:
         raise LookupError(f"{invites[0]} is an invite, not an email: answer it with `mail-triage invite decline <n>`.")
+    meetings = [items[i]["subject"] for i in ids if items.get(i, {}).get("type") == "one-to-one"]
+    if meetings:
+        raise LookupError(f"{meetings[0]} is your own meeting, not an email: change it in Outlook (or `mail-triage move`), "
+                          "then `mail-triage keep <n>`.")
     for message_id in ids:
         mailbox.delete(message_id)
         item = items.get(message_id)
@@ -244,8 +261,8 @@ def delete(config: Config, mailbox: Mailbox, refs: list, log=print) -> int:
 def file(config: Config, mailbox: Mailbox, refs: list, to: str, log=print) -> int:
     """Move queued emails to a folder (left unread), and off the queue."""
     chosen = pick(config, refs)
-    if any(i.get("type") == "invite" for i in chosen):
-        raise LookupError("An invite can't be filed: answer it with `mail-triage invite`.")
+    if any(i.get("type") in ("invite", "one-to-one") for i in chosen):
+        raise LookupError("A meeting can't be filed: answer an invite with `mail-triage invite`.")
     folder_id = mailbox.folder_path(to)
     for item in chosen:
         mailbox.file(item["id"], folder_id)
@@ -270,7 +287,7 @@ def answer(config: Config, calendar, refs: list, action: str, note: str = "", se
     chosen = pick(config, refs)
     wrong = [i["subject"] for i in chosen if i.get("type") != "invite"]
     if wrong:
-        raise LookupError(f"{wrong[0]} is an email, not an invite.")
+        raise LookupError(f"{wrong[0]} isn't an invite.")
     if series and any(not i.get("series") for i in chosen):
         raise LookupError("--series is for a recurring meeting; that one isn't.")
     keep = []
