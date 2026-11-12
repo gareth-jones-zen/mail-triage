@@ -164,7 +164,16 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
     invites_new = 0
     if config.invites:
         from . import invites
-        items, pending_keys, _ = invites.triage(config, invites.Calendar(mailbox.graph), raised, log)
+        # The first run has nothing to compare with, so it only remembers what's accepted.
+        accepted, acted = _load(config.accepted_file, {}), []
+        items, pending_keys, _ = invites.triage(config, invites.Calendar(mailbox.graph), raised, log,
+                                                accepted=accepted, acted=acted, dry_run=dry_run)
+        if not dry_run:
+            _save(config.accepted_file, accepted)
+        for a in acted:
+            record["items"].append({"when": dt.datetime.now().isoformat(timespec="microseconds"), "folder": "Calendar",
+                                    "received": a["received"], "from": a["from"], "subject": a["subject"],
+                                    "rule": "Accepted: already accepted, only shortened", "accepted": a["why"]})
         seen |= pending_keys   # an invite answered elsewhere (in Outlook) drops off the queue
         new += items
         invites_new = len(items)

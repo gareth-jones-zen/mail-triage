@@ -19,8 +19,14 @@ something already accepted (17)**; with no clash, 78 of 100 invites were accepte
 - **No clash:** accept, noting a new recurring series (it costs more than a one-off), being optional or
   invited through a group, a broadcast (over 50 people) or an outside organiser.
 - **[[invite_rule]] "skip"** drops what needs no response at all: a colleague's leave sent as an invite, a
-  webinar to a distribution list. **Nothing answers on its own yet:** rules that act come later, one class at
-  a time, once the advice has proved itself.
+  webinar to a distribution list.
+- **Only shortened (accept_shortened):** a meeting you'd already accepted whose organiser has only shortened
+  it is accepted without asking. Changing the time resets your response, so the invite comes back as
+  unanswered; the tool can only tell it was accepted by remembering (accepted_file), each run, the meetings
+  you've accepted and their times. **Every occurrence remembered must now sit inside its old slot, and at
+  least one be shorter.** New occurrences after the last remembered one (a series extended) are fine;
+  anything else unremembered, or moved outside its old slot, is raised as usual. The first class that
+  answers on its own (11 Nov 2026); the rest come one class at a time, once the advice has proved itself.
 
 **A decline is for the instance, never the series**, unless you ask for the series: declining a series
 removes every future occurrence from your calendar. A series is accepted as a whole.
@@ -288,8 +294,47 @@ def key(event: dict) -> str:
     return f"invite:{event['id']}@{event['start']['dateTime'][:16]}"
 
 
-def triage(config: Config, calendar: Calendar, raised: dict, log=print, now: dt.datetime | None = None) -> tuple:
-    """(new queue items, the keys of every pending invite seen, skipped count)."""
+def slot_key(event: dict) -> str:
+    """One meeting, stable when its time changes: an occurrence by its series and day, a one-off by its id."""
+    if event.get("seriesMasterId"):
+        return f"{event['seriesMasterId']}@{event['start']['dateTime'][:10]}"
+    return event["id"]
+
+
+def remember(events: list) -> dict:
+    """The meetings others organise that you've accepted, and their times: what accept_shortened compares with."""
+    return {slot_key(e): [e["start"]["dateTime"][:16], e["end"]["dateTime"][:16]] for e in events
+            if not e.get("isOrganizer") and not e.get("isCancelled")
+            and (e.get("responseStatus") or {}).get("response") == "accepted"}
+
+
+def shortened(group: list, accepted: dict) -> str | None:
+    """Why this unanswered invite is a meeting you'd accepted that has only been shortened, or None if it isn't."""
+    before, last = [], None
+    for e in group:
+        old = accepted.get(slot_key(e))
+        if old is None:
+            continue
+        start, end = _times(e)
+        was = tuple(dt.datetime.fromisoformat(t) for t in old)
+        if start < was[0] or end > was[1]:
+            return None
+        before.append((was, (start, end)))
+        last = max(last or start, start)
+    if not before or not any(new[1] - new[0] < was[1] - was[0] for was, new in before):
+        return None
+    if any(slot_key(e) not in accepted and _times(e)[0] < last for e in group):
+        return None   # an occurrence you hadn't accepted, among ones you had: more than a shortening
+    (was, new) = before[0]
+    return (f"already accepted, only shortened: {was[0]:%H:%M}–{was[1]:%H:%M} to {new[0]:%H:%M}–{new[1]:%H:%M}"
+            + (f" ({len(before)} occurrences)" if len(before) > 1 else ""))
+
+
+def triage(config: Config, calendar: Calendar, raised: dict, log=print, now: dt.datetime | None = None,
+           accepted: dict | None = None, acted: list | None = None, dry_run: bool = False) -> tuple:
+    """(new queue items, the keys of every pending invite seen, skipped count).
+    accepted: what the last run remembered (accept_shortened), replaced in place with this run's. acted: each
+    invite answered without asking is appended to it. dry_run: answers nothing."""
     now = now or dt.datetime.now()
     events = calendar.events(now.date(), config.invites.days_ahead)
     away, held = leave_days(config, events), commitments(config, events)
@@ -299,9 +344,24 @@ def triage(config: Config, calendar: Calendar, raised: dict, log=print, now: dt.
     for e in pending:
         series.setdefault(key(e), []).append(e)
     items, seen, skipped = [], set(), 0
+    memory = remember(events)
     for k, group in series.items():
-        seen.add(k)
         first = group[0]
+        why = shortened(group, accepted) if accepted is not None and config.invites.accept_shortened else None
+        if why:
+            start, end = _times(first)
+            send = first.get("responseRequested", True)
+            if not dry_run:
+                calendar.respond(first.get("seriesMasterId") or first["id"], "accept", send=send)
+            memory.update({slot_key(e): [e["start"]["dateTime"][:16], e["end"]["dateTime"][:16]] for e in group})
+            raised[k] = dt.datetime.now().isoformat(timespec="seconds")
+            if acted is not None:
+                acted.append({"received": start.isoformat(timespec="minutes"), "from": _organiser(first)[0] or _organiser(first)[1],
+                              "subject": f"{first.get('subject') or '(no subject)'}: {start:%a %d %b %H:%M}–{end:%H:%M}",
+                              "why": why})
+            log(f"{'would accept' if dry_run else 'invite accepted'}  [{why}] {first.get('subject')}")
+            continue
+        seen.add(k)
         if k in raised:
             continue
         rule = next((r for r in config.invites.rules if matches(r, first, config.email)), None)
@@ -325,6 +385,9 @@ def triage(config: Config, calendar: Calendar, raised: dict, log=print, now: dt.
                       "note": verdict["note"], "clashes": verdict["clashes"], "webLink": first.get("webLink")})
         raised[k] = dt.datetime.now().isoformat(timespec="seconds")
         log(f"invite queued  {first.get('subject')} ({start:%a %d %b %H:%M}): {verdict['recommendation']}")
+    if accepted is not None and not dry_run:
+        accepted.clear()
+        accepted.update(memory)
     return items, seen, skipped
 
 

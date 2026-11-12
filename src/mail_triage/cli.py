@@ -225,7 +225,8 @@ def _deleted(items: list) -> int:
         print(f"\n  {rule} ({len(group)})")
         for item in group:
             print(f"    {item['received'][:10]}  {item['from']}: {item['subject'][:90]}"
-                  + (f"  -> filed to {item['to']}" if item.get("to") else ""))
+                  + (f"  -> filed to {item['to']}" if item.get("to") else "")
+                  + (f"  -> accepted ({item['accepted']})" if item.get("accepted") else ""))
     return 0
 
 

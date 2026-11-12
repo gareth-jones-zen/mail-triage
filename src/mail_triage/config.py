@@ -137,6 +137,7 @@ class Invites:
     working_hours: tuple = ("08:00", "18:00")           # where a moved block or meeting can go
     travel_hours: tuple = ("06:00", "21:00")            # where travel can go (earlier in, later home)
     requests_folders: list = field(default_factory=list)  # where invitation emails land: deleted once answered
+    accept_shortened: bool = False                      # accept, unasked, a meeting you'd accepted that was only shortened
     leave_pattern: str = r"^(\w+ )?(holidays?|annual leave|leave|bank holiday)\b"
     rules: list = field(default_factory=list)
 
@@ -153,6 +154,7 @@ class Config:
     queue_file: pathlib.Path = LOCAL / "queue.json"
     state_file: pathlib.Path = LOCAL / "raised.json"
     deleted_file: pathlib.Path = LOCAL / "deleted.json"
+    accepted_file: pathlib.Path = LOCAL / "accepted.json"   # meetings you've accepted, and their times: accept_shortened
     log_file: pathlib.Path = LOCAL / "mail-triage.log"
     notify: str = "new"
     every_minutes: int = 15
@@ -204,6 +206,7 @@ def load(path: pathlib.Path | str | None = None) -> Config:
         queue_file=_path(raw["queue_file"], base) if raw.get("queue_file") else LOCAL / "queue.json",
         state_file=_path(raw["state_file"], base) if raw.get("state_file") else LOCAL / "raised.json",
         deleted_file=_path(raw["deleted_file"], base) if raw.get("deleted_file") else LOCAL / "deleted.json",
+        accepted_file=_path(raw["accepted_file"], base) if raw.get("accepted_file") else LOCAL / "accepted.json",
         log_file=_path(raw["log_file"], base) if raw.get("log_file") else LOCAL / "mail-triage.log",
         notify=notify, every_minutes=every, hours=tuple(hours.split("-")), weekdays=bool(raw.get("weekdays", True)))
 
@@ -285,7 +288,8 @@ def load(path: pathlib.Path | str | None = None) -> Config:
                                  date_format=section.get("date_format", Invites.date_format),
                                  working_hours=span("working_hours", Invites.working_hours),
                                  travel_hours=span("travel_hours", Invites.travel_hours),
-                                 requests_folders=list(section.get("requests_folders", [])), rules=rules)
+                                 requests_folders=list(section.get("requests_folders", [])),
+                                 accept_shortened=bool(section.get("accept_shortened", False)), rules=rules)
     if not config.folders and not config.invites:
         raise ValueError(f"{path} names no [[folder]] to triage, and no [invites].")
     return config

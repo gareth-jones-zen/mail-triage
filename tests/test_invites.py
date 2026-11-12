@@ -223,6 +223,88 @@ class RequestGraph:
         return {"id": url.split("/")[3].split("?")[0], "event": self.events[url.split("/")[3].split("?")[0]]}
 
 
+class Shortened(unittest.TestCase):
+    """accept_shortened: a meeting you'd accepted, whose organiser only shortened it, is accepted unasked."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        path = pathlib.Path(self.temp.name).resolve() / "config.toml"
+        path.write_text(SETTINGS.replace("[invites]\n", "[invites]\naccept_shortened = true\n"), encoding="utf-8")
+        self.config = cfg.load(path)
+        self.now = dt.datetime(2026, 11, 11, 9, 0)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_with(self, before, after, dry_run=False):
+        """Remember `before` (accepted), then triage `after` (the organiser's change)."""
+        accepted, acted = {}, []
+        invites.triage(self.config, FakeCalendar(before), {}, log=lambda _: None, now=self.now, accepted=accepted)
+        calendar = FakeCalendar(after)
+        items, seen, _ = invites.triage(self.config, calendar, {}, log=lambda _: None, now=self.now,
+                                        accepted=accepted, acted=acted, dry_run=dry_run)
+        return items, seen, acted, calendar, accepted
+
+    def series(self, response, slots, ids="abc"):
+        return [ev(f"pcb-{i}", "Alt Net PCB", day, start, end, response=response, type="occurrence", seriesMasterId="pcb")
+                for i, (day, start, end) in zip(ids, slots)]
+
+    def test_a_shortened_series_is_accepted_as_a_whole(self):
+        before = self.series("accepted", [("2026-11-12", "10:00", "10:45"), ("2026-11-26", "10:00", "10:45")])
+        # Rich shortens it, and extends the series by one: the new occurrence comes after the remembered ones
+        after = self.series("notResponded", [("2026-11-12", "10:00", "10:30"), ("2026-11-26", "10:00", "10:30"),
+                                             ("2026-12-10", "10:00", "10:30")])
+        items, seen, acted, calendar, accepted = self.run_with(before, after)
+        self.assertEqual(items, [])
+        self.assertEqual(seen, set())                      # off the queue, if it was ever on it
+        self.assertEqual(calendar.answers, [("pcb", "accept", "", True)])
+        self.assertIn("10:00–10:45 to 10:00–10:30 (2 occurrences)", acted[0]["why"])
+        self.assertEqual(accepted["pcb@2026-12-10"], ["2026-12-10T10:00", "2026-12-10T10:30"])   # remembered for next time
+
+    def test_a_shortened_one_off_is_accepted_quietly_if_no_response_was_asked_for(self):
+        _, _, acted, calendar, _ = self.run_with([ev("one", "Options", "2026-11-13", "14:00", "15:00", response="accepted")],
+                                                 [ev("one", "Options", "2026-11-13", "14:15", "15:00", responseRequested=False)])
+        self.assertEqual(calendar.answers, [("one", "accept", "", False)])
+        self.assertEqual(len(acted), 1)
+
+    def test_anything_more_than_a_shortening_is_raised(self):
+        cases = {
+            "moved later": ("14:00", "15:00", "14:30", "15:30"),
+            "lengthened": ("14:00", "15:00", "14:00", "15:30"),
+            "unchanged": ("14:00", "15:00", "14:00", "15:00"),
+        }
+        for name, (s0, e0, s1, e1) in cases.items():
+            with self.subTest(name):
+                items, _, acted, calendar, _ = self.run_with(
+                    [ev("one", "Options", "2026-11-13", s0, e0, response="accepted")], [ev("one", "Options", "2026-11-13", s1, e1)])
+                self.assertEqual((len(items), acted, calendar.answers), (1, [], []))
+
+    def test_only_meetings_you_had_accepted_count(self):
+        for response in ("tentativelyAccepted", "notResponded", "declined"):
+            with self.subTest(response):
+                items, _, acted, _, _ = self.run_with([ev("one", "Options", "2026-11-13", "14:00", "15:00", response=response)],
+                                                      [ev("one", "Options", "2026-11-13", "14:00", "14:30")])
+                self.assertEqual((len(items), acted), (1, []))
+
+    def test_a_series_with_a_gap_in_what_was_accepted_is_raised(self):
+        before = self.series("accepted", [("2026-11-12", "10:00", "10:45"), ("2026-11-26", "10:00", "10:45")], ids="ac")
+        after = self.series("notResponded", [("2026-11-12", "10:00", "10:30"), ("2026-11-19", "10:00", "10:30"),
+                                             ("2026-11-26", "10:00", "10:30")])   # a new week in the middle: the pattern changed
+        items, _, acted, _, _ = self.run_with(before, after)
+        self.assertEqual((len(items), acted), (1, []))
+
+    def test_a_dry_run_answers_nothing_and_remembers_nothing(self):
+        before = [ev("one", "Options", "2026-11-13", "14:00", "15:00", response="accepted")]
+        _, _, acted, calendar, accepted = self.run_with(before, [ev("one", "Options", "2026-11-13", "14:00", "14:30")], dry_run=True)
+        self.assertEqual((len(acted), calendar.answers), (1, []))
+        self.assertEqual(accepted, {"one": ["2026-11-13T14:00", "2026-11-13T15:00"]})
+
+    def test_off_unless_switched_on(self):
+        self.config.invites.accept_shortened = False
+        items, _, acted, calendar, _ = self.run_with([ev("one", "Options", "2026-11-13", "14:00", "15:00", response="accepted")],
+                                                     [ev("one", "Options", "2026-11-13", "14:00", "14:30")])
+        self.assertEqual((len(items), acted, calendar.answers), (1, [], []))
+
+
 class Requests(unittest.TestCase):
     def test_answered_or_removed_invitations_are_found_and_the_rest_left(self):
         found = invites.answered_requests(RequestGraph(), "folder")
