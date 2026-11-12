@@ -297,3 +297,44 @@ public sealed class Commands : TriageBase
         Assert.Contains("Nothing waiting", Cli("list").Out);
     }
 }
+
+public sealed class WatcherLoop : TriageBase
+{
+    [Fact]
+    public void runs_at_once_then_only_when_due_and_notifies_after_three_failures_in_a_row()
+    {
+        var clock = new DateTime(2026, 11, 14, 22, 0, 0);   // a Saturday night: only the first run is due
+        var runs = 0;
+        var notes = new List<string>();
+        var loops = 0;
+        var code = Watcher.Watch(Config, (_, _) =>
+        {
+            runs++;
+            throw new InvalidOperationException("Graph is down");
+        }, (title, _) => notes.Add(title), stop: () => loops++ >= 200, sleep: _ => clock = clock.AddMinutes(1), now: () => clock);
+        Assert.Equal(0, code);
+        Assert.Equal(1, runs);                                   // nothing more is due before Monday 07:00
+        Assert.Empty(notes);                                     // one failure isn't worth a notification
+        var log = File.ReadAllText(Config.LogFile);
+        Assert.Contains("run failed: InvalidOperationException: Graph is down", log);
+        Assert.Contains("  alive", log);
+        Assert.Matches(@"(?m)^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}  watching 1 folder\(s\) every 15 min, 07:00-19:00 Mon-Fri, and once now", log);
+
+        clock = new DateTime(2026, 11, 16, 9, 0, 0);            // Monday: every 15 minutes
+        loops = 0;
+        Watcher.Watch(Config, (_, _) => { runs++; throw new InvalidOperationException("still down"); },
+            (title, _) => notes.Add(title), stop: () => loops++ >= 60, sleep: _ => clock = clock.AddMinutes(1), now: () => clock);
+        Assert.Equal(["mail-triage couldn't run"], notes);       // the third failure in a row, once
+    }
+
+    [Fact]
+    public void a_second_watcher_for_the_same_settings_exits_with_3()
+    {
+        using var held = MailTriage.Interim.Exclusive.SingleInstance(Watcher.WatchLock(Config));
+        Assert.Equal(Watcher.AlreadyRunning, Watcher.Watch(Config, (_, _) => throw new InvalidOperationException(), (_, _) => { }, stop: () => true));
+    }
+
+    [Fact]
+    public void the_lock_names_are_the_python_ones() =>
+        Assert.Equal($"mail-triage-run-{WinBackground.Locks.Key(Config.Path)}", Watcher.RunLock(Config));
+}

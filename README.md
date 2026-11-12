@@ -1,5 +1,12 @@
 # mail-triage
 
+> **This is the `dotnet` branch: a port to .NET 11 Native AOT, in progress and not yet in use.** The Python
+> version, which is what runs today, is on `main` and at tag `v0.9.1`. The port makes the same decisions (checked
+> against the Python version on generated scenarios, settings, patterns and state files); it isn't switched over
+> until it has also matched the Python version on real data. Build: `dotnet test -c Release`, with
+> [background-tools-lib](https://github.com/gareth-jones-zen/background-tools-lib) checked out beside this repo.
+> Offline parity checks: `tools/parity/parity.py` (Python side) and `tools/Parity` (.NET side).
+
 Standing rules for your mail, and advice on your meeting invites. Outlook rules file the noise into folders; mail-triage goes through
 those folders, deletes what your rules say is routine, and queues the rest for you to decide, each
 email once. **Anything no rule names is queued, never deleted.**
