@@ -1,0 +1,36 @@
+name: build
+
+on:
+  push:
+    branches: [dotnet, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: mail-triage
+      # The shared libraries are referenced as a sibling checkout (..\background-tools-lib).
+      - uses: actions/checkout@v5
+        with:
+          repository: gareth-jones-zen/background-tools-lib
+          path: background-tools-lib
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: mail-triage/global.json
+      - name: Build and test
+        working-directory: mail-triage
+        run: dotnet test -c Release
+      - name: Publish (Native AOT)
+        working-directory: mail-triage
+        run: |
+          dotnet publish src/MailTriage.Console -c Release -r win-x64 -o out
+          dotnet publish src/MailTriage.Background -c Release -r win-x64 -o out
+          Get-ChildItem out/*.exe | Format-Table Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mail-triage-win-x64
+          path: mail-triage/out/*.exe
