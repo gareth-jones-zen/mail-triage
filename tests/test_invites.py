@@ -298,11 +298,58 @@ class Shortened(unittest.TestCase):
         self.assertEqual((len(acted), calendar.answers), (1, []))
         self.assertEqual(accepted, {"one": ["2026-11-13T14:00", "2026-11-13T15:00"]})
 
+    def test_one_week_shortened_is_accepted_on_its_own_even_though_the_series_was_raised_long_ago(self):
+        # The real case (12 Nov 2026): Rich cut one week's Alt Net PCB to 30 minutes. The rest stays accepted.
+        before = self.series("accepted", [("2026-11-12", "10:00", "10:45"), ("2026-11-26", "10:00", "10:45")])
+        after = [ev("pcb-x", "Alt Net PCB", "2026-11-12", "10:00", "10:30", type="exception", seriesMasterId="pcb"),
+                 ev("pcb-b", "Alt Net PCB", "2026-11-26", "10:00", "10:45", response="accepted", type="occurrence", seriesMasterId="pcb")]
+        accepted, acted = {}, []
+        invites.triage(self.config, FakeCalendar(before), {}, log=lambda _: None, now=self.now, accepted=accepted)
+        calendar = FakeCalendar(after)
+        items, _, _ = invites.triage(self.config, calendar, {"invite:pcb": "2026-11-01T09:00:00"}, log=lambda _: None,
+                                     now=self.now, accepted=accepted, acted=acted)
+        self.assertEqual(items, [])
+        self.assertEqual(calendar.answers, [("pcb-x", "accept", "", True)])   # the occurrence: the series' answer misses it
+
     def test_off_unless_switched_on(self):
         self.config.invites.accept_shortened = False
         items, _, acted, calendar, _ = self.run_with([ev("one", "Options", "2026-11-13", "14:00", "15:00", response="accepted")],
                                                      [ev("one", "Options", "2026-11-13", "14:00", "14:30")])
         self.assertEqual((len(items), acted, calendar.answers), (1, [], []))
+
+
+class Exceptions(unittest.TestCase):
+    """An occurrence the organiser changed on its own isn't answered by answering its series."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.temp.name).resolve()
+        (self.dir / "config.toml").write_text(SETTINGS, encoding="utf-8")
+        self.config = cfg.load(self.dir / "config.toml")
+        self.now = dt.datetime(2026, 11, 11, 9, 0)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def queue_and_accept(self, events, raised):
+        calendar = FakeCalendar(events)
+        items, _, _ = invites.triage(self.config, calendar, raised, log=lambda _: None, now=self.now)
+        triage.save_queue(self.config, items)
+        triage.answer(self.config, calendar, ["1"], "accept", log=lambda _: None)
+        return items, calendar.answers
+
+    def test_a_moved_week_of_an_answered_series_comes_back_on_its_own(self):
+        events = [ev("w1", "Leads sync", "2026-11-17", "14:00", "14:30", type="exception", seriesMasterId="leads"),
+                  ev("w2", "Leads sync", "2026-11-24", "09:00", "09:30", response="accepted", type="occurrence", seriesMasterId="leads")]
+        items, answers = self.queue_and_accept(events, {"invite:leads": "2026-10-01T09:00:00"})
+        self.assertEqual([(i["id"], i["series"], i["exceptions"]) for i in items], [("w1", None, [])])
+        self.assertEqual(answers, [("w1", "accept", "", True)])            # that week only, not the series
+
+    def test_a_new_series_with_a_changed_week_is_one_invite_and_accepting_it_answers_both(self):
+        events = [ev("n1", "Design forum", "2026-11-17", "14:00", "15:00", type="occurrence", seriesMasterId="forum"),
+                  ev("n2", "Design forum", "2026-11-24", "15:00", "16:00", type="exception", seriesMasterId="forum")]
+        items, answers = self.queue_and_accept(events, {})
+        self.assertEqual([(i["id"], i["exceptions"]) for i in items], [("forum", ["n2"])])
+        self.assertEqual([a[0] for a in answers], ["forum", "n2"])
 
 
 class Requests(unittest.TestCase):

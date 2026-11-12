@@ -32,7 +32,8 @@ something already accepted (17)**; with no clash, 78 of 100 invites were accepte
 removes every future occurrence from your calendar. A series is accepted as a whole.
 
 An invite is raised once: a recurring series once for the whole series, a one-off once per start time (so a
-moved meeting comes back). Answering one takes it off the queue. Graph with Calendars.ReadWrite.
+moved meeting comes back). One week changed on its own (an exception) of an answered series is raised and
+answered like a one-off; answering a series doesn't answer its exceptions, so accepting one accepts them too. Answering one takes it off the queue. Graph with Calendars.ReadWrite.
 """
 
 from __future__ import annotations
@@ -294,6 +295,17 @@ def key(event: dict) -> str:
     return f"invite:{event['id']}@{event['start']['dateTime'][:16]}"
 
 
+def exceptions(group: list) -> list:
+    """Occurrences of a series the organiser changed on their own. Answering the series doesn't answer them
+    (12 Nov 2026: the Alt Net PCB, shortened for one week, stayed unanswered after the series was accepted)."""
+    return [e["id"] for e in group if e.get("seriesMasterId") and e.get("type") == "exception"]
+
+
+def lone(group: list) -> bool:
+    """Only occurrences changed on their own are unanswered: the rest of their series has been answered."""
+    return bool(group) and all(e.get("seriesMasterId") and e.get("type") == "exception" for e in group)
+
+
 def slot_key(event: dict) -> str:
     """One meeting, stable when its time changes: an occurrence by its series and day, a one-off by its id."""
     if event.get("seriesMasterId"):
@@ -343,6 +355,12 @@ def triage(config: Config, calendar: Calendar, raised: dict, log=print, now: dt.
     series: dict = {}
     for e in pending:
         series.setdefault(key(e), []).append(e)
+    # Where only occurrences changed on their own are unanswered, the rest of the series has been answered:
+    # each is its own invite, raised once per start time like a one-off, and answered on its own. Under the
+    # series' key it would never come back, as the series was raised long ago.
+    for k in [k for k, group in series.items() if lone(group)]:
+        for e in series.pop(k):
+            series[f"invite:{e['id']}@{e['start']['dateTime'][:16]}"] = [e]
     items, seen, skipped = [], set(), 0
     memory = remember(events)
     for k, group in series.items():
@@ -352,7 +370,8 @@ def triage(config: Config, calendar: Calendar, raised: dict, log=print, now: dt.
             start, end = _times(first)
             send = first.get("responseRequested", True)
             if not dry_run:
-                calendar.respond(first.get("seriesMasterId") or first["id"], "accept", send=send)
+                for target in ([first["id"]] if lone(group) else [first.get("seriesMasterId") or first["id"]] + exceptions(group)):
+                    calendar.respond(target, "accept", send=send)
             memory.update({slot_key(e): [e["start"]["dateTime"][:16], e["end"]["dateTime"][:16]] for e in group})
             raised[k] = dt.datetime.now().isoformat(timespec="seconds")
             if acted is not None:
@@ -370,12 +389,13 @@ def triage(config: Config, calendar: Calendar, raised: dict, log=print, now: dt.
             raised[k] = dt.datetime.now().isoformat(timespec="seconds")
             log(f"invite needs no response  [{rule.name}] {first.get('subject')}")
             continue
-        verdict = assess(config, first, held, away, group if first.get("seriesMasterId") else [], now)
+        whole = bool(first.get("seriesMasterId")) and not lone(group)   # a series, answered as a whole
+        verdict = assess(config, first, held, away, group if whole else [], now)
         start, end = _times(first)
         name, address = _organiser(first)
-        items.append({"folder": "Calendar", "type": "invite", "id": first.get("seriesMasterId") or first["id"], "key": k,
-                      "series": first.get("seriesMasterId"), "occurrence": first["id"],
-                      "occurrences": [e["id"] for e in group], "responseRequested": first.get("responseRequested", True),
+        items.append({"folder": "Calendar", "type": "invite", "id": first.get("seriesMasterId") if whole else first["id"], "key": k,
+                      "series": first.get("seriesMasterId") if whole else None, "occurrence": first["id"],
+                      "occurrences": [e["id"] for e in group], "exceptions": exceptions(group) if whole else [], "responseRequested": first.get("responseRequested", True),
                       "received": start.isoformat(timespec="minutes"), "from": name or address,
                       "subject": f"{first.get('subject') or '(no subject)'}: {start:%a %d %b %H:%M}–{end:%H:%M}",
                       "preview": (first.get("bodyPreview") or "")[:300], "rule": rule.name if rule else "invite",

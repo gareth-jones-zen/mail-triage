@@ -251,7 +251,7 @@ def answer(config: Config, calendar, refs: list, action: str, note: str = "", se
            series: bool = False, move: bool = False) -> int:
     """Answer queued invites (by number): accept, tentative or decline.
 
-    - **Accepting a series accepts the whole series.**
+    - **Accepting a series accepts the whole series**, and each unanswered occurrence changed on its own.
     - **Declining declines instances, never the series**: the occurrences the recommendation names (leave or
       a fixed clash), or else the first one queued. `series=True` declines the whole series.
     - **A decline uses the recommendation's note** (the leave note) unless one is given.
@@ -272,7 +272,9 @@ def answer(config: Config, calendar, refs: list, action: str, note: str = "", se
             targets = [item["series"]] if series else (item.get("decline") or [item["occurrence"]])
             text = note or item.get("note", "")
         else:
-            targets, text = [item.get("series") or item["occurrence"]], note
+            # An occurrence the organiser changed on its own (an exception) isn't answered by the series'
+            # answer, so each is answered too (12 Nov 2026: the Alt Net PCB, shortened for one week only).
+            targets, text = [item.get("series") or item["occurrence"]] + item.get("exceptions", []), note
         for target in targets:
             calendar.respond(target, action, text, respond)
         done = {"accept": "accepted", "tentative": "accepted tentatively", "decline": "declined"}[action]
