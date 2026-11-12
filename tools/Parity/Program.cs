@@ -38,6 +38,22 @@ switch (command)
     case "state":
         StateFiles.Save(args[2], StateFiles.Load(args[1], () => null));
         return 0;
+    case "fold":
+        // For each ASCII letter and digit, every BMP character a case-insensitive Python-dialect pattern matches.
+        foreach (var c in "abcdefghijklmnopqrstuvwxyz0123456789_")
+        {
+            var regex = PyRegex.Get(PyRegex.Escape(c.ToString()), true);
+            var hits = Enumerable.Range(0, 0x10000).Where(x => x is < 0xD800 or > 0xDFFF && regex.FullMatch(((char)x).ToString())).Select(x => x.ToString("X4"));
+            Console.WriteLine($"{c} {string.Join(",", hits)}");
+        }
+        foreach (var pattern in new[] { "[a-z]", "[^a-z]", "[s]", "[^is]", "sprint", "[A-Z0-9]", @"[\w-]" })
+        {
+            var regex = PyRegex.Get(pattern, true);
+            Console.WriteLine($"{pattern} {Enumerable.Range(0, 0x10000).Count(x => x is < 0xD800 or > 0xDFFF && regex.IsMatch(((char)x).ToString()))}");
+        }
+        var words = Enumerable.Range(0, 0x10000).Where(x => x is < 0xD800 or > 0xDFFF && PyRegex.Get(@"\w").FullMatch(((char)x).ToString())).Count();
+        Console.WriteLine($"\\w {words}");
+        return 0;
     case "tz":
         var zone = PyTime.Zone("GMT Standard Time");
         foreach (var t in new[] { "2026-11-12T12:00", "2026-07-01T12:00", "2026-10-25T01:30", "2027-03-28T01:30", "2027-03-28T02:30" })

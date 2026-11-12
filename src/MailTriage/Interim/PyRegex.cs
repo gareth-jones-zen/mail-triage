@@ -40,7 +40,7 @@ public sealed class PyRegex
     private PyRegex(string pattern, bool ignoreCase)
     {
         Pattern = pattern;
-        var (translated, options) = Translate(pattern);
+        var (translated, options) = Translate(pattern, ignoreCase);
         if (ignoreCase)
             options |= RegexOptions.IgnoreCase;
         options |= RegexOptions.CultureInvariant;
@@ -129,9 +129,10 @@ public sealed class PyRegex
     }
 
     /// <summary>The Python pattern as .NET reads it, and the options its leading flags give.</summary>
-    public static (string Pattern, RegexOptions Options) Translate(string pattern)
+    public static (string Pattern, RegexOptions Options) Translate(string pattern, bool ignoreCase = false)
     {
         var options = RegexOptions.None;
+        var fold = ignoreCase;
         var b = new StringBuilder(pattern.Length * 2);
         var i = 0;
         var atStart = true;
@@ -174,6 +175,7 @@ public sealed class PyRegex
                     {
                         if (!atStart || flags.Contains('-'))
                             Refuse("inline flags in the middle of the pattern");
+                        fold |= flags.Contains('i');
                         foreach (var f in flags)
                             options |= f switch { 'i' => RegexOptions.IgnoreCase, 'm' => RegexOptions.Multiline, _ => RegexOptions.Singleline };
                         i = j + 1;
@@ -181,6 +183,8 @@ public sealed class PyRegex
                     }
                     if (close != ':')
                         Refuse("a group .NET reads differently");
+                    if (flags.Contains('-'))
+                        Refuse("turning a flag off inside the pattern");
                     b.Append("(?").Append(flags).Append(':');
                     i = j + 1;
                 }
@@ -201,7 +205,7 @@ public sealed class PyRegex
                         i = CopyHex(pattern, i, 4, b, Refuse);
                     continue;
                 case '[':
-                    i = Class(pattern, i, b, Refuse);
+                    i = Class(pattern, i, b, Refuse, fold);
                     continue;
                 case '{':
                     {
@@ -227,7 +231,7 @@ public sealed class PyRegex
                         Refuse("a possessive quantifier");
                     continue;
                 default:
-                    b.Append(c);
+                    b.Append(fold && Folds(c) is { } extra ? "[" + c + extra + "]" : c.ToString());
                     i++;
                     continue;
             }
@@ -288,9 +292,27 @@ public sealed class PyRegex
         || System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c) is System.Globalization.UnicodeCategory.NonSpacingMark
             or System.Globalization.UnicodeCategory.ConnectorPunctuation;
 
-    /// <summary>A character class from pattern[i] == '['. Returns the index after its ']'.</summary>
-    private static int Class(string pattern, int i, StringBuilder b, Action<string> refuse)
+    /// <summary>The characters Python's case-insensitive matching adds to an ASCII letter and .NET's doesn't: "i" also
+    /// matches U+0130 and U+0131, "s" also matches U+017F (long s). Found by comparing every BMP character.</summary>
+    private static string? Folds(char c) => c switch
     {
+        'i' or 'I' => "İı",
+        's' or 'S' => "ſ",
+        _ => null,
+    };
+
+    /// <summary>A character class from pattern[i] == '['. Returns the index after its ']'.</summary>
+    private static int Class(string pattern, int i, StringBuilder b, Action<string> refuse, bool fold = false)
+    {
+        var extras = new HashSet<string>();
+        void Literal(char lo, char hi)
+        {
+            if (!fold)
+                return;
+            foreach (var letter in "iIsS")
+                if (letter >= lo && letter <= hi && Folds(letter) is { } extra)
+                    extras.Add(extra);
+        }
         b.Append('[');
         i++;
         if (i < pattern.Length && pattern[i] == '^')
@@ -306,6 +328,8 @@ public sealed class PyRegex
             {
                 if (!first)
                 {
+                    foreach (var extra in extras)
+                        b.Append(extra);
                     b.Append(']');
                     return i + 1;
                 }
@@ -338,6 +362,11 @@ public sealed class PyRegex
                 i++;
                 continue;
             }
+            // A range lo-hi of plain characters, or a single one: noted for the case-insensitive extras.
+            if (i + 2 < pattern.Length && pattern[i + 1] == '-' && pattern[i + 2] is not (']' or '\\'))
+                Literal(c, pattern[i + 2]);
+            else
+                Literal(c, c);
             b.Append(c);
             i++;
         }

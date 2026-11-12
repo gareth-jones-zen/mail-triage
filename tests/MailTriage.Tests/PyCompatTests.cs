@@ -63,6 +63,16 @@ public sealed class PyCompatTests
     public void translated_patterns_behave_as_pythons(string pattern, string text, bool expected) =>
         Assert.Equal(expected, PyRegex.IsMatch(pattern, text));
 
+    [Theory]
+    [InlineData("sprint", "ſprint", true)]       // long s: Python's re.I folds it to "s"; .NET's doesn't, so it's added
+    [InlineData("^Kim", "Kim", true)]            // the Kelvin sign: both fold it to "k"
+    [InlineData("lis", "LİS", true)]              // dotted capital I
+    [InlineData("[a-z]+", "ı", true)]            // dotless i, in a range
+    [InlineData("[^is]", "ı", false)]
+    [InlineData("(?i)sprint", "ſprint", true)]
+    public void case_insensitive_matching_folds_as_pythons(string pattern, string text, bool expected) =>
+        Assert.Equal(expected, PyRegex.IsMatch(pattern, text, true));
+
     [Fact]
     public void match_and_fullmatch_anchor_as_python_does()
     {
