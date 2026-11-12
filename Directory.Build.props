@@ -1,0 +1,20 @@
+<Project>
+  <!-- Shared by every project. The exes are published with Native AOT, so everything is AOT- and trim-checked. -->
+  <PropertyGroup>
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Version>1.0.0-dev</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Authors>Gareth Jones</Authors>
+    <RepositoryUrl>https://github.com/gareth-jones-zen/mail-triage</RepositoryUrl>
+    <!-- The shared libraries are a sibling checkout: ..\background-tools-lib (CI checks it out beside this repo). -->
+    <BackgroundToolsLib>$(MSBuildThisFileDirectory)..\background-tools-lib\</BackgroundToolsLib>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(IsTestProject)' != 'true'">
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+</Project>

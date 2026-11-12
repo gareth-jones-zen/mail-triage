@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="$(BackgroundToolsLib)src\WinBackground\WinBackground.csproj" />
+    <ProjectReference Include="$(BackgroundToolsLib)src\M365Graph\M365Graph.csproj" />
+    <PackageReference Include="Tomlyn" Version="2.11.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="MailTriage.Tests" />
+    <InternalsVisibleTo Include="Parity" />
+  </ItemGroup>
+</Project>

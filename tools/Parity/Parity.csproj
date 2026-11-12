@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Offline parity runner (never shipped): reads generated inputs, prints the .NET results as JSON for the
+       Python harness in tools/parity to diff. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MailTriage\MailTriage.csproj" />
+  </ItemGroup>
+</Project>

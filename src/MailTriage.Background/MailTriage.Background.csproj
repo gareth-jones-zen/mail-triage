@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>mail-triage-background</AssemblyName>
+    <RootNamespace>MailTriage</RootNamespace>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\MailTriage\MailTriage.csproj" />
+  </ItemGroup>
+</Project>
