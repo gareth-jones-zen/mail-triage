@@ -27,6 +27,9 @@ something already accepted (17)**; with no clash, 78 of 100 invites were accepte
   least one be shorter.** New occurrences after the last remembered one (a series extended) are fine;
   anything else unremembered, or moved outside its old slot, is raised as usual. The first class that
   answers on its own (11 Nov 2026); the rest come one class at a time, once the advice has proved itself.
+- **A new time proposed for your meeting (accept_proposals):** if it's your meeting, the proposer is the only
+  other person in it, and you're free then, that occurrence moves and the proposal is deleted. Otherwise the
+  proposal is queued, once, with the reason (proposals()).
 
 **A decline is for the instance, never the series**, unless you ask for the series: declining a series
 removes every future occurrence from your calendar. A series is accepted as a whole.
@@ -77,6 +80,20 @@ class Calendar:
     def event(self, event_id: str) -> dict:
         return self.graph.request(f"/me/events/{event_id}?$select={FIELDS}", scopes=SCOPES,
                                   headers={"Prefer": f'outlook.timezone="{self.timezone}"'})
+
+    def between(self, start: dt.datetime, end: dt.datetime) -> list:
+        """What's in the calendar between two aware times, in local time."""
+        utc = lambda t: t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")   # noqa: E731
+        query = urllib.parse.urlencode({"startDateTime": utc(start), "endDateTime": utc(end), "$top": "50", "$select": FIELDS})
+        return list(self.graph.pages(f"/me/calendarView?{query}", scopes=SCOPES,
+                                     headers={"Prefer": f'outlook.timezone="{self.timezone}"'}))
+
+    def zone(self):
+        import zoneinfo
+        return zoneinfo.ZoneInfo(WINDOWS_ZONES.get(self.timezone, self.timezone))
+
+
+WINDOWS_ZONES = {"GMT Standard Time": "Europe/London", "UTC": "UTC"}
 
 
 def _times(event: dict) -> tuple:
@@ -409,6 +426,95 @@ def triage(config: Config, calendar: Calendar, raised: dict, log=print, now: dt.
         accepted.clear()
         accepted.update(memory)
     return items, seen, skipped
+
+
+HOLDS_TIME = ("busy", "oof", "tentative")
+
+
+def _aware(value: dict, zone) -> dt.datetime:
+    """A Graph dateTimeTimeZone as an aware time: UTC if it says so, otherwise local."""
+    t = dt.datetime.fromisoformat(value["dateTime"][:19])
+    return t.replace(tzinfo=dt.timezone.utc if (value.get("timeZone") or "UTC").upper() in ("UTC", "Z") else zone)
+
+
+def judge_proposal(config: Config, calendar: Calendar, message: dict, full: dict, now: dt.datetime) -> tuple:
+    """(accept?, why, the move) for someone's proposed new time for one of your meetings. Accepted only when it's
+    your meeting, the proposer is the only other person in it, the new time is in the future and in working
+    hours, and you're free then: anything that holds time (busy, out of office, tentative) is a clash."""
+    zone = calendar.zone()
+    local = lambda t: t.astimezone(zone).replace(tzinfo=None)   # noqa: E731
+    who = (message.get("from") or {}).get("emailAddress") or {}
+    proposer, address = who.get("name") or who.get("address") or "someone", (who.get("address") or "").lower()
+    new = (_aware(full["proposedNewTime"]["start"], zone), _aware(full["proposedNewTime"]["end"], zone))
+    old = (_aware(full["startDateTime"], zone), _aware(full["endDateTime"], zone))
+    when = f"{local(new[0]):%a %d %b %H:%M}–{local(new[1]):%H:%M}"
+    asked = f"{proposer} proposes {when} instead of {local(old[0]):%a %d %b %H:%M}"
+    event = full.get("event") or {}
+    if not event.get("id") or event.get("isCancelled"):
+        return False, f"{asked}, but the meeting is gone or cancelled", None
+    if not event.get("isOrganizer"):
+        return False, f"{asked}: not your meeting to move", None
+    meeting = next((e for e in calendar.between(*old) if (e["id"] == event["id"] or e.get("seriesMasterId") == event["id"])
+                    and _times(e)[0] == local(old[0])), None)
+    if meeting is None:
+        return False, f"{asked}, but the meeting isn't at that time any more", None
+    if local(new[0]) <= now:
+        return False, f"{asked}, which has passed", None
+    others = [a for a in _people(meeting) if ((a.get("emailAddress") or {}).get("address") or "").lower() not in (config.email, address)]
+    if others:
+        return False, f"{asked}: {len(others)} other attendee(s) would move too", None
+    first, last = (dt.time.fromisoformat(t) if t != "24:00" else dt.time.max for t in config.invites.working_hours)
+    if local(new[0]).time() < first or (local(new[1]).time() > last and local(new[1]).date() == local(new[0]).date()) \
+            or local(new[1]).date() != local(new[0]).date():
+        return False, f"{asked}: outside working hours", None
+    clashes = [e for e in calendar.between(*new) if e["id"] != meeting["id"] and not e.get("isAllDay") and not e.get("isCancelled")
+               and e.get("showAs") in HOLDS_TIME and (e.get("responseStatus") or {}).get("response") != "declined"
+               and _times(e)[0] < local(new[1]) and _times(e)[1] > local(new[0])]
+    if clashes:
+        return False, f"{asked}: clashes with {', '.join(e.get('subject') or '(no subject)' for e in clashes)}", None
+    return True, f"{asked}, and you're free", {"id": meeting["id"], "start": local(new[0]), "end": local(new[1])}
+
+
+def proposals(config: Config, mailbox, calendar: Calendar, raised: dict, log=print, dry_run: bool = False,
+              now: dt.datetime | None = None) -> tuple:
+    """Someone declined (or tentatively accepted) one of your meetings and proposed a new time. With
+    accept_proposals, one you're free for is accepted: that occurrence moves (they get the update) and the
+    proposal is deleted. The rest are queued as emails, each once, saying why. (queue items, acted, keys seen)."""
+    now = now or dt.datetime.now()
+    items, acted, seen = [], [], set()
+    for name in config.invites.proposals_folders:
+        query = "$top=50&$select=id,internetMessageId,subject,from,receivedDateTime,webLink"
+        for m in mailbox.graph.pages(f"/me/mailFolders/{mailbox.folder_id(name)}/messages?{query}", scopes=["Mail.ReadWrite"]):
+            if m.get("@odata.type") != "#microsoft.graph.eventMessageResponse":
+                continue
+            k = m.get("internetMessageId") or m["id"]
+            if k in raised:
+                seen.add(k)
+                continue
+            full = mailbox.graph.request(f"/me/messages/{m['id']}?$select=id,proposedNewTime,startDateTime,endDateTime"
+                                         "&$expand=microsoft.graph.eventMessage/event($select=id,isOrganizer,isCancelled)",
+                                         scopes=["Mail.ReadWrite", *SCOPES])
+            if not full.get("proposedNewTime"):
+                continue   # an ordinary reply: nothing to decide
+            ok, why, plan = judge_proposal(config, calendar, m, full, now)
+            if ok and config.invites.accept_proposals:
+                if not dry_run:
+                    calendar.move(plan["id"], plan["start"], plan["end"])
+                    mailbox.delete(m["id"])
+                acted.append({"received": m.get("receivedDateTime"), "from": (m.get("from") or {}).get("emailAddress", {}).get("address", ""),
+                              "subject": m.get("subject", ""), "why": why})
+                log(f"{'would accept' if dry_run else 'new time accepted'}  [{why}] {m.get('subject')}")
+                continue
+            seen.add(k)
+            items.append({"folder": name, "id": m["id"], "key": k, "received": m.get("receivedDateTime"),
+                          "from": (m.get("from") or {}).get("emailAddress", {}).get("address", ""),
+                          "subject": m.get("subject", ""), "preview": "", "rule": "New time proposed",
+                          "check": f"{'ACCEPT' if ok else 'DECIDE'}: {why}", "webLink": m.get("webLink"),
+                          **({"move": {"id": plan["id"], "start": plan["start"].isoformat(timespec='minutes'),
+                                       "end": plan["end"].isoformat(timespec='minutes')}} if plan else {})})
+            raised[k] = dt.datetime.now().isoformat(timespec="seconds")
+            log(f"{'would queue' if dry_run else 'queued'}  [new time proposed] {why}")
+    return items, acted, seen
 
 
 ANSWERED = ("accepted", "tentativelyAccepted", "declined")

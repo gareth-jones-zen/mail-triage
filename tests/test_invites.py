@@ -352,6 +352,95 @@ class Exceptions(unittest.TestCase):
         self.assertEqual([a[0] for a in answers], ["forum", "n2"])
 
 
+class ProposalCalendar(FakeCalendar):
+    """Alex's own 1:1 with Yahya on Thu 12 Nov 12:00–12:50, and Friday's diary."""
+    def between(self, start, end):
+        s, e = (t.astimezone(dt.timezone.utc).replace(tzinfo=None) for t in (start, end))   # GMT in November: UTC = local
+        return [x for x in self.items if invites._times(x)[0] < e and invites._times(x)[1] > s]
+
+    def zone(self):
+        return dt.timezone.utc
+
+
+class ProposalMailbox:
+    def __init__(self, proposed, attendees=1, organiser=True):
+        self.deleted = []
+        self.message = {"@odata.type": "#microsoft.graph.eventMessageResponse", "id": "p1", "internetMessageId": "<p1>",
+                        "subject": "New Time Proposed: GJ and YP catch-up", "receivedDateTime": "2026-11-11T20:13:00Z",
+                        "from": {"emailAddress": {"name": "Yahya Patel", "address": "yahya@example.com"}}}
+        utc = lambda t: {"dateTime": f"{t}:00.0000000", "timeZone": "UTC"}   # noqa: E731
+        self.full = {"proposedNewTime": {"start": utc(proposed[0]), "end": utc(proposed[1])},
+                     "startDateTime": utc("2026-11-12T12:00"), "endDateTime": utc("2026-11-12T12:50"),
+                     "event": {"id": "yp", "isOrganizer": organiser}}
+        self.graph = self
+
+    def folder_id(self, name):
+        return name
+
+    def pages(self, url, scopes=None):
+        return iter([self.message, {"@odata.type": "#microsoft.graph.message", "id": "m2", "subject": "Hello"}])
+
+    def request(self, url, method="GET", body=None, scopes=None):
+        return self.full
+
+    def delete(self, message_id):
+        self.deleted.append(message_id)
+
+
+class Proposals(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        path = pathlib.Path(self.temp.name).resolve() / "config.toml"
+        path.write_text(SETTINGS.replace("[invites]\n", "[invites]\nproposals_folders = ['Inbox']\naccept_proposals = true\n"),
+                        encoding="utf-8")
+        self.config = cfg.load(path)
+        self.now = dt.datetime(2026, 11, 12, 9, 30)
+        yahya = (("Alex Smith", ME, "required"), ("Yahya Patel", "yahya@example.com", "required"))
+        self.diary = [ev("yp-12", "GJ and YP catch-up", "2026-11-12", "12:00", "12:50", organiser="Alex Smith", org_addr=ME,
+                         attendees=yahya, type="occurrence", seriesMasterId="yp"),
+                      ev("smt", "SMT", "2026-11-13", "11:00", "12:00", response="accepted"),
+                      ev("aw", "GJ and AW catchup", "2026-11-13", "13:00", "13:50", **SELF),
+                      ev("plan", "Work plan", "2026-11-13", "00:00", "23:59", isAllDay=True, showAs="free", **SELF)]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def run_with(self, proposed, diary=None, **mailbox):
+        box, calendar, raised = ProposalMailbox(proposed, **mailbox), ProposalCalendar(diary or self.diary), {}
+        items, acted, seen = invites.proposals(self.config, box, calendar, raised, log=lambda _: None, now=self.now)
+        return items, acted, calendar.moves, box.deleted
+
+    def test_free_at_the_new_time_moves_that_occurrence_and_deletes_the_proposal(self):
+        # The real case (12 Nov 2026): Yahya declined Thursday 12:00 and proposed Friday 12:00–12:30
+        items, acted, moves, deleted = self.run_with(("2026-11-13T12:00", "2026-11-13T12:30"))
+        self.assertEqual(items, [])
+        self.assertEqual(moves, [("yp-12", dt.datetime(2026, 11, 13, 12, 0), dt.datetime(2026, 11, 13, 12, 30))])
+        self.assertEqual(deleted, ["p1"])
+        self.assertIn("proposes Fri 13 Nov 12:00–12:30 instead of Thu 12 Nov 12:00", acted[0]["why"])
+
+    def test_anything_else_is_queued_with_the_reason(self):
+        group = list(self.diary)
+        group[0] = dict(group[0], attendees=group[0]["attendees"] + [{"type": "required", "emailAddress": {"address": "sam@example.com"}}])
+        cases = {"clashes with SMT": (("2026-11-13T11:30", "2026-11-13T12:00"), {}, None),
+                 "outside working hours": (("2026-11-13T18:30", "2026-11-13T19:00"), {}, None),
+                 "has passed": (("2026-11-12T09:00", "2026-11-12T09:30"), {}, None),
+                 "not your meeting": (("2026-11-13T12:00", "2026-11-13T12:30"), {"organiser": False}, None),
+                 "1 other attendee(s) would move too": (("2026-11-13T12:00", "2026-11-13T12:30"), {}, group)}
+        for reason, (proposed, mailbox, diary) in cases.items():
+            with self.subTest(reason):
+                items, acted, moves, deleted = self.run_with(proposed, diary, **mailbox)
+                self.assertEqual((acted, moves, deleted), ([], [], []))
+                self.assertIn(reason, items[0]["check"])
+                self.assertEqual(items[0]["rule"], "New time proposed")
+
+    def test_off_it_only_recommends(self):
+        self.config.invites.accept_proposals = False
+        items, acted, moves, _ = self.run_with(("2026-11-13T12:00", "2026-11-13T12:30"))
+        self.assertEqual((acted, moves), ([], []))
+        self.assertTrue(items[0]["check"].startswith("ACCEPT"))
+        self.assertEqual(items[0]["move"]["start"], "2026-11-13T12:00")
+
+
 class Requests(unittest.TestCase):
     def test_answered_or_removed_invitations_are_found_and_the_rest_left(self):
         found = invites.answered_requests(RequestGraph(), "folder")

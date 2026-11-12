@@ -174,6 +174,14 @@ def run(config: Config, mailbox: Mailbox, dry_run: bool = False, log=print) -> d
             record["items"].append({"when": dt.datetime.now().isoformat(timespec="microseconds"), "folder": "Calendar",
                                     "received": a["received"], "from": a["from"], "subject": a["subject"],
                                     "rule": "Accepted: already accepted, only shortened", "accepted": a["why"]})
+        if config.invites.proposals_folders:
+            p_items, p_acted, p_seen = invites.proposals(config, mailbox, invites.Calendar(mailbox.graph), raised, log, dry_run)
+            new += p_items
+            seen |= p_seen
+            for a in p_acted:
+                record["items"].append({"when": dt.datetime.now().isoformat(timespec="microseconds"), "folder": "Calendar",
+                                        "received": a["received"], "from": a["from"], "subject": a["subject"],
+                                        "rule": "Accepted: new time proposed, and free", "accepted": a["why"]})
         seen |= pending_keys   # an invite answered elsewhere (in Outlook) drops off the queue
         new += items
         invites_new = len(items)

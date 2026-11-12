@@ -138,6 +138,8 @@ class Invites:
     travel_hours: tuple = ("06:00", "21:00")            # where travel can go (earlier in, later home)
     requests_folders: list = field(default_factory=list)  # where invitation emails land: deleted once answered
     accept_shortened: bool = False                      # accept, unasked, a meeting you'd accepted that was only shortened
+    proposals_folders: list = field(default_factory=list)  # where "New Time Proposed" replies land (e.g. Inbox)
+    accept_proposals: bool = False                      # move your meeting to a proposed time you're free for
     leave_pattern: str = r"^(\w+ )?(holidays?|annual leave|leave|bank holiday)\b"
     rules: list = field(default_factory=list)
 
@@ -289,7 +291,9 @@ def load(path: pathlib.Path | str | None = None) -> Config:
                                  working_hours=span("working_hours", Invites.working_hours),
                                  travel_hours=span("travel_hours", Invites.travel_hours),
                                  requests_folders=list(section.get("requests_folders", [])),
-                                 accept_shortened=bool(section.get("accept_shortened", False)), rules=rules)
+                                 accept_shortened=bool(section.get("accept_shortened", False)),
+                                 proposals_folders=list(section.get("proposals_folders", [])),
+                                 accept_proposals=bool(section.get("accept_proposals", False)), rules=rules)
     if not config.folders and not config.invites:
         raise ValueError(f"{path} names no [[folder]] to triage, and no [invites].")
     return config
