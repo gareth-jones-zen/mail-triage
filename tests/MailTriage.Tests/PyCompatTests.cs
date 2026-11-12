@@ -164,7 +164,7 @@ public sealed class PyCompatTests
         await Task.Delay(50, TestContext.Current.CancellationToken);
         await Task.Run(() => { }, TestContext.Current.CancellationToken);   // likely another thread now
         held.Dispose();
-        var other = await Task.Run(() => ThreadHeldLock.TryAcquire(name, 1), TestContext.Current.CancellationToken);
+        var other = await Task.Run(() => Exclusive.SingleInstance(name), TestContext.Current.CancellationToken);
         Assert.NotNull(other);
         other!.Dispose();
     }
