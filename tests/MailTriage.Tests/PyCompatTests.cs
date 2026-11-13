@@ -11,27 +11,20 @@ namespace MailTriage.Tests;
 public sealed class PyCompatTests
 {
     [Theory]
-    [InlineData("(?P<name>x)", "named group")]
-    [InlineData("(?P=name)", "named group")]
+    // background-tools-lib v0.3 translates what Python reads and these once refused: (?P<name>...), {,n}, (?u),
+    // \z, \U, (?>...), [\W], [[:alpha:]] and [a-z-[...]]. Python's config.py accepts them all.
+    [InlineData("(?P=name)", "isn't a group before it")]
     [InlineData("(?<name>x)", "named group")]
     [InlineData(@"\p{L}", @"\p")]
-    [InlineData("[a-z-[aeiou]]", "subtraction")]
-    [InlineData("x{,3}", "{,n}")]
     [InlineData("a*+", "possessive")]
     [InlineData("a{2}+", "possessive")]
     [InlineData("abc(?i)", "middle")]
     [InlineData("(?x)a b", "inline flag x")]
     [InlineData("(?a)x", "inline flag a")]
-    [InlineData("(?u)x", "inline flag u")]
     [InlineData("(?L)x", "inline flag L")]
     [InlineData(@"(a)\1", "backreference")]
     [InlineData(@"\G", @"\G")]
-    [InlineData(@"\z", @"\z")]
     [InlineData(@"\N{EM DASH}", @"\N")]
-    [InlineData(@"\U0001F600", @"\U")]
-    [InlineData("(?>a)", "atomic")]
-    [InlineData("[[:alpha:]]", "POSIX")]
-    [InlineData(@"[\W]", @"\W inside")]
     public void the_guard_refuses_what_python_and_dotnet_read_differently(string pattern, string why)
     {
         var error = Assert.Throws<PyRegexUnsupportedException>(() => PyRegex.Translate(pattern));
@@ -280,7 +273,7 @@ public sealed class SettingsEdgeTests
     public void bad_patterns_anywhere_are_refused_at_load()
     {
         using var dir = new TempDir();
-        Assert.Throws<SettingsException>(() => dir.Settings(Make.InviteSettings.Replace("protected = ['^Weekly 1-2-1 - Alex$']", "protected = ['(?P<x>a)']")));
+        Assert.Throws<SettingsException>(() => dir.Settings(Make.InviteSettings.Replace("protected = ['^Weekly 1-2-1 - Alex$']", "protected = ['(?<x>a)']")));   // Python: "unknown extension ?<x"
         Assert.Throws<SettingsException>(() => dir.Settings("[[folder]]\nname = \"x\"\n[[rule]]\nsender = '\\p{L}'\naction = 'delete'\n"));
     }
 
