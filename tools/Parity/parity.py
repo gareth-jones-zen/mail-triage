@@ -12,7 +12,7 @@ Never runs the live tool, never calls Graph: everything here is generated, or re
 
 Other checks: `toml <file>` and `settings <file>` print what tomllib and config.load make of a settings file;
 `regex <corpus.json> <out.json>` runs re over a corpus; `lockkey <path>`; `state <in> <out>` rewrites a state
-file through _load and _save.
+file through _load and _save; `log <file> <text>...` writes through win_background's logger.
 """
 
 from __future__ import annotations
@@ -557,6 +557,59 @@ def regex_corpus(corpus_path, out_path):
     pathlib.Path(out_path).write_text(json.dumps(results), encoding="utf-8")
 
 
+# Patterns that probe where .NET's Regex and Python's re part company. Ones the guard refuses come back "error" from
+# .NET and are counted apart, as a refusal is a settings error, not a different match.
+TRICKY = [r"^Travel", r"\bsprint\b", r"[\w.-]+@[\w.-]+", r"\d+", r"\s+", r"\S+$", r"^$", r"x$", r"\Aab", r"ab\Z", r".",
+          r"a.b", r"[^a-z]", r"[A-Z0-9]", r"[\w-]", r"\W", r"\D", r"(?i)kelvin", r"strasse", r"ﬃ", r"İstanbul", r"ıi",
+          r"s[t]", r"(a|ab)(c|bcd)(d*)", r"(?=foo)fo", r"(?!bar)ba", r"(?<=@)zen", r"(?<!x)y", r"a{2,}", r"a{,2}b",
+          r"colou?r", r"\.uk$", r"no-?reply", r"(?:holiday|annual leave)", r"^(Accepted|Declined): ", r"[\u00e0-\u00ff]+",
+          r"😀", r"[😀-😂]", r"\u2028", r"^\s*$", r"(?m)^x", r"(?s)a.b", r"(?x) a b ", r"a\Z", r"\bé", r"[^\W\d_]+",
+          r"\$\d+", r"a++", r"(?P<n>a)(?P=n)", r"\1", r"[", r"a{2", r"\p{L}", r"(?u)x", r"(?a)\w+", r"\N{BULLET}"]
+
+TEXTS = ["", "a", "ab", "abc", "x\n", "x\r\n", "ab\n", "\n", " \t\u00a0", "\u2028", "\u001c\u001d", "Kelvin \u212a", "STRASSE straße",
+         "office", "ﬃce", "İSTANBUL istanbul", "ISTANBUL", "ıi Iİ", "ſt st ST", "Sprint 3 Plan", "sprint-notes", "noreply@microsoft.com",
+         "no-reply@x.co.uk", "Travel; EV", "travel", "TRAVEL ", "Holiday (Principal Architect)", "Annual Leave", "Accepted: Retro",
+         "Declined: Retro", "colour color", "@zen.co.uk", "xy y", "foo bar", "aaa", "b", "aab", "😀 x", "😂", "é é", "café", "$12",
+         "abcd", "abcbcd", "a\nb", "a\rb", "ᵃ²٣", "x" * 300, "Ὀδυσσεύς", "ǅ ǆ Ǆ", "ΣΑΣ σας", "Ⅻ ⅻ"]
+
+
+def _literals(pattern: str) -> list[str]:
+    plain = re.sub(r"\\[bBAZdDsSwW]|[\^$()\[\]{}*+?|]|\(\?[a-zA-Z:!=<]+", "", pattern)
+    plain = re.sub(r"\\(.)", r"\1", plain).replace(".", "")
+    return [w for w in {plain, plain.strip()} if w]
+
+
+def corpus(settings_path, out_path, seed: int, per_pattern: int):
+    """A corpus for `regex`: GJ's own patterns (read from his settings, read only) and TRICKY, each against texts made
+    from the pattern's own words with case and Unicode twists, plus a sample of TEXTS, with and without re.I."""
+    r = random.Random(seed)
+    config = cfg.load(settings_path)
+    d = settings_dump(config)
+    mine = []
+    for rule in d["rules"]:
+        mine += [rule["sender"], rule["match"]]
+    if d["invites"]:
+        i = d["invites"]
+        mine += i["fixed_blocks"] + i["commute_blocks"] + i["protected"] + [i["leave_pattern"]]
+        mine += [m["subject"] for m in i["movable"]] + [m["before"] for m in i["movable"]]
+        mine += [x for rule in i["rules"] for x in (rule["subject"], rule["organiser"])]
+    if d["one_to_ones"]:
+        mine += [d["one_to_ones"]["leave_pattern"].replace("{name}", re.escape(rep["name"])) for rep in d["one_to_ones"]["reports"]]
+    mine = list(dict.fromkeys(p for p in mine if p))
+    twists = [str.lower, str.upper, str.swapcase, lambda s: s, lambda s: s.replace("i", "ı").replace("I", "İ"),
+              lambda s: s.replace("s", "ſ"), lambda s: s.replace("k", "\u212a").replace("K", "\u212a"),
+              lambda s: s.replace(" ", "\u00a0"), lambda s: s + "\n", lambda s: "Re: " + s, lambda s: s[: len(s) // 2],
+              lambda s: s.replace(" ", "  "), lambda s: "x" + s + "😀"]
+    cases = []
+    for pattern in mine + TRICKY:
+        texts = [t(w) for w in _literals(pattern) for t in twists]
+        texts += r.sample(TEXTS, min(len(TEXTS), max(0, per_pattern - len(texts))))
+        for text in texts:
+            cases += [[pattern, "i", text], [pattern, "", text]]
+    pathlib.Path(out_path).write_text(json.dumps(cases, ensure_ascii=False), encoding="utf-8")
+    print(f"{len(cases)} cases: {len(mine)} of your patterns and {len(TRICKY)} others")
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -568,8 +621,11 @@ def main():
     sub.add_parser("toml").add_argument("file")
     sub.add_parser("settings").add_argument("file")
     r = sub.add_parser("regex"); r.add_argument("corpus"); r.add_argument("out")
+    c = sub.add_parser("corpus"); c.add_argument("settings"); c.add_argument("out")
+    c.add_argument("--seed", type=int, default=1); c.add_argument("--per-pattern", type=int, default=50)
     sub.add_parser("lockkey").add_argument("path")
     st = sub.add_parser("state"); st.add_argument("src"); st.add_argument("dst")
+    lg = sub.add_parser("log"); lg.add_argument("file"); lg.add_argument("text", nargs="*")
     a = p.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     if a.cmd == "gen":
@@ -582,12 +638,19 @@ def main():
         print(dump(tomllib.loads(pathlib.Path(a.file).read_text(encoding="utf-8"))))
     elif a.cmd == "settings":
         print(dump(settings_dump(cfg.load(a.file))))
+    elif a.cmd == "corpus":
+        corpus(a.settings, a.out, a.seed, a.per_pattern)
     elif a.cmd == "regex":
         regex_corpus(a.corpus, a.out)
     elif a.cmd == "lockkey":
         from win_background import key
         path = pathlib.Path(a.path).resolve()
         print(f"mail-triage-run-{key(path)}\nmail-triage-watch-{key(path)}")
+    elif a.cmd == "log":
+        from win_background import logger
+        write = logger(a.file, echo=True, stamp_echo=False)
+        for text in a.text:
+            write(text.replace(r"\n", "\n").replace(r"\r", "\r").replace(r"\t", "\t"))
     elif a.cmd == "state":
         triage._save(pathlib.Path(a.dst), triage._load(pathlib.Path(a.src), None))
 

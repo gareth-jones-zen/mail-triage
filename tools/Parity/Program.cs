@@ -6,6 +6,7 @@
 //   regex <corpus> <out>     search spans for each (pattern, flags, text)
 //   lockkey <path>           the run and watch lock names
 //   state <in> <out>         read a state file and write it back
+//   log <file> <text>...     each text logged and echoed (backslash n, r and t as escapes)
 //   tz                       London time under invariant globalisation (run it as the AOT build)
 using System.Text;
 using System.Text.Json.Nodes;
@@ -37,6 +38,12 @@ switch (command)
         return 0;
     case "state":
         StateFiles.Save(args[2], StateFiles.Load(args[1], () => null));
+        return 0;
+    case "log":
+        // As the CLI logs: to the file, and echoed without the time.
+        var write = Logger.Create(args[1], Console.Out, stampEcho: false);
+        foreach (var text in args.Skip(2))
+            write(text.Replace(@"\n", "\n").Replace(@"\r", "\r").Replace(@"\t", "\t"));
         return 0;
     case "fold":
         // For each ASCII letter and digit, every BMP character a case-insensitive Python-dialect pattern matches.
