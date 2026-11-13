@@ -99,11 +99,22 @@ public static class Proposals
                     seen.Add(k);
                     continue;
                 }
-                var full = mailbox.Graph.Request($"/me/messages/{m.Req("id")}?$select=id,proposedNewTime,startDateTime,endDateTime"
-                                                 + "&$expand=microsoft.graph.eventMessage/event($select=id,isOrganizer,isCancelled)", scopes: MailAndCalendar);
-                if (!full.Truthy("proposedNewTime"))
-                    continue;   // an ordinary reply: nothing to decide
-                var (ok, why, plan) = Judge(settings, calendar, m, full, at);
+                // No $select: Graph reads it against the base message type and refuses proposedNewTime with a
+                // 400 (13 Nov 2026, which failed every run for an hour). The whole message carries it.
+                (bool Ok, string Why, (string Id, DateTime Start, DateTime End)? Plan) judged;
+                try
+                {
+                    var full = mailbox.Graph.Request($"/me/messages/{m.Req("id")}"
+                                                     + "?$expand=microsoft.graph.eventMessage/event($select=id,isOrganizer,isCancelled)", scopes: MailAndCalendar);
+                    if (!full.Truthy("proposedNewTime"))
+                        continue;   // an ordinary reply: nothing to decide
+                    judged = Judge(settings, calendar, m, full, at);
+                }
+                catch (M365Graph.GraphRequestException error) when ((int)error.Status is 400 or 404)
+                {
+                    judged = (false, $"couldn't read the proposal (Graph said {(int)error.Status}); decide in Outlook", null);
+                }
+                var (ok, why, plan) = judged;
                 if (ok && settings.Invites.AcceptProposals)
                 {
                     if (!dryRun)

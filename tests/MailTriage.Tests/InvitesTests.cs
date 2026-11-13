@@ -398,8 +398,11 @@ internal sealed class ProposalGraph : IGraph, IMailWriter
     private readonly JsonObject message;
     private readonly JsonObject full;
 
-    public ProposalGraph((string Start, string End) proposed, bool organiser = true)
+    private readonly int? fail;
+
+    public ProposalGraph((string Start, string End) proposed, bool organiser = true, int? fail = null)
     {
+        this.fail = fail;
         message = new JsonObject
         {
             ["@odata.type"] = "#microsoft.graph.eventMessageResponse", ["id"] = "p1", ["internetMessageId"] = "<p1>",
@@ -423,7 +426,15 @@ internal sealed class ProposalGraph : IGraph, IMailWriter
     }
 
     public JsonObject Request(string url, string method = "GET", JsonNode? body = null, IReadOnlyList<string>? scopes = null,
-        IReadOnlyDictionary<string, string>? headers = null) => (JsonObject)full.DeepClone();
+        IReadOnlyDictionary<string, string>? headers = null)
+    {
+        // What Graph does (13 Nov 2026): $select is read against the base message type, so proposedNewTime is refused.
+        if (url.Contains("proposedNewTime", StringComparison.Ordinal))
+            throw new M365Graph.GraphRequestException(System.Net.HttpStatusCode.BadRequest, method, url, "");
+        if (fail is { } code)
+            throw new M365Graph.GraphRequestException((System.Net.HttpStatusCode)code, method, url, "");
+        return (JsonObject)full.DeepClone();
+    }
 
     public void Delete(string messageId) => Deleted.Add(messageId);
 
@@ -454,12 +465,24 @@ public sealed class Proposals_ : IDisposable
     public void Dispose() => dir.Dispose();
 
     private (List<JsonObject> Items, List<JsonObject> Acted, List<(string, DateTime, DateTime)> Moves, List<string> Deleted) RunWith(
-        (string, string) proposed, List<JsonObject>? diaryOverride = null, bool organiser = true)
+        (string, string) proposed, List<JsonObject>? diaryOverride = null, bool organiser = true, int? fail = null)
     {
-        var box = new ProposalGraph(proposed, organiser);
+        var box = new ProposalGraph(proposed, organiser, fail);
         var calendar = new FakeCalendar(diaryOverride ?? diary);
         var (items, acted, _) = Proposals.Run(config, new Mailbox(box, box), calendar, [], Quiet, now: now);
         return (items, acted, calendar.Moves, box.Deleted);
+    }
+
+    [Fact]
+    public void a_proposal_graph_wont_read_is_queued_not_fatal()
+    {
+        var (items, acted, moves, deleted) = RunWith(("2026-11-13T12:00", "2026-11-13T12:30"), fail: 400);
+        Assert.Empty(acted);
+        Assert.Empty(moves);
+        Assert.Empty(deleted);
+        Assert.Single(items);
+        Assert.Contains("couldn't read the proposal (Graph said 400)", items[0].Req("check"));
+        Assert.Throws<M365Graph.GraphRequestException>(() => RunWith(("2026-11-13T12:00", "2026-11-13T12:30"), fail: 502));
     }
 
     [Fact]
