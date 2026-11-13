@@ -10,6 +10,8 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import urllib.error
+import io
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
@@ -363,8 +365,8 @@ class ProposalCalendar(FakeCalendar):
 
 
 class ProposalMailbox:
-    def __init__(self, proposed, attendees=1, organiser=True):
-        self.deleted = []
+    def __init__(self, proposed, attendees=1, organiser=True, fail=None):
+        self.deleted, self.fail = [], fail
         self.message = {"@odata.type": "#microsoft.graph.eventMessageResponse", "id": "p1", "internetMessageId": "<p1>",
                         "subject": "New Time Proposed: GJ and YP catch-up", "receivedDateTime": "2026-11-11T20:13:00Z",
                         "from": {"emailAddress": {"name": "Yahya Patel", "address": "yahya@example.com"}}}
@@ -381,6 +383,10 @@ class ProposalMailbox:
         return iter([self.message, {"@odata.type": "#microsoft.graph.message", "id": "m2", "subject": "Hello"}])
 
     def request(self, url, method="GET", body=None, scopes=None):
+        if "proposedNewTime" in url:   # what Graph does: $select is read against the base message type
+            raise urllib.error.HTTPError(url, 400, "Bad Request", {}, io.BytesIO(b""))
+        if self.fail:
+            raise urllib.error.HTTPError(url, self.fail, "x", {}, io.BytesIO(b""))
         return self.full
 
     def delete(self, message_id):
@@ -432,6 +438,14 @@ class Proposals(unittest.TestCase):
                 self.assertEqual((acted, moves, deleted), ([], [], []))
                 self.assertIn(reason, items[0]["check"])
                 self.assertEqual(items[0]["rule"], "New time proposed")
+
+    def test_a_proposal_graph_wont_read_is_queued_not_fatal(self):
+        items, acted, moves, deleted = self.run_with(("2026-11-13T12:00", "2026-11-13T12:30"), fail=400)
+        self.assertEqual((acted, moves, deleted), ([], [], []))
+        self.assertEqual(len(items), 1)
+        self.assertIn("couldn't read the proposal", items[0]["check"])
+        with self.assertRaises(urllib.error.HTTPError):
+            self.run_with(("2026-11-13T12:00", "2026-11-13T12:30"), fail=502)
 
     def test_off_it_only_recommends(self):
         self.config.invites.accept_proposals = False

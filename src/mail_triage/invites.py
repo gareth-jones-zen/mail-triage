@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import urllib.error
 import urllib.parse
 
 from .config import Config, InviteRule
@@ -511,12 +512,20 @@ def proposals(config: Config, mailbox, calendar: Calendar, raised: dict, log=pri
             if k in raised:
                 seen.add(k)
                 continue
-            full = mailbox.graph.request(f"/me/messages/{m['id']}?$select=id,proposedNewTime,startDateTime,endDateTime"
-                                         "&$expand=microsoft.graph.eventMessage/event($select=id,isOrganizer,isCancelled)",
-                                         scopes=["Mail.ReadWrite", *SCOPES])
-            if not full.get("proposedNewTime"):
-                continue   # an ordinary reply: nothing to decide
-            ok, why, plan = judge_proposal(config, calendar, m, full, now)
+            # No $select: Graph reads it against the base message type and refuses proposedNewTime with a
+            # 400 (13 Nov 2026, which failed every run for an hour). The whole message carries it.
+            try:
+                full = mailbox.graph.request(f"/me/messages/{m['id']}"
+                                             "?$expand=microsoft.graph.eventMessage/event($select=id,isOrganizer,isCancelled)",
+                                             scopes=["Mail.ReadWrite", *SCOPES])
+            except urllib.error.HTTPError as error:
+                if error.code not in (400, 404):
+                    raise
+                full, ok, why, plan = None, False, f"couldn't read the proposal (Graph said {error.code}); decide in Outlook", None
+            if full is not None:
+                if not full.get("proposedNewTime"):
+                    continue   # an ordinary reply: nothing to decide
+                ok, why, plan = judge_proposal(config, calendar, m, full, now)
             if ok and config.invites.accept_proposals:
                 if not dry_run:
                     calendar.move(plan["id"], plan["start"], plan["end"])
