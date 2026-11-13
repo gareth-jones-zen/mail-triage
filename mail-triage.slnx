@@ -3,5 +3,4 @@
   <Project Path="src/MailTriage.Console/MailTriage.Console.csproj" />
   <Project Path="src/MailTriage/MailTriage.csproj" />
   <Project Path="tests/MailTriage.Tests/MailTriage.Tests.csproj" />
-  <Project Path="tools/Parity/Parity.csproj" />
 </Solution>

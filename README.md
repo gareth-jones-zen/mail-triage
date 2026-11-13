@@ -1,12 +1,5 @@
 # mail-triage
 
-> **This is the `dotnet` branch: a port to .NET 11 Native AOT, in progress and not yet in use.** The Python
-> version, which is what runs today, is on `main` and at tag `v0.9.1`. The port makes the same decisions (checked
-> against the Python version on generated scenarios, settings, patterns and state files); it isn't switched over
-> until it has also matched the Python version on real data. Build: `dotnet test -c Release`, with
-> [background-tools-lib](https://github.com/gareth-jones-zen/background-tools-lib) checked out beside this repo.
-> Offline parity checks: `tools/parity/parity.py` (Python side) and `tools/Parity` (.NET side).
-
 Standing rules for your mail, and advice on your meeting invites. Outlook rules file the noise into folders; mail-triage goes through
 those folders, deletes what your rules say is routine, and queues the rest for you to decide, each
 email once. **Anything no rule names is queued, never deleted.**
@@ -26,18 +19,17 @@ mail-triage file 2 --to Inbox/Projects   # move it to a folder, left unread
 mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule
 ```
 
-It works on Microsoft 365 mail through Microsoft Graph, and runs on Windows (anything else with
-Python 3.11+ works too, without autostart and notifications).
+It works on Microsoft 365 mail through Microsoft Graph, and runs on Windows (x64).
 
 ## Install
 
-```
-pipx install --preinstall git+https://github.com/gareth-jones-zen/m365-graph --preinstall git+https://github.com/gareth-jones-zen/win-background git+https://github.com/gareth-jones-zen/mail-triage
-```
+Nothing else is needed.
 
-[m365-graph](https://github.com/gareth-jones-zen/m365-graph) does the sign-in and Graph requests;
-[win-background](https://github.com/gareth-jones-zen/win-background) does the scheduled task,
-notifications, the run lock and the log. Neither is on PyPI, so both are installed first.
+1. Download `mail-triage-<version>-win-x64.zip` from [Releases](https://github.com/gareth-jones-zen/mail-triage/releases).
+2. Unzip it to a folder that will stay put, such as `%LOCALAPPDATA%\Programs\mail-triage`. The scheduled task (`autostart`) runs the program from there.
+3. Run the commands below from that folder, or add it to your `PATH`.
+
+It holds two programs: `mail-triage.exe`, for a console, and `mail-triage-background.exe`, the same program with no window, which the logon task runs.
 
 **It needs Mail.ReadWrite** on Microsoft's "Graph Command Line Tools" app, to mark mail read and
 move it. Many organisations need an admin to approve that: the first `sign-in` shows an "Approval
@@ -264,8 +256,15 @@ the report's name in `"from"`, and the reason and suggestion in `"check"`:
   "preview": "first 300 characters", "rule": "Vendor webinars", "check": "what a check found", "webLink": "..."}]}
 ```
 
-## Tests
+## Building
+
+It's .NET 11, published as Native AOT. It needs [background-tools-lib](https://github.com/gareth-jones-zen/background-tools-lib)
+checked out beside this repository (or set the `BackgroundToolsLib` property to a checkout elsewhere), then:
 
 ```
-python -m unittest discover -s tests
+dotnet test -c Release
+dotnet publish src/MailTriage.Console -c Release -r win-x64 -o out
+dotnet publish src/MailTriage.Background -c Release -r win-x64 -o out
 ```
+
+A tag `v*` builds and publishes a release.
