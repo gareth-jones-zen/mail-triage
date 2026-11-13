@@ -1,5 +1,5 @@
 using System.Text.Json.Nodes;
-using MailTriage.Interim;
+using PyCompat;
 
 namespace MailTriage.Tests;
 
@@ -330,7 +330,7 @@ public sealed class WatcherLoop : TriageBase
     [Fact]
     public void a_second_watcher_for_the_same_settings_exits_with_3()
     {
-        using var held = MailTriage.Interim.Exclusive.SingleInstance(Watcher.WatchLock(Config));
+        using var held = WinBackground.Locks.SingleInstance(Watcher.WatchLock(Config));
         Assert.Equal(Watcher.AlreadyRunning, Watcher.Watch(Config, (_, _) => throw new InvalidOperationException(), (_, _) => { }, stop: () => true));
     }
 

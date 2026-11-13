@@ -2,6 +2,7 @@
   <ItemGroup>
     <ProjectReference Include="$(BackgroundToolsLib)src\WinBackground\WinBackground.csproj" />
     <ProjectReference Include="$(BackgroundToolsLib)src\M365Graph\M365Graph.csproj" />
+    <ProjectReference Include="$(BackgroundToolsLib)src\PyCompat\PyCompat.csproj" />
     <PackageReference Include="Tomlyn" Version="2.11.1" />
   </ItemGroup>
   <ItemGroup>

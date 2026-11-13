@@ -1,6 +1,6 @@
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using MailTriage.Interim;
+using PyCompat;
 
 namespace MailTriage;
 
@@ -38,7 +38,7 @@ public static class Triage
     {
         if (!message.Has("bodyPreview"))
             return "";
-        return PyText.Head(message.Str("bodyPreview") ?? throw new InvalidOperationException("'NoneType' object is not subscriptable (bodyPreview)"), 300);
+        return PyStr.Head(message.Str("bodyPreview") ?? throw new InvalidOperationException("'NoneType' object is not subscriptable (bodyPreview)"), 300);
     }
 
     public static List<JsonObject> Queue(Settings settings) =>
@@ -227,7 +227,7 @@ public static class Triage
             var cutoff = PyTime.Iso(Clock.Now - TimeSpan.FromDays(KeepDays));
             var kept = new JsonArray();
             foreach (var entry in items.ToList())
-                if (PyText.CompareCodePoints(entry.Req("when"), cutoff) >= 0)
+                if (PyStr.CompareCodePoints(entry.Req("when"), cutoff) >= 0)
                     kept.Add(entry!.DeepClone());
             record["items"] = kept;
             StateFiles.Save(settings.DeletedFile, record);
@@ -263,7 +263,7 @@ public static class Triage
             items[i.Req("id")] = i;
         var ids = new List<string>();
         foreach (var r in refs)
-            ids.Add(PyText.IsDigit(r) && r.Length < 6 ? Pick(settings, [r])[0].Req("id") : r);
+            ids.Add(PyStr.IsDigit(r) && r.Length < 6 ? Pick(settings, [r])[0].Req("id") : r);
         var invites = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) == "invite").Select(i => items[i].Fmt("subject")).ToList();
         if (invites.Count > 0)
             throw new LookupException($"{invites[0]} is an invite, not an email: answer it with `mail-triage invite decline <n>`.");
@@ -276,7 +276,7 @@ public static class Triage
         {
             box.Delete(id);
             var item = items.GetValueOrDefault(id);
-            log($"deleted by hand  {(item is not null ? item.Fmt("from") + ": " + item.Fmt("subject") : PyText.Head(id, 24) + "…")}");
+            log($"deleted by hand  {(item is not null ? item.Fmt("from") + ": " + item.Fmt("subject") : PyStr.Head(id, 24) + "…")}");
         }
         SaveQueue(settings, Queue(settings).Where(i => !ids.Contains(i.Req("id"))).ToList());
         return ids.Count;
@@ -387,7 +387,7 @@ public static class Triage
     {
         var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
         var since = everything ? "" : record.Has("seen_until") ? Py.Str(record.Get("seen_until")) : "";
-        return record.Get("items").Objects().Where(i => PyText.CompareCodePoints(i.Req("when"), since) > 0)
+        return record.Get("items").Objects().Where(i => PyStr.CompareCodePoints(i.Req("when"), since) > 0)
             .Select(i => (JsonObject)i.DeepClone()).ToList();
     }
 }

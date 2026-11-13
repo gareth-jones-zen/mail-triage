@@ -1,7 +1,8 @@
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using M365Graph;
-using MailTriage.Interim;
+using PyCompat;
+using WinBackground;
 
 namespace MailTriage.Tests;
 
@@ -129,15 +130,15 @@ public sealed class PyCompatTests
     [Fact]
     public void code_points_not_utf16_units()
     {
-        Assert.Equal("ab😀", PyText.Head("ab😀cd", 3));
-        Assert.Equal(1, PyText.Head("😀", 1).Length / 2);
-        Assert.True(PyText.CompareCodePoints("😀", "\uff5c") > 0);       // U+1F600 sorts after U+FF5C, as in Python
+        Assert.Equal("ab😀", PyStr.Head("ab😀cd", 3));
+        Assert.Equal(1, PyStr.Head("😀", 1).Length / 2);
+        Assert.True(PyStr.CompareCodePoints("😀", "\uff5c") > 0);       // U+1F600 sorts after U+FF5C, as in Python
         Assert.True(string.CompareOrdinal("😀", "\uff5c") < 0);          // ordinal gets it the other way round
-        Assert.Equal("x", PyText.Strip("\u001c x \u2028"));
-        Assert.Equal(["a", "b"], PyText.Split(" a\u001fb "));
-        Assert.True(PyText.IsDigit("²"));
-        Assert.Throws<FormatException>(() => PyText.Int("²"));
-        Assert.Equal(3, PyText.Int("٣"));
+        Assert.Equal("x", PyStr.Strip("\u001c x \u2028"));
+        Assert.Equal(["a", "b"], PyStr.Split(" a\u001fb "));
+        Assert.True(PyStr.IsDigit("²"));
+        Assert.Throws<FormatException>(() => PyStr.Int("²"));
+        Assert.Equal(3, PyStr.Int("٣"));
     }
 
     [Fact]
@@ -170,11 +171,11 @@ public sealed class PyCompatTests
     public async Task a_lock_released_after_an_await_can_be_taken_by_another_thread()
     {
         var name = $"mail-triage-test-{Guid.NewGuid():N}";
-        var held = Exclusive.Acquire(name, 1, "test");
+        var held = Locks.Exclusive(name, 1, "test");
         await Task.Delay(50, TestContext.Current.CancellationToken);
         await Task.Run(() => { }, TestContext.Current.CancellationToken);   // likely another thread now
         held.Dispose();
-        var other = await Task.Run(() => Exclusive.SingleInstance(name), TestContext.Current.CancellationToken);
+        var other = await Task.Run(() => Locks.SingleInstance(name), TestContext.Current.CancellationToken);
         Assert.NotNull(other);
         other!.Dispose();
     }
@@ -183,22 +184,22 @@ public sealed class PyCompatTests
     public void a_held_lock_excludes_another_holder_and_says_so_in_pythons_words()
     {
         var name = $"mail-triage-test-{Guid.NewGuid():N}";
-        using var held = Exclusive.Acquire(name, 1, "triage run");
-        var error = Assert.Throws<TimeoutException>(() => Exclusive.Acquire(name, 0.06, "triage run"));
+        using var held = Locks.Exclusive(name, 1, "triage run");
+        var error = Assert.Throws<TimeoutException>(() => Locks.Exclusive(name, 0.06, "triage run"));
         Assert.Equal("Another triage run didn't finish within 0 minutes.", error.Message);
-        Assert.Null(Exclusive.SingleInstance(name));
+        Assert.Null(Locks.SingleInstance(name));
     }
 
     [Fact]
     public void london_time_as_zoneinfo_reads_it_under_invariant_globalisation()
     {
         var zone = PyTime.Zone("GMT Standard Time");
-        Assert.Equal(TimeSpan.Zero, PyTime.Aware(new DateTime(2026, 11, 12, 12, 0, 0), zone).Offset);
-        Assert.Equal(TimeSpan.FromHours(1), PyTime.Aware(new DateTime(2026, 7, 1, 12, 0, 0), zone).Offset);
+        Assert.Equal(TimeSpan.Zero, PyTime.At(zone, new DateTime(2026, 11, 12, 12, 0, 0)).Offset);
+        Assert.Equal(TimeSpan.FromHours(1), PyTime.At(zone, new DateTime(2026, 7, 1, 12, 0, 0)).Offset);
         // 01:30 on 25 Oct 2026 happens twice: Python's fold=0 takes the first (summer time).
-        Assert.Equal(TimeSpan.FromHours(1), PyTime.Aware(new DateTime(2026, 10, 25, 1, 30, 0), zone).Offset);
+        Assert.Equal(TimeSpan.FromHours(1), PyTime.At(zone, new DateTime(2026, 10, 25, 1, 30, 0)).Offset);
         // 01:30 on 29 Mar 2026 doesn't happen: Python takes the offset from before the change.
-        Assert.Equal(TimeSpan.Zero, PyTime.Aware(new DateTime(2026, 3, 29, 1, 30, 0), zone).Offset);
+        Assert.Equal(TimeSpan.Zero, PyTime.At(zone, new DateTime(2026, 3, 29, 1, 30, 0)).Offset);
         Assert.Equal(new DateTime(2026, 7, 1, 13, 0, 0), PyTime.Local(new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.Zero), zone));
     }
 

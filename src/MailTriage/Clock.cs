@@ -1,4 +1,4 @@
-using MailTriage.Interim;
+using PyCompat;
 
 namespace MailTriage;
 
@@ -35,5 +35,5 @@ public sealed class FixedTime(DateTime local, TimeZoneInfo? zone = null) : TimeP
 
     public override TimeZoneInfo LocalTimeZone => zone;
 
-    public override DateTimeOffset GetUtcNow() => PyTime.Aware(Local, zone).ToUniversalTime();
+    public override DateTimeOffset GetUtcNow() => PyTime.At(zone, Local).ToUniversalTime();
 }

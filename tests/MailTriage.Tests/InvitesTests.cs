@@ -60,6 +60,25 @@ public sealed class Invites : IDisposable
         return (items.ToDictionary(i => i.Req("subject").Split(':')[0]), seen, skipped, raised);
     }
 
+    // Not in test_invites.py. What v0.9.1 on Python 3.14.5 does, checked against it: 13:30-14:30 for 08:00-18:00
+    // and 08:00-23:59, None for 08:00-24:00 (time.fromisoformat("24:00") is 00:00, so the day closes as it opens),
+    // and ValueError for 08:00-24:30.
+    [Fact]
+    public void a_working_day_ending_at_24_00_has_no_free_slot_as_in_python_3_14()
+    {
+        var block = new Held { Id = "block", Subject = "Focus time", Start = At("2026-11-12", "14:00"), End = At("2026-11-12", "15:00"), Kind = "your block" };
+        var avoid = (At("2026-11-12", "14:30"), At("2026-11-12", "15:30"));
+        (DateTime, DateTime)? Slot(string end)
+        {
+            config.Invites!.WorkingHours = ("08:00", end);
+            return InviteTriage.FreeSlot(config, block, [block], avoid, [], now);
+        }
+        Assert.Equal((At("2026-11-12", "13:30"), At("2026-11-12", "14:30")), Slot("18:00"));
+        Assert.Equal((At("2026-11-12", "13:30"), At("2026-11-12", "14:30")), Slot("23:59"));
+        Assert.Null(Slot("24:00"));
+        Assert.Throws<FormatException>(() => Slot("24:30"));
+    }
+
     [Fact]
     public void recommendations_follow_the_evidence()
     {

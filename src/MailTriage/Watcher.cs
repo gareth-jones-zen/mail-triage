@@ -1,5 +1,5 @@
 using M365Graph;
-using MailTriage.Interim;
+using PyCompat;
 using WinBackground;
 
 namespace MailTriage;
@@ -33,7 +33,7 @@ public static class Watcher
         var clock = now ?? (() => DateTime.Now);
         var pause = sleep ?? Thread.Sleep;
         var log = Logger.Create(settings.LogFile);
-        using var held = Exclusive.SingleInstance(WatchLock(settings));   // held until the process ends
+        using var held = Locks.SingleInstance(WatchLock(settings));   // held until the process ends
         if (held is null)
         {
             log("another watcher is already running for these settings; not starting a second");
@@ -58,7 +58,7 @@ public static class Watcher
                     {
                         settings = Settings.Load(settings.Path);
                         RunReport report;
-                        using (Exclusive.Acquire(RunLock(settings), 600, "triage run"))
+                        using (Locks.Exclusive(RunLock(settings), 600, "triage run"))
                             report = runOnce(settings, log);
                         if (report.New > 0 && settings.Notify == "new")
                             notify($"{report.New} email{(report.New > 1 ? "s" : "")} to review", ["mail-triage list"]);
@@ -69,7 +69,7 @@ public static class Watcher
                     {
                         log($"sign-in needed: {error.Message}");
                         if (failing != "sign-in")
-                            notify("mail-triage needs a sign-in", [PyText.Head(error.Message, 300)]);
+                            notify("mail-triage needs a sign-in", [PyStr.Head(error.Message, 300)]);
                         failing = "sign-in";
                     }
                     catch (Exception error)
@@ -77,7 +77,7 @@ public static class Watcher
                         log($"run failed: {error.GetType().Name}: {error.Message}");
                         streak++;
                         if (streak == 3)
-                            notify("mail-triage couldn't run", [PyText.Head($"{error.GetType().Name}: {error.Message}", 300), $"Log: {settings.LogFile}"]);
+                            notify("mail-triage couldn't run", [PyStr.Head($"{error.GetType().Name}: {error.Message}", 300), $"Log: {settings.LogFile}"]);
                         failing = error.GetType().Name;
                     }
                 }

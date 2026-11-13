@@ -1,6 +1,6 @@
 using System.Text.Json.Nodes;
 using M365Graph;
-using MailTriage.Interim;
+using PyCompat;
 using WinBackground;
 
 namespace MailTriage;
@@ -265,7 +265,7 @@ public static class Cli
             // Locked like a run, so a run in progress can't write back a queue that's just been cleared.
             try
             {
-                using (Exclusive.Acquire(Watcher.RunLock(settings), 600, "triage run"))
+                using (Locks.Exclusive(Watcher.RunLock(settings), 600, "triage run"))
                 {
                     if (args.Command == "keep")
                         Triage.Keep(settings, args.Positional, log);
@@ -302,7 +302,7 @@ public static class Cli
                 return CalendarCommand(args, settings, graph, Door(args, graph, args.Writes, settings), log, host);
             }
             RunReport report;
-            using (Exclusive.Acquire(Watcher.RunLock(settings), 600, "triage run"))
+            using (Locks.Exclusive(Watcher.RunLock(settings), 600, "triage run"))
             {
                 var door = Door(args, graph, args.Flag("--dry-run") ? WriteMode.Refuse : args.Writes, settings);
                 if (args.Command is "delete" or "resolve")
@@ -325,7 +325,7 @@ public static class Cli
         {
             log($"sign-in needed: {error.Message}");
             if (scheduled)
-                host.Notify("mail-triage needs a sign-in", [PyText.Head(error.Message, 300)]);
+                host.Notify("mail-triage needs a sign-in", [PyStr.Head(error.Message, 300)]);
             return 1;
         }
         catch (LookupException error)
@@ -337,7 +337,7 @@ public static class Cli
         {
             log($"failed: {error.GetType().Name}: {error.Message}");
             if (scheduled)
-                host.Notify("mail-triage failed", [PyText.Head($"{error.GetType().Name}: {error.Message}", 300), $"Log: {settings.LogFile}"]);
+                host.Notify("mail-triage failed", [PyStr.Head($"{error.GetType().Name}: {error.Message}", 300), $"Log: {settings.LogFile}"]);
             return 1;
         }
     }
@@ -366,7 +366,7 @@ public static class Cli
         else
         {
             foreach (var item in items)
-                Print(host.Out, $"{(item.Has("n") ? Py.Str(item.Get("n")) : "?"),3}. {PyText.Head(item.Fmt("received", "None"), 10)}  {item.Fmt("from", "None")}\n"
+                Print(host.Out, $"{(item.Has("n") ? Py.Str(item.Get("n")) : "?"),3}. {PyStr.Head(item.Fmt("received", "None"), 10)}  {item.Fmt("from", "None")}\n"
                                 + $"     {item.Fmt("subject", "None")}\n     [{item.Fmt("rule", "None")}]" + (item.Truthy("check") ? $" {Py.Str(item.Get("check"))}" : ""));
             if (items.Count == 0)
                 Print(host.Out, "Nothing waiting.");
@@ -384,7 +384,7 @@ public static class Cli
             Print(host.Out, "Nothing deleted by the rules since the queue was last cleared.");
             return 0;
         }
-        static string When(JsonObject i) => PyText.Head(i.Req("when"), 16).Replace("T", " ");
+        static string When(JsonObject i) => PyStr.Head(i.Req("when"), 16).Replace("T", " ");
         Print(host.Out, $"{items.Count} deleted, {When(items[0])} to {When(items[^1])}:");
         var byRule = new List<(string Rule, List<JsonObject> Group)>();
         foreach (var item in items)
@@ -400,7 +400,7 @@ public static class Cli
         {
             Print(host.Out, $"\n  {rule} ({group.Count})");
             foreach (var item in group)
-                Print(host.Out, $"    {PyText.Head(item.Fmt("received", "None"), 10)}  {item.Fmt("from", "None")}: {PyText.Head(item.Fmt("subject", "None"), 90)}"
+                Print(host.Out, $"    {PyStr.Head(item.Fmt("received", "None"), 10)}  {item.Fmt("from", "None")}: {PyStr.Head(item.Fmt("subject", "None"), 90)}"
                                 + (item.Truthy("to") ? $"  -> filed to {Py.Str(item.Get("to"))}" : "")
                                 + (item.Truthy("accepted") ? $"  -> accepted ({Py.Str(item.Get("accepted"))})" : "")
                                 + (item.Truthy("did") ? $"  -> {Py.Str(item.Get("did"))}" : ""));
@@ -413,7 +413,7 @@ public static class Cli
         var calendar = new Calendar(graph, door.Calendar);
         if (args.Command == "invite")
         {
-            using (Exclusive.Acquire(Watcher.RunLock(settings), 600, "triage run"))
+            using (Locks.Exclusive(Watcher.RunLock(settings), 600, "triage run"))
                 Triage.Answer(settings, calendar, args.Positional[1..], args.Positional[0], args.Value("--note") ?? "", !args.Flag("--silent"), log,
                     series: args.Flag("--series"), move: args.Flag("--move"));
             return 0;

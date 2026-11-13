@@ -1,6 +1,6 @@
 using System.Text;
 using System.Text.Json.Nodes;
-using MailTriage.Interim;
+using PyCompat;
 
 namespace MailTriage;
 

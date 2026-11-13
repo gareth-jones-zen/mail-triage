@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
-using MailTriage.Interim;
+using PyCompat;
 
 namespace MailTriage;
 
@@ -24,9 +24,9 @@ public static class Checks
         foreach (var row in PyRegex.Get("(?is)<tr.*?</tr>").FindAll(bodyHtml))
         {
             var cells = PyRegex.Get("(?is)<td.*?</td>").FindAll(row)
-                .Select(cell => PyText.Strip(PyRegex.Get(@"\s+").Sub(" ", PyRegex.Get("<[^>]+>").Sub(" ", cell)))).ToList();
-            if (cells.Count == 2 && cells[0].Length > 0 && PyText.IsDigit(cells[1]))
-                flows.Add((cells[0], PyText.Int(cells[1])));   // "²" passes isdigit and fails int(), as in Python
+                .Select(cell => PyStr.Strip(PyRegex.Get(@"\s+").Sub(" ", PyRegex.Get("<[^>]+>").Sub(" ", cell)))).ToList();
+            if (cells.Count == 2 && cells[0].Length > 0 && PyStr.IsDigit(cells[1]))
+                flows.Add((cells[0], PyStr.Int(cells[1])));   // "²" passes isdigit and fails int(), as in Python
         }
         return flows;
     }

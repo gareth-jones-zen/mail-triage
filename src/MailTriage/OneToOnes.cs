@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
-using MailTriage.Interim;
+using PyCompat;
 
 namespace MailTriage;
 
@@ -228,7 +228,7 @@ public static class OneToOnePlanner
                 var (start, end) = InviteTriage.Times(meeting);
                 var subject = meeting.StrOr("subject");
                 if (!meeting.Truthy("isOrganizer") || meeting.Truthy("isCancelled") || meeting.Truthy("isAllDay")
-                    || !PyRegex.Get(PyRegex.Escape(report.Subject), true).FullMatch(PyText.Strip(subject))
+                    || !PyRegex.Get(PyRegex.Escape(report.Subject), true).FullMatch(PyStr.Strip(subject))
                     || settings.Invites!.Protected.Any(p => PyRegex.IsMatch(p, subject, true))
                     || !InviteTriage.People(meeting).Select(InviteTriage.Address).Contains(report.Email)
                     || start <= at || DateOnly.FromDateTime(start) >= today.AddDays((int)ahead))
@@ -255,7 +255,7 @@ public static class OneToOnePlanner
                 var absent = new[] { ("me", meHit), ("them", themHit) }.Where(p => p.Item2 == true).Select(p => p.Item1).ToList();
                 var reason = bank.Contains(day) ? "the bank holiday"
                     : string.Join("; ", absent.Select(p => p == "me" ? "you're on leave" : $"{report.Name} is on leave"));
-                var week = string.Join(", ", absent.Select(p => $"{(p == "me" ? "you" : PyText.Split(report.Name)[0])} off {G(counts[p])} of {Weekdays} days that week"));
+                var week = string.Join(", ", absent.Select(p => $"{(p == "me" ? "you" : PyStr.Split(report.Name)[0])} off {G(counts[p])} of {Weekdays} days that week"));
                 var why = $"{reason} {PyTime.Strftime(day, "%a %d %b")} ({week})";
                 var heavy = absent.Where(p => counts[p] >= config.CancelDays).ToList();
                 if (heavy.Count > 0)

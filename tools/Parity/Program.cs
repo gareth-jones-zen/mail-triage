@@ -10,7 +10,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using MailTriage;
-using MailTriage.Interim;
+using PyCompat;
 using Tomlyn;
 using Tomlyn.Model;
 using WinBackground;
@@ -57,7 +57,7 @@ switch (command)
     case "tz":
         var zone = PyTime.Zone("GMT Standard Time");
         foreach (var t in new[] { "2026-11-12T12:00", "2026-07-01T12:00", "2026-10-25T01:30", "2027-03-28T01:30", "2027-03-28T02:30" })
-            Console.WriteLine($"{t} {PyTime.Aware(PyTime.FromIso(t), zone):yyyy-MM-ddTHH:mm:sszzz}");
+            Console.WriteLine($"{t} {PyTime.At(zone, PyTime.FromIso(t)):yyyy-MM-ddTHH:mm:sszzz}");
         Console.WriteLine(PyTime.Local(new DateTimeOffset(2026, 10, 25, 0, 30, 0, TimeSpan.Zero), zone).ToString("s"));
         Console.WriteLine(PyTime.Local(new DateTimeOffset(2026, 10, 25, 1, 30, 0, TimeSpan.Zero), zone).ToString("s"));
         return 0;
@@ -212,7 +212,7 @@ internal static class Scenarios
                     var (items, seen, skipped) = InviteTriage.Triage(settings, calendar, raised, log.Add, now, accepted, acted, dryRun);
                     return PyJson.Dump(new JsonObject
                     {
-                        ["items"] = Objs(items), ["seen"] = Strs(seen.Order(PyText.Order)), ["skipped"] = skipped, ["raised"] = raised.DeepClone(),
+                        ["items"] = Objs(items), ["seen"] = Strs(seen.Order(PyStr.Order)), ["skipped"] = skipped, ["raised"] = raised.DeepClone(),
                         ["acted"] = Objs(acted), ["calendar"] = calendar.Log.DeepClone(), ["accepted"] = accepted.DeepClone(), ["log"] = Strs(log),
                     }, null, false);
                 }
@@ -225,7 +225,7 @@ internal static class Scenarios
                     var (items, acted, seen) = OneToOnePlanner.Run(settings, calendar, raised, log.Add, dryRun, now);
                     return PyJson.Dump(new JsonObject
                     {
-                        ["plan"] = Strs(plan), ["items"] = Objs(items), ["acted"] = Objs(acted), ["seen"] = Strs(seen.Order(PyText.Order)),
+                        ["plan"] = Strs(plan), ["items"] = Objs(items), ["acted"] = Objs(acted), ["seen"] = Strs(seen.Order(PyStr.Order)),
                         ["raised"] = raised.DeepClone(), ["calendar"] = calendar.Log.DeepClone(), ["log"] = Strs(log),
                     }, null, false);
                 }
@@ -237,7 +237,7 @@ internal static class Scenarios
                     var (items, acted, seen) = Proposals.Run(settings, new Mailbox(box, box), calendar, raised, log.Add, dryRun, now);
                     return PyJson.Dump(new JsonObject
                     {
-                        ["items"] = Objs(items), ["acted"] = Objs(acted), ["seen"] = Strs(seen.Order(PyText.Order)), ["raised"] = raised.DeepClone(),
+                        ["items"] = Objs(items), ["acted"] = Objs(acted), ["seen"] = Strs(seen.Order(PyStr.Order)), ["raised"] = raised.DeepClone(),
                         ["calendar"] = calendar.Log.DeepClone(), ["deleted"] = box.Deleted.DeepClone(), ["log"] = Strs(log),
                     }, null, false);
                 }

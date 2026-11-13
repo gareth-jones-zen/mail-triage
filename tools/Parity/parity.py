@@ -3,7 +3,9 @@
 Never runs the live tool, never calls Graph: everything here is generated, or read from copies.
 
     set PYTHONPATH=<a checkout of v0.9.1>\\src
-    python tools/parity/parity.py gen <dir> [--count N] [--seed S]   generated scenarios
+    python tools/parity/parity.py gen <dir> [--count N] [--seed S] [--hours A-B,...] [--travel A-B,...]
+                                                                      generated scenarios (--hours and --travel
+                                                                      choose from other spans, such as 08:00-24:00)
     python tools/parity/parity.py py <dir>                            Python's results for them
     dotnet run --project tools/Parity -- scenarios <dir>              .NET's results
     python tools/parity/parity.py compare <dir>                       the differences
@@ -160,7 +162,7 @@ accept_shortened = {{accept_shortened}}
 proposals_folders = ['Inbox']
 accept_proposals = {{accept_proposals}}
 working_hours = "{{working}}"
-travel_hours = "06:00-21:00"
+travel_hours = "{{travel}}"
 date_format = "{{date_format}}"
 
 [[movable_block]]
@@ -224,10 +226,11 @@ def quarter(r, day, lo=6, hi=20):
     return dt.datetime.combine(day, dt.time(r.randint(lo, hi - 1), r.choice([0, 15, 30, 45])))
 
 
-def gen_settings(r, path: pathlib.Path):
+def gen_settings(r, path: pathlib.Path, hours=None, travel=None):
     text = SETTINGS.format(days_ahead=r.choice([14, 30, 42]), accept_shortened=r.choice(["true", "false"]),
                            accept_proposals=r.choice(["true", "false"]),
-                           working=r.choice(["08:00-18:00", "09:00-17:30", "07:30-19:00"]),
+                           working=r.choice(hours or ["08:00-18:00", "09:00-17:30", "07:30-19:00"]),
+                           travel=r.choice(travel) if travel else "06:00-21:00",
                            date_format=r.choice(["%d/%m", "%a %d %b", "%d %B %Y"]),
                            act=r.choice(["true", "false"]), max_actions=r.choice([1, 3, 20]), cancel_days=r.choice([2, 3, 2.5]),
                            midday=r.choice(["13:00", "12:30"]))
@@ -411,14 +414,14 @@ def gen_proposal(r, monday: dt.date):
     return diary, message, full
 
 
-def gen(out: pathlib.Path, count: int, seed: int):
+def gen(out: pathlib.Path, count: int, seed: int, hours=None, travel=None):
     r = random.Random(seed)
     out.mkdir(parents=True, exist_ok=True)
     scenarios = []
     for i in range(count):
         settings = out / f"settings-{i % 40}.toml"
         if not settings.exists():
-            gen_settings(random.Random(seed * 1000 + i % 40), settings)
+            gen_settings(random.Random(seed * 1000 + i % 40), settings, hours, travel)
         monday = dt.date(2026, 10, 5) + dt.timedelta(days=7 * r.randint(0, 27))
         now = dt.datetime.combine(monday + dt.timedelta(days=r.randint(0, 4)), dt.time(r.randint(6, 19), r.choice([0, 7, 15, 30, 45])))
         kind = r.choice(["invites", "invites", "one_to_ones", "proposal", "nearest"])
@@ -558,6 +561,8 @@ def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("gen"); g.add_argument("dir"); g.add_argument("--count", type=int, default=3000); g.add_argument("--seed", type=int, default=1)
+    g.add_argument("--hours", help="working_hours choices, comma-separated (default: three ordinary days)")
+    g.add_argument("--travel", help="travel_hours choices, comma-separated (default: 06:00-21:00)")
     sub.add_parser("py").add_argument("dir")
     sub.add_parser("compare").add_argument("dir")
     sub.add_parser("toml").add_argument("file")
@@ -568,7 +573,7 @@ def main():
     a = p.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
     if a.cmd == "gen":
-        gen(pathlib.Path(a.dir), a.count, a.seed)
+        gen(pathlib.Path(a.dir), a.count, a.seed, a.hours and a.hours.split(","), a.travel and a.travel.split(","))
     elif a.cmd == "py":
         py_results(pathlib.Path(a.dir))
     elif a.cmd == "compare":

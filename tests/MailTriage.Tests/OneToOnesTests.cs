@@ -1,5 +1,5 @@
 using System.Text.Json.Nodes;
-using MailTriage.Interim;
+using PyCompat;
 using static MailTriage.Tests.Make;
 
 namespace MailTriage.Tests;

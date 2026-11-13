@@ -1,5 +1,5 @@
 using System.Text.Json.Nodes;
-using MailTriage.Interim;
+using PyCompat;
 
 namespace MailTriage;
 
@@ -203,7 +203,11 @@ public static class InviteTriage
             if (PyTime.Weekday(day) >= 5 || away.Contains(day))
                 continue;
             var openAt = At(day, hours.Start);
-            var closeAt = At(day, hours.End);   // "24:00" fails, as it does in Python (a quirk kept for parity)
+            // A quirk kept for parity: Python 3.14 reads time.fromisoformat("24:00") as 00:00 (3.12 raised ValueError),
+            // so a day ending "24:00" closes at the midnight it starts with and no slot is ever found. TimeFromIso does
+            // the same. ("24:30" passes the settings check and fails here, in both.) one_to_ones and proposals read
+            // "24:00" as the end of the day instead.
+            var closeAt = At(day, hours.End);
             var options = new List<DateTime>();
             for (var t = openAt; t + length <= closeAt; t += Step)
             {
@@ -228,7 +232,7 @@ public static class InviteTriage
         return $"{c.Subject} ({c.Kind}, {Day(c.Start)}–{Hm(c.End)}{moved})";
     }
 
-    private static string Sorted(IEnumerable<string> labels) => string.Join("; ", labels.Distinct().Order(PyText.Order));
+    private static string Sorted(IEnumerable<string> labels) => string.Join("; ", labels.Distinct().Order(PyStr.Order));
 
     /// <summary>The recommendation for one invite (for a series, across its occurrences in the window).</summary>
     public static Verdict Assess(Settings settings, JsonObject e, List<Held> held, HashSet<DateOnly> away, List<JsonObject> seriesEvents,
@@ -298,7 +302,7 @@ public static class InviteTriage
             if (fixedHits.Count > 0)
                 part.Add($"{Distinct(fixedHits)} clash: " + Sorted(fixedHits.Select(h => Label(h.C))));
             (rec, why) = ("accept, and decline the clashing ones", $"of {occurrences.Count} occurrences, " + string.Join("; ", part));
-            decline = onLeave.Select(o => o.Req("id")).Concat(fixedHits.Select(h => h.O.Req("id"))).Distinct().Order(PyText.Order).ToList();
+            decline = onLeave.Select(o => o.Req("id")).Concat(fixedHits.Select(h => h.O.Req("id"))).Distinct().Order(PyStr.Order).ToList();
             note = onLeave.Count > 0 && fixedHits.Count == 0 ? LeaveNote(settings, DateOnly.FromDateTime(Times(onLeave[0]).Start), away) : "";
         }
         else
@@ -471,7 +475,7 @@ public static class InviteTriage
                 ["responseRequested"] = first.Has("responseRequested") ? first.Get("responseRequested").Copy() : true,
                 ["received"] = PyTime.Iso(start, "minutes"), ["from"] = name.Length > 0 ? name : address,
                 ["subject"] = $"{(first.StrOr("subject") is { Length: > 0 } subj ? subj : "(no subject)")}: {Day(start)}–{Hm(end)}",
-                ["preview"] = PyText.Head(first.StrOr("bodyPreview"), 300), ["rule"] = rule is not null ? rule.Name : "invite",
+                ["preview"] = PyStr.Head(first.StrOr("bodyPreview"), 300), ["rule"] = rule is not null ? rule.Name : "invite",
                 ["check"] = $"{verdict.Recommendation.ToUpperInvariant()}: {verdict.Why}" + (verdict.Note.Length > 0 ? $" | note: \"{verdict.Note}\"" : ""),
                 ["recommendation"] = verdict.Recommendation, ["decline"] = J.Array(verdict.Decline), ["note"] = verdict.Note,
                 ["clashes"] = verdict.Clashes, ["webLink"] = first.Get("webLink").Copy(),

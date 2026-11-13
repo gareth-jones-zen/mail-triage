@@ -1,5 +1,5 @@
 using System.Text.Json.Nodes;
-using MailTriage.Interim;
+using PyCompat;
 
 namespace MailTriage;
 
@@ -17,7 +17,7 @@ public static class Proposals
         var text = value.Req("dateTime");
         var t = PyTime.FromIso(text[..Math.Min(19, text.Length)]);
         var tz = value.Has("timeZone") && value.Get("timeZone") is not null ? Py.Str(value.Get("timeZone")) : "UTC";
-        return tz.ToUpperInvariant() is "UTC" or "Z" ? new DateTimeOffset(t, TimeSpan.Zero) : PyTime.Aware(t, zone);
+        return tz.ToUpperInvariant() is "UTC" or "Z" ? new DateTimeOffset(t, TimeSpan.Zero) : PyTime.At(zone, t);
     }
 
     /// <summary>(accept?, why, the move) for someone's proposed new time for one of your meetings. Accepted only when

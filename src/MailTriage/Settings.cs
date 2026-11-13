@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
-using MailTriage.Interim;
+using PyCompat;
 using Tomlyn;
 using Tomlyn.Model;
 
@@ -257,7 +257,7 @@ public sealed class Settings
             if (action == "file" && !Toml.Truthy(item.Get("to")))
                 throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action file but no `to` folder.");
             if (action == "check" && !(item.Get("check") is string c && Checks.All.ContainsKey(c)))
-                throw new SettingsException($"Rule {Py.ReprString(name)} in {full} needs check = one of {string.Join(", ", Checks.All.Keys.Order(PyText.Order))}.");
+                throw new SettingsException($"Rule {Py.ReprString(name)} in {full} needs check = one of {string.Join(", ", Checks.All.Keys.Order(PyStr.Order))}.");
             foreach (var key in new[] { "sender", "match" })
                 if (Toml.Truthy(item.Get(key)) && PyRegex.Problem(Toml.Str(item.Get(key))) is { } problem)
                     throw new SettingsException($"Rule {Py.ReprString(name)} in {full}: {key} isn't a valid regular expression ({problem}).");
@@ -380,7 +380,7 @@ public sealed class Settings
                     throw new SettingsException($"A [[one_to_one]] in {full} needs name and email.");
                 var name = Toml.Str(item.Get("name"));
                 var subject = Toml.Truthy(item.Get("subject")) ? Toml.Str(item.Get("subject"))
-                    : PyFormat.Named(form, new Dictionary<string, string> { ["first"] = PyText.Split(name)[0], ["name"] = name });
+                    : PyFormat.Named(form, new Dictionary<string, string> { ["first"] = PyStr.Split(name)[0], ["name"] = name });
                 reports.Add(new OneToOne(name, Toml.Str(item.Get("email")).ToLowerInvariant(), subject));
             }
             var pattern = section.Get("leave_pattern") is { } lp ? Toml.Str(lp) : OneToOnes.DefaultLeavePattern;
@@ -559,7 +559,7 @@ internal static class Toml
         long l => l,
         double d when double.IsFinite(d) => (long)Math.Truncate(d),
         bool b => b ? 1 : 0,
-        string s => PyText.Int(s),
+        string s => PyStr.Int(s),
         _ => throw new SettingsException($"{Repr(value)} isn't a whole number."),
     };
 
@@ -568,7 +568,7 @@ internal static class Toml
         long l => l,
         double d => d,
         bool b => b ? 1 : 0,
-        string s when double.TryParse(PyText.Strip(s), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) => d,
+        string s when double.TryParse(PyStr.Strip(s), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) => d,
         _ => throw new SettingsException($"{Repr(value)} isn't a number."),
     };
 
