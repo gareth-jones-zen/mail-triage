@@ -35,7 +35,9 @@ public sealed class UsageException(string message) : Exception(message);
 /// --writes live (the default) | journal | refuse, and --journal FILE (where journal mode records each write).</summary>
 public static class Cli
 {
-    public const string Version = "1.0.0-dev";
+    /// <summary>From the build (Directory.Build.props, or the release's -p:Version from its tag).</summary>
+    public static readonly string Version = System.Reflection.CustomAttributeExtensions
+        .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>(typeof(Cli).Assembly)?.InformationalVersion ?? "unknown";
 
     public const string Usage = """
         mail-triage: standing rules for your mail. Delete the routine; queue the rest for you, each email once.
