@@ -8,14 +8,91 @@ namespace MailTriage;
 /// the email: (nothing to do?, why). True deletes it as a delete rule would; false queues it with the why.
 ///
 /// flow-failures: Power Automate's "flow(s) have failed" digest only matters if the flow is still failing. Each flow
-/// needs a [[flow_check]] saying what a good run leaves behind; a flow without one is raised.</summary>
+/// needs a [[flow_check]] saying what a good run leaves behind; a flow without one is raised.
+///
+/// github-runs: a GitHub Actions "Run failed" email only matters if the workflow is still failing on that branch.
+/// It asks the GitHub CLI (gh, signed in as you) for the branch's latest finished run of that workflow.</summary>
 public static class Checks
 {
     public delegate (bool Fine, string Why) Check(JsonObject message, string bodyHtml, Settings settings);
 
     /// <summary>name -> (needs the body?, the check).</summary>
     public static readonly IReadOnlyDictionary<string, (bool NeedsBody, Check Run)> All =
-        new Dictionary<string, (bool, Check)> { ["flow-failures"] = (true, CheckFlowFailures) };
+        new Dictionary<string, (bool, Check)>
+        {
+            ["flow-failures"] = (true, CheckFlowFailures),
+            ["github-runs"] = (false, CheckGitHubRun),
+        };
+
+    /// <summary>Runs gh with these arguments: (exit code, stdout). Replaced in tests.</summary>
+    public static Func<IReadOnlyList<string>, (int Exit, string Output)> Gh = RunGh;
+
+    private static (int, string) RunGh(IReadOnlyList<string> args)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo("gh")
+        {
+            UseShellExecute = false, CreateNoWindow = true,   // the watcher is windowless: no console flashing up
+            RedirectStandardOutput = true, RedirectStandardError = true,
+        };
+        foreach (var a in args)
+            start.ArgumentList.Add(a);
+        try
+        {
+            using var process = System.Diagnostics.Process.Start(start)!;
+            var output = process.StandardOutput.ReadToEndAsync();
+            _ = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(60_000))
+            {
+                process.Kill(true);
+                return (-1, "");
+            }
+            return (process.ExitCode, output.Result);
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return (-1, "");   // gh isn't installed or isn't on PATH
+        }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex RunFailed = new(
+        @"^\[(?<repo>[\w.-]+/[\w.-]+)\] Run failed: (?<workflow>.+) - (?<branch>\S+) \((?<sha>[0-9a-f]{7,40})\)\s*$");
+
+    /// <summary>(repo, workflow, branch, sha) from "[owner/repo] Run failed: build - main (6474d40)", or null.</summary>
+    public static (string Repo, string Workflow, string Branch, string Sha)? ParseRunFailed(string subject)
+    {
+        var m = RunFailed.Match(subject.Trim());
+        return m.Success ? (m.Groups["repo"].Value, m.Groups["workflow"].Value, m.Groups["branch"].Value, m.Groups["sha"].Value) : null;
+    }
+
+    public static (bool, string) CheckGitHubRun(JsonObject message, string bodyHtml, Settings settings)
+    {
+        var subject = message.Has("subject") ? Py.Str(message.Get("subject")) : "";
+        if (ParseRunFailed(subject) is not var (repo, workflow, branch, _))
+            return (false, "couldn't read the repository, workflow and branch from the subject");
+        var (exit, output) = Gh(["run", "list", "-R", repo, "--branch", branch, "--workflow", workflow, "-L", "10",
+                                 "--json", "status,conclusion,headSha,createdAt"]);
+        if (exit != 0)
+            return (false, "couldn't ask GitHub (is gh installed and signed in?), so can't tell whether it has passed since");
+        JsonArray? runs;
+        try
+        {
+            runs = JsonNode.Parse(output) as JsonArray;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            runs = null;
+        }
+        var latest = runs?.OfType<JsonObject>().FirstOrDefault(r => (string?)r["status"] == "completed");
+        if (latest is null)
+            return (false, $"no finished {workflow} run on {branch} found, so can't tell whether it has passed since");
+        var conclusion = (string?)latest["conclusion"] ?? "unknown";
+        var headSha = (string?)latest["headSha"] ?? "";
+        var sha = headSha[..Math.Min(7, headSha.Length)];
+        var when = (string?)latest["createdAt"] ?? "";
+        return conclusion == "success"
+            ? (true, $"it has passed since: the latest {workflow} run on {branch} ({sha}, {when}) succeeded")
+            : (false, $"still failing: the latest {workflow} run on {branch} ({sha}, {when}) ended '{conclusion}'");
+    }
 
     /// <summary>[(flow name, failure count)] from the digest's table of flows.</summary>
     public static List<(string Name, long Count)> FlowFailures(string bodyHtml)

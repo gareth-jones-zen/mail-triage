@@ -90,6 +90,13 @@ check = "flow-failures"
 flow = "Weekly report"                   # within the flow's name in the digest
 output = '~/OneDrive/Reports/report-*.html'      # what a good run writes
 pending = '~/OneDrive/Reports/requests/*.txt'    # optional: what a run consumes
+
+[[rule]]
+name = "GitHub Actions failures"
+sender = 'notifications@github\.com'
+match = '^\[[^\]]+\] Run failed: '
+action = "check"
+check = "github-runs"                   # needs the GitHub CLI (gh), signed in
 ```
 
 Write regular expressions in TOML's single-quoted literal strings, so backslashes stay as they
@@ -107,6 +114,7 @@ quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-
 - **Each email is raised once.** Every email ever queued is recorded by its internet message ID (Graph's own id changes when an email moves), so one you've seen and kept in the folder doesn't come back. The first version re-queued everything still in the folders on every run, and the same six emails were put to their owner twice. **What's waiting stays in the queue until you `delete`, `keep` or `clear` it**, and an email deleted in Outlook drops out by itself.
 - **The test for a rule is "does this need me to do something?"** A notification that only says something happened should be a delete rule. Hence the flow-failures check: a failure digest only matters if the flow is still failing.
 - **flow-failures never guesses that a flow is fine.** Power Automate doesn't say whether a flow has worked since, so each flow needs a `[[flow_check]]` saying what a good run leaves behind. With `pending`, a flow has recovered if nothing pending is newer than its newest output. Without it, if its output is newer than the digest. A flow without a check is raised.
+- **github-runs asks GitHub whether the workflow has passed since.** It reads the repository, workflow and branch from a "[owner/repo] Run failed: build - main (abc1234)" email, and asks the GitHub CLI (`gh run list`, as you) for that branch's latest finished run of that workflow. A success since deletes the email; a failure, or anything it can't tell (no `gh`, not signed in, no finished run), is raised with what it found.
 - **One run at a time**, so the watcher and a run started by hand can't both act on the same email. `clear` and `keep` take the same lock, so a run in progress can't write back a queue you've just cleared.
 - **Unattended deletes stay visible.** Everything the rules delete is recorded, and `mail-triage deleted` lists what went since you last cleared the queue, grouped by rule (`--all` for the last 60 days). `list` says how many. A rule that starts catching the wrong mail shows up there, and the email is still in Deleted Items.
 - **The watcher runs once at start, then every `every_minutes` within `hours`**, so logging on in the evening still clears the day's mail, and checking Outlook in the afternoon finds the folders already tidy. One watcher per settings file; it logs `alive` hourly and notifies a failure once, until a run succeeds.

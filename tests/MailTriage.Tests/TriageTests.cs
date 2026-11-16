@@ -253,6 +253,66 @@ public sealed class FlowFailures : TriageBase
     }
 }
 
+public sealed class GitHubRuns : TriageBase
+{
+    private static JsonObject Failed(string subject) => Message(7, "notifications@github.com", subject);
+
+    private (bool, string) CheckWith(string subject, int exit, string output, List<IReadOnlyList<string>>? calls = null)
+    {
+        var saved = Checks.Gh;
+        Checks.Gh = args => { calls?.Add(args); return (exit, output); };
+        try
+        {
+            return Checks.CheckGitHubRun(Failed(subject), "", Config);
+        }
+        finally
+        {
+            Checks.Gh = saved;
+        }
+    }
+
+    [Fact]
+    public void reads_the_subject()
+    {
+        Assert.Equal(("gareth-jones-zen/meeting-preps", "build", "dotnet", "647ab27"),
+            Checks.ParseRunFailed("[gareth-jones-zen/meeting-preps] Run failed: build - dotnet (647ab27)"));
+        Assert.Equal(("o/r", "Build and test", "feature/x", "abc1234"),
+            Checks.ParseRunFailed("[o/r] Run failed: Build and test - feature/x (abc1234)"));
+        Assert.Null(Checks.ParseRunFailed("[o/r] Run cancelled: build - main (abc1234)"));
+    }
+
+    [Fact]
+    public void passed_since_is_fine_and_asks_for_that_branch_and_workflow()
+    {
+        var calls = new List<IReadOnlyList<string>>();
+        var (fine, why) = CheckWith("[o/r] Run failed: build - main (6474d40)", 0,
+            """[{"status":"in_progress","conclusion":"","headSha":"ffffffffff"},{"status":"completed","conclusion":"success","headSha":"1234567890","createdAt":"2026-11-14T13:35:00Z"}]""",
+            calls);
+        Assert.True(fine);
+        Assert.Contains("1234567", why);
+        Assert.Equal(["run", "list", "-R", "o/r", "--branch", "main", "--workflow", "build"], calls[0].Take(8));
+    }
+
+    [Fact]
+    public void still_failing_is_raised()
+    {
+        var (fine, why) = CheckWith("[o/r] Run failed: build - main (6474d40)", 0,
+            """[{"status":"completed","conclusion":"failure","headSha":"6474d40aaa","createdAt":"2026-11-13T17:00:00Z"}]""");
+        Assert.False(fine);
+        Assert.Contains("still failing", why);
+    }
+
+    [Theory]
+    [InlineData(1, "")]                 // gh failed or isn't signed in
+    [InlineData(0, "not json")]
+    [InlineData(0, "[]")]               // no finished run
+    public void anything_unclear_is_raised(int exit, string output) =>
+        Assert.False(CheckWith("[o/r] Run failed: build - main (6474d40)", exit, output).Item1);
+
+    [Fact]
+    public void an_unreadable_subject_is_raised() => Assert.False(CheckWith("Your build failed", 0, "[]").Item1);
+}
+
 public sealed class Watching : TriageBase
 {
     [Fact]
