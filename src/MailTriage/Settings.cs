@@ -190,15 +190,34 @@ public sealed class Settings
         if (!File.Exists(full))
             throw new FileNotFoundException($"No settings file at {full}. Run `mail-triage config` to create one.");
         TomlTable raw;
+        var text = File.ReadAllText(full, new UTF8Encoding(false, true));
         try
         {
-            raw = TomlSerializer.Deserialize(File.ReadAllText(full, new UTF8Encoding(false, true)), TomlContext.Default.TomlTable) ?? [];
+            raw = TomlSerializer.Deserialize(text, TomlContext.Default.TomlTable) ?? [];
         }
         catch (Exception error) when (error is not IOException and not UnauthorizedAccessException)
         {
             throw new SettingsException($"{full} isn't valid TOML: {error.Message}");
         }
+        CheckTablesKept(text, raw, full);
         return FromToml(raw, full);
+    }
+
+    /// <summary>Every [[name]] in the file must have arrived. The TOML reader drops the tables before a break when one
+    /// kind is split by another ([[rule]]s, a [[handler]], more [[rule]]s): on 16 Nov 2026 that silently cut a settings
+    /// file to its last 10 rules. Missing rules never delete anything, but they do leave mail unhandled.</summary>
+    internal static void CheckTablesKept(string text, TomlTable raw, string full)
+    {
+        var written = System.Text.RegularExpressions.Regex.Matches(text.Replace("\r\n", "\n"), @"^[ \t]*\[\[[ \t]*([A-Za-z0-9_-]+)[ \t]*\]\]",
+                System.Text.RegularExpressions.RegexOptions.Multiline)
+            .GroupBy(m => m.Groups[1].Value);
+        foreach (var group in written)
+        {
+            var read = raw.Get(group.Key) switch { TomlTableArray a => a.Count, TomlArray a => a.Count, _ => 0 };
+            if (read != group.Count())
+                throw new SettingsException($"{full} has {group.Count()} [[{group.Key}]] tables, but only {read} were read: keep each kind "
+                                            + $"together, with no other [[...]] or [...] table between two [[{group.Key}]]s.");
+        }
     }
 
     internal static Settings FromToml(TomlTable raw, string full)

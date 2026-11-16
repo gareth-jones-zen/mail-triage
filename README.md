@@ -118,6 +118,10 @@ are. `mail-triage which <sender> "<subject>"` says which rule an email would mee
 quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-in), `tenant`,
 `queue_file`, `state_file`, `handled_file`, `log_file`.
 
+**Keep each kind of table together**: all the `[[rule]]`s in one run, then the `[[handler]]`s, and so on. The TOML
+reader silently drops the tables before a break when one kind is split by another, so since 1.3.1 a file whose
+`[[...]]` count doesn't match what was read is refused, saying which.
+
 ## How it works, and why
 
 - **Delete** marks the email read and moves it to Deleted Items, so it's recoverable.

@@ -117,6 +117,16 @@ public sealed class HandlersTests : IDisposable
     }
 
     [Fact]
+    public void a_kind_of_table_split_by_another_is_refused_not_half_read()
+    {
+        // The TOML reader keeps only the [[rule]]s after the break: 16 Nov 2026, a [[handler]] among the rules.
+        var split = Text.Replace("[[rule]]\nname = \"Keep\"", "[[handler]]\nname = \"late\"\ncommand = ['x']\n\n[[rule]]\nname = \"Keep\"");
+        var error = Assert.Throws<SettingsException>(() => dir.Settings(split, "split.toml"));
+        Assert.Contains("tables, but only", error.Message);
+        Assert.Contains("keep each kind together", error.Message);
+    }
+
+    [Fact]
     public void handled_runs_then_deletes_and_records_it_with_the_handler_note()
     {
         Answer((0, "draft queued for 13/11\nmore detail", false));
