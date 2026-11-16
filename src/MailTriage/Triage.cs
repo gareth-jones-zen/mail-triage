@@ -204,16 +204,24 @@ public static class Triage
             {
                 foreach (var m in Proposals.AnsweredRequests(mailbox.Graph, mailbox.FolderId(name)))
                 {
+                    var cancellation = m.Has("remove") || Py.Str(m.Get("answer")).StartsWith("cancelled,", StringComparison.Ordinal);
                     if (!dryRun)
                     {
+                        // The meeting comes off the calendar first, so a failure leaves the email to try again next run.
+                        if (m.Has("remove"))
+                            cal.Remove(m.Req("remove"));
                         mailbox.Delete(m.Req("id"));
-                        items.Add((JsonNode)new JsonObject
+                        var entry = new JsonObject
                         {
                             ["when"] = NowMicro(), ["folder"] = name, ["received"] = m.Get("receivedDateTime").Copy(), ["from"] = Sender(m),
-                            ["subject"] = m.GetCopy("subject", ""), ["rule"] = "Answered invitations",
-                        });
+                            ["subject"] = m.GetCopy("subject", ""), ["rule"] = cancellation ? "Cancelled meetings" : "Answered invitations",
+                        };
+                        if (m.Has("remove"))
+                            entry["did"] = "removed from the calendar";
+                        items.Add((JsonNode)entry);
                     }
-                    log($"{(dryRun ? "would delete" : "deleted")}  [answered invitation: {Py.Str(m.Get("answer"))}] {Py.Str(m.Get("subject"))}");
+                    log($"{(dryRun ? "would delete" : "deleted")}  [{(cancellation ? "cancellation" : "answered invitation")}: "
+                        + $"{Py.Str(m.Get("answer"))}] {Py.Str(m.Get("subject"))}");
                     deleted++;
                 }
             }

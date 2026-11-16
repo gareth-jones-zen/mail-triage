@@ -88,6 +88,10 @@ public class FakeCalendar(List<JsonObject> items, Dictionary<string, List<(DateT
 
     public void Cancel(string eventId, string comment = "") => Cancels.Add((eventId, comment));
 
+    public List<string> Removed { get; } = [];
+
+    public void Remove(string eventId) => Removed.Add(eventId);
+
     public List<(DateTime Start, DateTime End, string? Status)>? Schedule(string address, DateTime start, DateTime end)
     {
         Asked.Add(address);

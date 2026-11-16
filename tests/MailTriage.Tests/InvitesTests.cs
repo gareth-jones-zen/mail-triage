@@ -187,6 +187,7 @@ public sealed class Invites : IDisposable
 internal sealed class RequestGraph : IGraph
 {
     private const string Req = "#microsoft.graph.eventMessageRequest";
+    private const string Msg = "#microsoft.graph.eventMessage";
 
     private readonly List<JsonObject> messages =
     [
@@ -194,6 +195,11 @@ internal sealed class RequestGraph : IGraph
         new() { ["@odata.type"] = Req, ["id"] = "m2", ["subject"] = "Declined one" },
         new() { ["@odata.type"] = Req, ["id"] = "m3", ["subject"] = "Not answered yet" },
         new() { ["@odata.type"] = "#microsoft.graph.message", ["id"] = "m4", ["subject"] = "An ordinary email" },
+        new() { ["@odata.type"] = Msg, ["id"] = "m5", ["subject"] = "Canceled: already gone" },
+        new() { ["@odata.type"] = Msg, ["id"] = "m6", ["subject"] = "Canceled: still on the calendar" },
+        new() { ["@odata.type"] = Msg, ["id"] = "m7", ["subject"] = "Canceled: but not marked cancelled" },
+        new() { ["@odata.type"] = Msg, ["id"] = "m8", ["subject"] = "Canceled: my own meeting" },
+        new() { ["@odata.type"] = Msg, ["id"] = "m9", ["subject"] = "Some other event message" },
     ];
 
     private readonly Dictionary<string, JsonObject> events = new()
@@ -201,7 +207,17 @@ internal sealed class RequestGraph : IGraph
         ["m1"] = new() { ["id"] = "e1", ["responseStatus"] = new JsonObject { ["response"] = "accepted" } },
         ["m2"] = [],
         ["m3"] = new() { ["id"] = "e3", ["responseStatus"] = new JsonObject { ["response"] = "notResponded" } },
+        ["m5"] = [],
+        ["m6"] = new() { ["id"] = "e6", ["isCancelled"] = true, ["isOrganizer"] = false },
+        ["m7"] = new() { ["id"] = "e7", ["isCancelled"] = false, ["isOrganizer"] = false },
+        ["m8"] = new() { ["id"] = "e8", ["isCancelled"] = true, ["isOrganizer"] = true },
+        ["m9"] = [],
     };
+
+    private static readonly HashSet<string> Cancellations = ["m5", "m6", "m7", "m8"];
+
+    /// <summary>The GETs the sweep asked for, so a test can see a cancellation is read whole.</summary>
+    public List<string> Asked { get; } = [];
 
     public IEnumerable<JsonObject> Pages(string url, IReadOnlyList<string>? scopes = null, IReadOnlyDictionary<string, string>? headers = null) =>
         messages.Select(m => (JsonObject)m.DeepClone());
@@ -209,8 +225,12 @@ internal sealed class RequestGraph : IGraph
     public JsonObject Request(string url, string method = "GET", JsonNode? body = null, IReadOnlyList<string>? scopes = null,
         IReadOnlyDictionary<string, string>? headers = null)
     {
+        Asked.Add(url);
         var id = url.Split('/')[3].Split('?')[0];
-        return new JsonObject { ["id"] = id, ["event"] = events[id].DeepClone() };
+        var found = new JsonObject { ["id"] = id, ["event"] = events[id].DeepClone() };
+        if (Cancellations.Contains(id))
+            found["meetingMessageType"] = "meetingCancelled";
+        return found;
     }
 }
 
@@ -219,8 +239,20 @@ public sealed class Requests
     [Fact]
     public void answered_or_removed_invitations_are_found_and_the_rest_left()
     {
-        var found = Proposals.AnsweredRequests(new RequestGraph(), "folder");
+        var found = Proposals.AnsweredRequests(new RequestGraph(), "folder").Where(m => !m.Has("remove") && !m.Req("id").StartsWith("m5"));
         Assert.Equal([("m1", "accepted"), ("m2", "gone")], found.Select(m => (m.Req("id"), m.Req("answer"))));
+    }
+
+    [Fact]
+    public void cancellations_are_found_and_a_cancelled_meeting_still_there_is_marked_for_removal()
+    {
+        var graph = new RequestGraph();
+        var found = Proposals.AnsweredRequests(graph, "folder").Where(m => m.Req("id") is "m5" or "m6" or "m7" or "m8" or "m9").ToList();
+        // gone: just the email; still there and cancelled: removed too; not marked cancelled, or your own, or not a
+        // cancellation at all: left alone
+        Assert.Equal([("m5", false), ("m6", true)], found.Select(m => (m.Req("id"), m.Has("remove"))));
+        Assert.Equal("e6", found[1].Req("remove"));
+        Assert.DoesNotContain(graph.Asked, u => u.Contains("/m6?$select"));   // read whole: meetingMessageType isn't selectable
     }
 }
 

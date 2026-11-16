@@ -34,6 +34,7 @@ public sealed class WriteDoorTests
         calendar.Respond("e3", "tentative", "", true);
         calendar.Move("e4", new DateTime(2026, 11, 13, 12, 0, 0), new DateTime(2026, 11, 13, 12, 30, 0), "GMT Standard Time");
         calendar.Cancel("e5", "Cancelling as I'm on leave");
+        calendar.Remove("e6");
     }
 
     [Fact]
@@ -52,6 +53,7 @@ public sealed class WriteDoorTests
             """POST /me/events/e3/tentativelyAccept {"sendResponse": true} Calendars.ReadWrite""",
             """PATCH /me/events/e4 {"start": {"dateTime": "2026-11-13T12:00:00", "timeZone": "GMT Standard Time"}, "end": {"dateTime": "2026-11-13T12:30:00", "timeZone": "GMT Standard Time"}} Calendars.ReadWrite""",
             """POST /me/events/e5/cancel {"comment": "Cancelling as I'm on leave"} Calendars.ReadWrite""",
+            """DELETE /me/events/e6 null Calendars.ReadWrite""",
         ], graph.Calls);
     }
 
@@ -61,7 +63,7 @@ public sealed class WriteDoorTests
         var door = WriteDoor.Journaling();
         EveryWrite(door.Mail, door.Calendar);
         Assert.Equal(WriteMode.Journal, door.Mode);
-        Assert.Equal(8, door.Journal.Count);
+        Assert.Equal(9, door.Journal.Count);
         Assert.Equal("""POST /me/messages/m1/move {"destinationId": "deleteditems"}""", door.Journal[1].Text);
     }
 

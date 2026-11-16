@@ -15,6 +15,9 @@ public interface ICalendar
 
     void Cancel(string eventId, string comment = "");
 
+    /// <summary>Take a meeting someone else cancelled off the calendar (sends nothing).</summary>
+    void Remove(string eventId);
+
     /// <summary>Someone's free/busy between two local times, as (start, end, status) in local time; null if Graph
     /// couldn't read it.</summary>
     List<(DateTime Start, DateTime End, string? Status)>? Schedule(string address, DateTime start, DateTime end);
@@ -63,6 +66,8 @@ public sealed class Calendar : ICalendar
     public void Move(string eventId, DateTime start, DateTime end) => writer.Move(eventId, start, end, Timezone);
 
     public void Cancel(string eventId, string comment = "") => writer.Cancel(eventId, comment);
+
+    public void Remove(string eventId) => writer.Remove(eventId);
 
     public List<(DateTime Start, DateTime End, string? Status)>? Schedule(string address, DateTime start, DateTime end)
     {

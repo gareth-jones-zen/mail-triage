@@ -24,6 +24,10 @@ public interface ICalendarWriter
 
     /// <summary>Cancel one of your meetings (an occurrence's id cancels that one only).</summary>
     void Cancel(string eventId, string comment);
+
+    /// <summary>Take a meeting someone else has cancelled off your calendar: Outlook's "Remove from calendar". The
+    /// one write here that notifies nobody, as you aren't the organiser (callers check).</summary>
+    void Remove(string eventId);
 }
 
 /// <summary>How a run may write: Live sends; Journal records what it would send and sends nothing; Refuse throws.
@@ -133,4 +137,6 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
 
     public void Cancel(string eventId, string comment) =>
         send(new WriteCall("POST", $"/me/events/{eventId}/cancel", new JsonObject { ["comment"] = comment }), CalendarScopes);
+
+    public void Remove(string eventId) => send(new WriteCall("DELETE", $"/me/events/{eventId}", null), CalendarScopes);
 }

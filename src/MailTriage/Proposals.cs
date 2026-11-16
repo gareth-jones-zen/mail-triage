@@ -147,13 +147,24 @@ public static class Proposals
     }
 
     /// <summary>Invitation emails in a folder whose meeting is answered, cancelled or gone (a decline removes it).
-    /// Outlook deletes the invitation when you respond there; a response through Graph leaves it behind.</summary>
+    /// Outlook deletes the invitation when you respond there; a response through Graph leaves it behind.
+    ///
+    /// Cancellation notices too (1.2.0): Graph types them eventMessage with meetingMessageType "meetingCancelled", not
+    /// eventMessageRequest, so until then they sat in the folder for good. Each is found once its meeting is gone or
+    /// cancelled; a cancelled meeting still on your calendar (Outlook's "Canceled:" entry, left until you remove it)
+    /// carries its id as "remove", for the caller to take off the calendar before deleting the email.</summary>
     public static List<JsonObject> AnsweredRequests(IGraph graph, string folderId)
     {
         var output = new List<JsonObject>();
         const string query = "$top=50&$select=id,subject,from,receivedDateTime";
         foreach (var m in graph.Pages($"/me/mailFolders/{folderId}/messages?{query}", Mailbox.Scopes))
         {
+            if (m.Str("@odata.type") == "#microsoft.graph.eventMessage")
+            {
+                if (Cancellation(graph, m) is { } c)
+                    output.Add(c);
+                continue;
+            }
             if (m.Str("@odata.type") != "#microsoft.graph.eventMessageRequest")
                 continue;
             var full = graph.Request($"/me/messages/{m.Req("id")}?$select=id&$expand=microsoft.graph.eventMessage/event"
@@ -167,5 +178,27 @@ public static class Proposals
             }
         }
         return output;
+    }
+
+    /// <summary>A cancellation notice whose meeting is gone, or cancelled and still on your calendar (then "remove" is
+    /// its id); null for any other eventMessage, or one whose meeting isn't marked cancelled. Never removes a meeting
+    /// you organise. The message is read whole: meetingMessageType can't be $select-ed on the messages collection.</summary>
+    private static JsonObject? Cancellation(IGraph graph, JsonObject m)
+    {
+        var full = graph.Request($"/me/messages/{m.Req("id")}?$expand=microsoft.graph.eventMessage/event"
+                                 + "($select=id,isCancelled,isOrganizer)", scopes: MailAndCalendar);
+        if (full.Str("meetingMessageType") != "meetingCancelled")
+            return null;
+        var e = full.Get("event") as JsonObject ?? [];
+        if (!e.Truthy("id"))
+            m["answer"] = "cancelled, already off the calendar";
+        else if (e.Truthy("isCancelled") && !e.Truthy("isOrganizer"))
+        {
+            m["answer"] = "cancelled, removed from the calendar";
+            m["remove"] = Py.Str(e.Get("id"));
+        }
+        else
+            return null;
+        return m;
     }
 }
