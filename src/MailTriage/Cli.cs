@@ -52,6 +52,8 @@ public static class Cli
             mail-triage clear               empty the queue (each email stays in its folder, never raised again)
             mail-triage deleted             what the rules deleted since the last clear, by rule (--all: the last 60 days)
             mail-triage which <sender> [subject]   which rule an email would meet
+            mail-triage handle 3 [--handler NAME]  give a queued email (or any, by Graph id) to its rule's handler, then
+                                            do what the handler's `then` says (rules with action = "handle" do this in a run)
 
             With [invites] in the settings, unanswered meeting invites are queued too, each with a recommendation:
             mail-triage file 4 --to Inbox/Projects   move queued emails to a folder, left unread
@@ -72,7 +74,7 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "raised", "which", "invite", "file",
-         "move", "leave", "one-to-ones", "autostart"];
+         "move", "leave", "one-to-ones", "autostart", "handle"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -96,6 +98,7 @@ public static class Cli
         ["deleted"] = (["--all"], []),
         ["invite"] = (["--silent", "--series", "--move"], ["--note"]),
         ["file"] = ([], ["--to"]),
+        ["handle"] = ([], ["--handler"]),
         ["leave"] = (["--decline"], ["--days", "--note"]),
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
     };
@@ -174,6 +177,9 @@ public static class Cli
                 break;
             case "which":
                 Count(1, 2, "sender");
+                break;
+            case "handle":
+                Count(1, 1, "ref");
                 break;
             case "invite":
                 Count(2, int.MaxValue, "action, refs");
@@ -254,7 +260,8 @@ public static class Cli
         {
             var rule = settings.RuleFor(args.Positional[0], args.Positional.Count > 1 ? args.Positional[1] : "");
             Print(host.Out, rule is not null
-                ? $"{rule.Name}: {rule.Action}" + (rule.Check is not null ? $" ({rule.Check})" : "") + (rule.Why.Length > 0 ? $"\n  {rule.Why}" : "")
+                ? $"{rule.Name}: {rule.Action}" + (rule.Check is not null ? $" ({rule.Check})" : "")
+                  + (rule.Handler is not null ? $" ({rule.Handler}, then {settings.Handlers[rule.Handler].Then})" : "") + (rule.Why.Length > 0 ? $"\n  {rule.Why}" : "")
                 : "No rule: it would be queued for review.");
             return 0;
         }
@@ -317,6 +324,15 @@ public static class Cli
                     Triage.File(settings, new Mailbox(graph, door.Mail), args.Positional, args.Value("--to")!, log);
                     return 0;
                 }
+                if (args.Command == "handle")
+                {
+                    if (door.Mode != WriteMode.Live)
+                    {
+                        Print(host.Err, "A handler writes outside mail-triage, so `handle` runs only with --writes live.");
+                        return 2;
+                    }
+                    return Triage.HandleByHand(settings, new Mailbox(graph, door.Mail), new Handlers(settings), args.Positional[0], args.Value("--handler"), log);
+                }
                 report = RunWith(settings, graph, door, args.Flag("--dry-run"), log);
             }
             if (scheduled && report.New > 0 && settings.Notify == "new")
@@ -354,8 +370,10 @@ public static class Cli
         return WriteDoor.Journaling(call => log($"journal (not sent): {call.Text}"));
     }
 
+    /// <summary>Handlers run only when the run may write: a handler writes outside the write door.</summary>
     private static RunReport RunWith(Settings settings, IGraph graph, WriteDoor door, bool dryRun, Action<string> log) =>
-        Triage.Run(settings, new Mailbox(graph, door.Mail, dryRun), settings.Invites is null ? null : new Calendar(graph, door.Calendar), dryRun, log);
+        Triage.Run(settings, new Mailbox(graph, door.Mail, dryRun), settings.Invites is null ? null : new Calendar(graph, door.Calendar), dryRun, log,
+            door.Mode == WriteMode.Live && !dryRun ? new Handlers(settings) : null);
 
     private static RunReport RunOnce(Settings settings, IGraph graph, Args args, Action<string> log, bool dryRun) =>
         RunWith(settings, graph, Door(args, graph, args.Writes, settings), dryRun, log);

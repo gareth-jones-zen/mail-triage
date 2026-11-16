@@ -75,7 +75,7 @@ folders = ["Inbox"]       # optional: only in these folders
 name = "Vendor newsletters"
 sender = '@news\.example\.com$'          # regular expression on the sender's address, ignoring case
 match = 'newsletter|digest'              # optional: on the subject and preview
-action = "delete"                        # delete | review | check | file
+action = "delete"                        # delete | review | check | file | handle
 # to = 'Inbox/Projects'                 # for file: the folder, as a path from the top
 why = "News, not action."                # say why: it's what keeps a rule list maintainable
 
@@ -97,12 +97,26 @@ sender = 'notifications@github\.com'
 match = '^\[[^\]]+\] Run failed: '
 action = "check"
 check = "github-runs"                   # needs the GitHub CLI (gh), signed in
+
+[[handler]]                              # a command a "handle" rule gives the email to
+name = "team-chat-draft"
+command = ['python', 'handlers/team-chat-draft.py', 'marketing']
+# cwd = '.'                             # relative to this file; default: its folder
+then = "delete"                          # once handled: delete | file (with to) | leave | review
+# timeout = 120; max_attempts = 4
+
+[[rule]]
+name = "Weekly marketing update"
+sender = 'marketing@example\.com'
+match = 'Marketing update'
+action = "handle"
+handler = "team-chat-draft"
 ```
 
 Write regular expressions in TOML's single-quoted literal strings, so backslashes stay as they
 are. `mail-triage which <sender> "<subject>"` says which rule an email would meet, which is the
 quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-in), `tenant`,
-`queue_file`, `state_file`, `log_file`.
+`queue_file`, `state_file`, `handled_file`, `log_file`.
 
 ## How it works, and why
 
@@ -115,6 +129,16 @@ quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-
 - **The test for a rule is "does this need me to do something?"** A notification that only says something happened should be a delete rule. Hence the flow-failures check: a failure digest only matters if the flow is still failing.
 - **flow-failures never guesses that a flow is fine.** Power Automate doesn't say whether a flow has worked since, so each flow needs a `[[flow_check]]` saying what a good run leaves behind. With `pending`, a flow has recovered if nothing pending is newer than its newest output. Without it, if its output is newer than the digest. A flow without a check is raised.
 - **github-runs asks GitHub whether the workflow has passed since.** It reads the repository, workflow and branch from a "[owner/repo] Run failed: build - main (abc1234)" email, and asks the GitHub CLI (`gh run list`, as you) for that branch's latest finished run of that workflow. A success since deletes the email; a failure, or anything it can't tell (no `gh`, not signed in, no finished run), is raised with what it found.
+- **Handle gives the email to a command of yours, then does what the handler's `then` says.** mail-triage recognises the email; what's done with it (a draft written, a report reviewed) is a script you own, so the tool stays generic. The handler gets the email as JSON on stdin: `id`, `key` (internet message ID), `folder`, `from`, `subject`, `received`, `body` (as text), `webLink`, `hasAttachments` and `rule`. It fetches attachments itself, by `id`, with its own Graph sign-in.
+  - **Exit 0: handled.** `then` applies (delete by default), and the first line of output is the note `deleted` shows.
+  - **Exit 75: try again later.** The email is left alone, and the next run hands it over again, up to `max_attempts`; then it's queued.
+  - **Anything else, or a timeout: queued**, with the first line of output (or of errors) as the reason. **Neither is retried**: after a timeout the handler may have done part of its work, and a second go could do it twice.
+  - **Each email is handed over once.** What each handler made of each email is recorded by its internet message ID (`handled_file`), before `then` is applied: if the delete fails, the next run retries only the delete.
+  - **Capture what you need before exiting 0.** `then` may move the email, and moving changes its Graph id.
+  - **Return quickly.** The watcher runs every few minutes; hand slow work to something else, and **start it without your output handles** (stdout and stderr to null), or mail-triage waits for that process too.
+  - **A handler only runs when the run may write**: never in a dry run, nor with `--writes journal` or `refuse`, because it writes outside mail-triage. `run --dry-run` and `which` say which handler would run.
+  - **`mail-triage handle <n>`** hands one email over by hand: a queued one by number, or any email by Graph id (`--handler NAME` if no rule names one). For testing a handler, and for an email that was queued before its rule existed.
+  - **Mail is from people you don't control.** A handler that gives it to an AI model should treat it as data, not instructions, and keep a person between the draft and anyone else.
 - **One run at a time**, so the watcher and a run started by hand can't both act on the same email. `clear` and `keep` take the same lock, so a run in progress can't write back a queue you've just cleared.
 - **Unattended deletes stay visible.** Everything the rules delete is recorded, and `mail-triage deleted` lists what went since you last cleared the queue, grouped by rule (`--all` for the last 60 days). `list` says how many. A rule that starts catching the wrong mail shows up there, and the email is still in Deleted Items.
 - **The watcher runs once at start, then every `every_minutes` within `hours`**, so logging on in the evening still clears the day's mail, and checking Outlook in the afternoon finds the folders already tidy. One watcher per settings file; it logs `alive` hourly and notifies a failure once, until a run succeeds.

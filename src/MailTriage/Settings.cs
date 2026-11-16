@@ -27,6 +27,7 @@ public sealed class Rule
     public string? Check { get; init; }
     public string Why { get; init; } = "";
     public string? To { get; init; }
+    public string? Handler { get; init; }
     public List<string>? Folders { get; init; }
 
     public bool Matches(string sender, string text) =>
@@ -98,7 +99,7 @@ public sealed class OneToOnes
 /// and only the part of Python's dialect that .NET reads the same way is accepted (PyRegex).</summary>
 public sealed class Settings
 {
-    public static readonly string[] Actions = ["delete", "review", "check", "file"];
+    public static readonly string[] Actions = ["delete", "review", "check", "file", "handle"];
     private static readonly Dictionary<string, string> Aliases = new() { ["resolve"] = "delete" };   // the first name for delete
     private const string HoursPattern = "([01]\\d|2[0-3]):[0-5]\\d-([01]\\d|2[0-4]):[0-5]\\d";
 
@@ -129,6 +130,7 @@ public sealed class Settings
     public List<Folder> Folders { get; } = [];
     public List<Rule> Rules { get; } = [];
     public List<FlowCheck> FlowChecks { get; } = [];
+    public Dictionary<string, Handler> Handlers { get; } = new(StringComparer.Ordinal);
     public string? LoginHint { get; init; }
     public string Tenant { get; init; } = "organizations";
     public string? MsalCache { get; init; }
@@ -136,6 +138,7 @@ public sealed class Settings
     public string StateFile { get; init; } = System.IO.Path.Combine(Local, "raised.json");
     public string DeletedFile { get; init; } = System.IO.Path.Combine(Local, "deleted.json");
     public string AcceptedFile { get; init; } = System.IO.Path.Combine(Local, "accepted.json");
+    public string HandledFile { get; init; } = System.IO.Path.Combine(Local, "handled.json");
     public string LogFile { get; init; } = System.IO.Path.Combine(Local, "mail-triage.log");
     public string Notify { get; init; } = "new";
     public long EveryMinutes { get; init; } = 15;
@@ -222,6 +225,7 @@ public sealed class Settings
             StateFile = PathOr("state_file", System.IO.Path.Combine(Local, "raised.json")),
             DeletedFile = PathOr("deleted_file", System.IO.Path.Combine(Local, "deleted.json")),
             AcceptedFile = PathOr("accepted_file", System.IO.Path.Combine(Local, "accepted.json")),
+            HandledFile = PathOr("handled_file", System.IO.Path.Combine(Local, "handled.json")),
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
             EveryMinutes = every,
@@ -243,6 +247,32 @@ public sealed class Settings
             settings.Folders.Add(new Folder(name, Toml.Truthy(since) ? Toml.Str(since!) : null, (string)unmatched));
         }
 
+        foreach (var item in Toml.Tables(raw.Get("handler")))
+        {
+            if (!Toml.Truthy(item.Get("name")))
+                throw new SettingsException($"A [[handler]] in {full} has no name.");
+            var name = Toml.Str(item.Get("name"));
+            var command = item.Get("command") is { } c ? Toml.Strings(c) : [];
+            if (command.Count == 0 || command[0].Length == 0)
+                throw new SettingsException($"Handler {Py.ReprString(name)} in {full} needs command, a list such as ['python', 'handler.py'].");
+            var then = item.Get("then") is { } t ? Toml.Str(t) : "delete";
+            if (!Handler.Thens.Contains(then))
+                throw new SettingsException($"Handler {Py.ReprString(name)} in {full} has then = {Py.ReprString(then)}: use delete, file, leave or review.");
+            if (then == "file" && !Toml.Truthy(item.Get("to")))
+                throw new SettingsException($"Handler {Py.ReprString(name)} in {full} has then = file but no `to` folder.");
+            var timeout = Toml.Int(item.Get("timeout") ?? 120L);
+            var attempts = Toml.Int(item.Get("max_attempts") ?? 4L);
+            if (timeout < 1 || attempts < 1)
+                throw new SettingsException($"Handler {Py.ReprString(name)} in {full}: timeout and max_attempts should be at least 1.");
+            if (!settings.Handlers.TryAdd(name, new Handler
+                {
+                    Name = name, Command = command, Then = then, To = item.Get("to") is { } to ? Toml.Str(to) : null,
+                    Cwd = Toml.Truthy(item.Get("cwd")) ? ToPath(Toml.Str(item.Get("cwd")), baseDir) : baseDir,
+                    Timeout = timeout, MaxAttempts = attempts,
+                }))
+                throw new SettingsException($"Two handlers in {full} are called {Py.ReprString(name)}.");
+        }
+
         var i = 0;
         foreach (var item in Toml.Tables(raw.Get("rule")))
         {
@@ -253,11 +283,14 @@ public sealed class Settings
             var given = item.Get("action") is { } a ? Toml.Str(a) : "";
             var action = Aliases.GetValueOrDefault(given, given);
             if (!Actions.Contains(action))
-                throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action {Toml.Repr(item.Get("action"))}: use delete, review, check or file.");
+                throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action {Toml.Repr(item.Get("action"))}: use delete, review, check, file or handle.");
             if (action == "file" && !Toml.Truthy(item.Get("to")))
                 throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action file but no `to` folder.");
             if (action == "check" && !(item.Get("check") is string c && Checks.All.ContainsKey(c)))
                 throw new SettingsException($"Rule {Py.ReprString(name)} in {full} needs check = one of {string.Join(", ", Checks.All.Keys.Order(PyStr.Order))}.");
+            if (action == "handle" && !(item.Get("handler") is string hn && settings.Handlers.ContainsKey(hn)))
+                throw new SettingsException($"Rule {Py.ReprString(name)} in {full} needs handler = the name of a [[handler]]"
+                                            + (settings.Handlers.Count > 0 ? $" (one of {string.Join(", ", settings.Handlers.Keys.Order(PyStr.Order))})." : ", and there are none."));
             foreach (var key in new[] { "sender", "match" })
                 if (Toml.Truthy(item.Get(key)) && PyRegex.Problem(Toml.Str(item.Get(key))) is { } problem)
                     throw new SettingsException($"Rule {Py.ReprString(name)} in {full}: {key} isn't a valid regular expression ({problem}).");
@@ -270,6 +303,7 @@ public sealed class Settings
                 Check = item.Get("check") is { } ch ? Toml.Str(ch) : null,
                 Why = item.Get("why") is { } w ? Toml.Str(w) : "",
                 To = item.Get("to") is { } to ? Toml.Str(to) : null,
+                Handler = action == "handle" ? Toml.Str(item.Get("handler")) : null,
                 Folders = Toml.Truthy(item.Get("folders")) ? Toml.Strings(item.Get("folders")) : null,
             });
         }

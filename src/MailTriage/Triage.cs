@@ -5,7 +5,11 @@ using PyCompat;
 namespace MailTriage;
 
 /// <summary>What a run did: the counts the Python's report dict held.</summary>
-public sealed record RunReport(int Deleted, int Filed, int New, int Waiting, int Kept, int Invites);
+public sealed record RunReport(int Deleted, int Filed, int New, int Waiting, int Kept, int Invites)
+{
+    /// <summary>Emails a handler handled (each also counted under what then did with it).</summary>
+    public int Handled { get; init; }
+}
 
 /// <summary>One triage run, and what happens to the queue afterwards (triage.py).
 /// - Delete marks the email read and moves it to Deleted Items, so it's recoverable.
@@ -61,13 +65,13 @@ public static class Triage
     private static string NowSeconds() => PyTime.Iso(Clock.Now, "seconds");
 
     /// <summary>One run. calendar is needed when the settings have [invites].</summary>
-    public static RunReport Run(Settings settings, Mailbox mailbox, ICalendar? calendar, bool dryRun, Action<string> log)
+    public static RunReport Run(Settings settings, Mailbox mailbox, ICalendar? calendar, bool dryRun, Action<string> log, Handlers? handlers = null)
     {
         var raised = StateFiles.LoadObject(settings.StateFile, () => []);
         var previous = Queue(settings);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var added = new List<JsonObject>();
-        int deleted = 0, again = 0, filed = 0;
+        int deleted = 0, again = 0, filed = 0, handled = 0;
         var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
         var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
 
@@ -106,8 +110,52 @@ public static class Triage
                     (var fine, note) = check(message, needsBody ? mailbox.Body(message.Req("id")) : "", settings);
                     action = fine ? "delete" : "review";
                 }
+                var to = rule?.To;
+                string? did = null;
+                if (action == "handle")
+                {
+                    var handler = settings.Handlers[rule!.Handler!];
+                    var subjectLabel = $"[{rule.Name}] {Sender(message)}: {message.Fmt("subject")}";
+                    if (handlers is null || dryRun)
+                    {
+                        // A dry run, or a write mode that sends nothing: a handler writes outside mail-triage, so it doesn't run.
+                        log($"would hand to {handler.Name}, then {handler.Then}  {subjectLabel}");
+                        continue;
+                    }
+                    var outcome = handlers.Handle(mailbox, message, folder.Name, rule, handler);
+                    if (outcome.Result == "retry")
+                    {
+                        log($"{handler.Name} will try again next run  {subjectLabel}" + (outcome.Note.Length > 0 ? $" ({outcome.Note})" : ""));
+                        continue;
+                    }
+                    if (outcome.Result == "failed")
+                    {
+                        action = "review";
+                        note = outcome.Note;
+                    }
+                    else
+                    {
+                        handled++;
+                        did = $"handled by {handler.Name}" + (outcome.Note.Length > 0 ? $": {outcome.Note}" : "");
+                        action = handler.Then;
+                        to = handler.To;
+                        if (action == "review")
+                            note = did;
+                        if (action == "leave")
+                        {
+                            items.Add((JsonNode)new JsonObject
+                            {
+                                ["when"] = NowMicro(), ["folder"] = folder.Name, ["received"] = message.GetCopy("receivedDateTime"),
+                                ["from"] = Sender(message), ["subject"] = message.GetCopy("subject", ""), ["rule"] = rule.Name, ["did"] = did + ", left in the folder",
+                            });
+                            raised[key] = NowSeconds();
+                            log($"{did}, left in the folder  {subjectLabel}");
+                            continue;
+                        }
+                    }
+                }
                 var label = $"[{(rule is not null ? rule.Name : "no rule")}] {Sender(message)}: {message.Fmt("subject")}"
-                            + (note is { Length: > 0 } ? $" ({note})" : "");
+                            + (note is { Length: > 0 } ? $" ({note})" : did is not null ? $" ({did})" : "");
                 if (action == "delete")
                 {
                     if (!dryRun)
@@ -120,6 +168,8 @@ public static class Triage
                         };
                         if (note is { Length: > 0 })
                             entry["check"] = note;
+                        if (did is not null)
+                            entry["did"] = did;
                         items.Add((JsonNode)entry);
                     }
                     log($"{(dryRun ? "would delete" : "deleted")}  {label}");
@@ -130,14 +180,17 @@ public static class Triage
                 {
                     if (!dryRun)
                     {
-                        mailbox.File(message.Req("id"), mailbox.FolderPath(rule!.To!));
-                        items.Add((JsonNode)new JsonObject
+                        mailbox.File(message.Req("id"), mailbox.FolderPath(to!));
+                        var entry = new JsonObject
                         {
                             ["when"] = NowMicro(), ["folder"] = folder.Name, ["received"] = message.GetCopy("receivedDateTime"),
-                            ["from"] = Sender(message), ["subject"] = message.GetCopy("subject", ""), ["rule"] = rule.Name, ["to"] = rule.To,
-                        });
+                            ["from"] = Sender(message), ["subject"] = message.GetCopy("subject", ""), ["rule"] = rule!.Name, ["to"] = to,
+                        };
+                        if (did is not null)
+                            entry["did"] = did;
+                        items.Add((JsonNode)entry);
                     }
-                    log($"{(dryRun ? "would file" : "filed")} to {rule!.To}  {label}");
+                    log($"{(dryRun ? "would file" : "filed")} to {to}  {label}");
                     filed++;
                     continue;
                 }
@@ -241,8 +294,8 @@ public static class Triage
             StateFiles.Save(settings.DeletedFile, record);
             SaveQueue(settings, [.. carried, .. added]);
         }
-        var report = new RunReport(deleted, filed, added.Count, carried.Count, Math.Max(0, again - carried.Count), invitesNew);
-        log($"done: {deleted} deleted, " + (filed > 0 ? $"{filed} filed, " : "") + $"{added.Count} new to review"
+        var report = new RunReport(deleted, filed, added.Count, carried.Count, Math.Max(0, again - carried.Count), invitesNew) { Handled = handled };
+        log($"done: {deleted} deleted, " + (filed > 0 ? $"{filed} filed, " : "") + (handled > 0 ? $"{handled} handled, " : "") + $"{added.Count} new to review"
             + (invitesNew > 0 ? $" ({invitesNew} invites)" : "") + $", {carried.Count} still waiting from earlier runs, {report.Kept} seen before and kept");
         return report;
     }
@@ -288,6 +341,67 @@ public static class Triage
         }
         SaveQueue(settings, Queue(settings).Where(i => !ids.Contains(i.Req("id"))).ToList());
         return ids.Count;
+    }
+
+    /// <summary>Give one email to a handler by hand: a queued email (by number or id), or any email by its Graph id.
+    /// The handler is the one its rule names, or handlerName. Once handled, its then applies, as in a run.
+    /// Returns 0 handled (or to try again later), 1 if the handler failed.</summary>
+    public static int HandleByHand(Settings settings, Mailbox mailbox, Handlers handlers, string reference, string? handlerName, Action<string> log)
+    {
+        var item = PyStr.IsDigit(reference) && reference.Length < 6 ? Pick(settings, [reference])[0]
+            : Queue(settings).FirstOrDefault(i => i.Str("id") == reference);
+        if (TypeOf(item) is "invite" or "one-to-one")
+            throw new LookupException($"{item!.Fmt("subject")} is a meeting, not an email.");
+        var id = item?.Req("id") ?? reference;
+        var message = mailbox.Graph.Request($"/me/messages/{id}?$select={Mailbox.Fields}", scopes: mailbox.ReadScopes);
+        var rule = settings.RuleFor(Sender(message), $"{message.Fmt("subject")}\n{message.Fmt("bodyPreview")}");
+        var name = handlerName ?? rule?.Handler
+                   ?? throw new LookupException($"No rule hands {Py.ReprString(message.Fmt("subject"))} to a handler: name one with --handler.");
+        var handler = settings.Handlers.GetValueOrDefault(name)
+                      ?? throw new LookupException($"No [[handler]] called {Py.ReprString(name)} in {settings.Path}.");
+        var folder = item?.Str("folder") ?? "";
+        var label = $"{Sender(message)}: {message.Fmt("subject")}";
+        var outcome = handlers.Handle(mailbox, message, folder, rule, handler);
+        if (outcome.Result == "retry")
+        {
+            log($"{handler.Name} asked to try again later  {label}" + (outcome.Note.Length > 0 ? $" ({outcome.Note})" : ""));
+            return 0;
+        }
+        if (outcome.Result == "failed")
+        {
+            log($"{outcome.Note}  {label}");
+            if (item is not null)
+                SaveQueue(settings, Queue(settings).Select(i => { if (i.Str("id") == id) i["check"] = outcome.Note; return i; }).ToList());
+            return 1;
+        }
+        var did = $"handled by {handler.Name}" + (outcome.Note.Length > 0 ? $": {outcome.Note}" : "");
+        if (handler.Then == "delete")
+            mailbox.Delete(id);
+        else if (handler.Then == "file")
+            mailbox.File(id, mailbox.FolderPath(handler.To!));
+        var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
+        var entry = new JsonObject
+        {
+            ["when"] = NowMicro(), ["folder"] = folder, ["received"] = message.GetCopy("receivedDateTime"), ["from"] = Sender(message),
+            ["subject"] = message.GetCopy("subject", ""), ["rule"] = rule?.Name ?? handler.Name, ["did"] = handler.Then == "leave" ? did + ", left in the folder" : did,
+        };
+        if (handler.Then == "file")
+            entry["to"] = handler.To;
+        if (handler.Then != "review")
+        {
+            (record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.")).Add((JsonNode)entry);
+            StateFiles.Save(settings.DeletedFile, record);
+        }
+        var raised = StateFiles.LoadObject(settings.StateFile, () => []);
+        if (!raised.ContainsKey(Key(message)))
+            raised[Key(message)] = NowSeconds();
+        StateFiles.Save(settings.StateFile, raised);
+        var queue = Queue(settings);
+        SaveQueue(settings, handler.Then == "review"
+            ? queue.Select(i => { if (i.Str("id") == id) i["check"] = did; return i; }).ToList()
+            : queue.Where(i => i.Str("id") != id).ToList());
+        log($"{did}, then {handler.Then}  {label}");
+        return 0;
     }
 
     /// <summary>Move queued emails to a folder (left unread), and off the queue.</summary>
