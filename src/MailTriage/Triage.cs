@@ -65,6 +65,16 @@ public static class Triage
     private static string NowSeconds() => PyTime.Iso(Clock.Now, "seconds");
 
     /// <summary>One run. calendar is needed when the settings have [invites].</summary>
+    /// <summary>A meeting reply proposing a new time, in a folder the proposals sweep reads: the sweep decides it (accept
+    /// when free, otherwise queue it with the reason). Until 1.6.2 the folder pass got there first once the Inbox was
+    /// triaged (16 Nov 2026): it queued the proposal as "no rule", and the sweep then skipped it as already raised, so a
+    /// proposal GJ was free for (Yahya's, 17 Nov) was never accepted. One extra read per meeting reply not yet seen.</summary>
+    private static bool LeftToProposals(Settings settings, Mailbox mailbox, Folder folder, JsonObject message) =>
+        settings.Invites is { AcceptProposals: true } invites
+        && invites.ProposalsFolders.Contains(folder.Name, StringComparer.OrdinalIgnoreCase)
+        && message.Str("@odata.type") == "#microsoft.graph.eventMessageResponse"
+        && Proposals.IsProposal(mailbox.Graph, message.Req("id"));
+
     public static RunReport Run(Settings settings, Mailbox mailbox, ICalendar? calendar, bool dryRun, Action<string> log, Handlers? handlers = null)
     {
         var raised = StateFiles.LoadObject(settings.StateFile, () => []);
@@ -86,6 +96,8 @@ public static class Triage
                     again++;
                     continue;
                 }
+                if (LeftToProposals(settings, mailbox, folder, message))
+                    continue;   // a new time proposed: the proposals sweep below decides it (1.6.2)
                 var text = $"{message.Fmt("subject")}\n{message.Fmt("bodyPreview")}";
                 Rule? rule;
                 string? note = null;

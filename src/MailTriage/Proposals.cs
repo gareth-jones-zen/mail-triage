@@ -202,6 +202,20 @@ public static class Proposals
         return m;
     }
 
+    /// <summary>Whether a meeting reply proposes a new time. Read whole: proposedNewTime can't be $select-ed. An email
+    /// that can't be read isn't treated as one.</summary>
+    public static bool IsProposal(IGraph graph, string id)
+    {
+        try
+        {
+            return graph.Request($"/me/messages/{id}", scopes: MailAndCalendar).Truthy("proposedNewTime");
+        }
+        catch (M365Graph.GraphRequestException error) when ((int)error.Status is 400 or 404)
+        {
+            return false;
+        }
+    }
+
     /// <summary>A meeting email with its meeting expanded; null if the email itself has gone.
     /// <para>When the meeting has already been deleted (a cancelled meeting taken off the calendar), Graph answers the
     /// expanded read with 404 for the whole email, not an email without its event: seven cancellation notices did
