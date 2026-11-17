@@ -47,11 +47,26 @@ mail-triage run
 mail-triage autostart on  # a watcher: at once, then every 15 minutes in working hours
 ```
 
+## Sharing settings with other tools: `base`
+
+Several tools built on the shared library can keep their common settings in one file, named at the top of each
+tool's settings with `base = "base-config.toml"` (relative to the settings file). Then:
+
+- **the base's `[paths]` are variables for this tool's paths**: `ROOT = "%LOCALAPPDATA%/tools"` there lets this file
+  say `log_file = "%ROOT%/mail-triage.log"`. They're looked up before the environment;
+- **its other settings that this tool knows and doesn't set itself are used**: typically `login_hint`, `tenant` and
+  `msal_cache`. This file's own value always wins;
+- **a table, such as `[invites]`, applies only if this file has that section too**, and its keys fill in the ones this
+  file leaves out.
+
+The loader is background-tools-lib's `PyCompat.BaseSettings`. A missing or unreadable base is a settings error.
+
 ## Settings
 
 `%APPDATA%\mail-triage\config.toml` by default (`--config` or `MAIL_TRIAGE_CONFIG` for another).
 
 ```toml
+base = "base-config.toml"   # optional: settings shared with other tools
 login_hint = "you@example.com"
 every_minutes = 15        # the watcher runs this often...
 hours = "07:00-19:00"     # ...between these times, and once at start whatever the time...
