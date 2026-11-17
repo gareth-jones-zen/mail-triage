@@ -66,7 +66,7 @@ public static class Cli
             mail-triage one-to-ones         with [one_to_ones]: what each run would do with your 1:1s and leave (changes nothing)
 
             mail-triage watch              run now, then every every_minutes in working hours; what autostart runs
-            mail-triage autostart on        the watcher at every logon, and now (off, status)
+            mail-triage autostart on        the watcher at every logon, and now (off, restart, status)
 
         Options before the command: --config FILE, --version, and (this version only) --writes live|journal|refuse,
         --journal FILE.
@@ -196,8 +196,8 @@ public static class Cli
                 break;
             case "autostart":
                 Count(1, 1, "action");
-                if (a.Positional[0] is not ("on" or "off" or "status"))
-                    throw new UsageException($"argument action: invalid choice: {Py.ReprString(a.Positional[0])} (choose from 'on', 'off', 'status')");
+                if (a.Positional[0] is not ("on" or "off" or "restart" or "status"))
+                    throw new UsageException($"argument action: invalid choice: {Py.ReprString(a.Positional[0])} (choose from 'on', 'off', 'restart', 'status')");
                 break;
             default:
                 Count(0, 0, "");
@@ -519,6 +519,20 @@ public static class Cli
         {
             var was = task.Disable() | host.Tasks(Autostart.OldTaskName).Disable();
             Print(host.Out, was ? "Autostart is off." : "Autostart was already off.");
+        }
+        else if (action == "restart")
+        {
+            try
+            {
+                Print(host.Out, task.Restart()
+                    ? $"Restarted '{Autostart.TaskName}': the watcher is running the installed version."
+                    : "Autostart is off, so there's nothing to restart. `mail-triage autostart on` turns it on.");
+            }
+            catch (InvalidOperationException error)
+            {
+                Print(host.Err, error.Message);
+                return 1;
+            }
         }
         else
         {

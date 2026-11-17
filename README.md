@@ -31,6 +31,8 @@ Nothing else is needed.
 
 It holds two programs: `mail-triage.exe`, for a console, and `mail-triage-background.exe`, the same program with no window, which the logon task runs.
 
+**To upgrade while the watcher runs:** rename `mail-triage.exe` and `mail-triage-background.exe` to `.old` (Windows lets you rename a program that's running, but not overwrite it), unzip the new release into the same folder, then run `mail-triage autostart restart`. That stops the watcher, waits for it to exit and starts the new version, keeping the task as it was. Delete the `.old` files afterwards. If the old watcher hasn't exited after 30 seconds, nothing is started and it carries on as it was.
+
 **It needs Mail.ReadWrite** on Microsoft's "Graph Command Line Tools" app, to mark mail read and
 move it. Many organisations need an admin to approve that: the first `sign-in` shows an "Approval
 required" screen, where you can ask. A dry run needs only Mail.Read.
