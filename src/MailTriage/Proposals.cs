@@ -167,8 +167,9 @@ public static class Proposals
             }
             if (m.Str("@odata.type") != "#microsoft.graph.eventMessageRequest")
                 continue;
-            var full = graph.Request($"/me/messages/{m.Req("id")}?$select=id&$expand=microsoft.graph.eventMessage/event"
-                                     + "($select=id,responseStatus,isCancelled)", scopes: MailAndCalendar);
+            var full = WithEvent(graph, m.Req("id"), "?$select=id&$expand=microsoft.graph.eventMessage/event($select=id,responseStatus,isCancelled)");
+            if (full is null)
+                continue;   // the email itself has gone (answered or deleted in Outlook since it was listed)
             var e = full.Get("event") as JsonObject ?? [];
             var response = e.Get("responseStatus").Str("response");
             if (!e.Truthy("id") || e.Truthy("isCancelled") || (response is not null && Answered.Contains(response)))
@@ -185,9 +186,8 @@ public static class Proposals
     /// you organise. The message is read whole: meetingMessageType can't be $select-ed on the messages collection.</summary>
     private static JsonObject? Cancellation(IGraph graph, JsonObject m)
     {
-        var full = graph.Request($"/me/messages/{m.Req("id")}?$expand=microsoft.graph.eventMessage/event"
-                                 + "($select=id,isCancelled,isOrganizer)", scopes: MailAndCalendar);
-        if (full.Str("meetingMessageType") != "meetingCancelled")
+        var full = WithEvent(graph, m.Req("id"), "?$expand=microsoft.graph.eventMessage/event($select=id,isCancelled,isOrganizer)");
+        if (full is null || full.Str("meetingMessageType") != "meetingCancelled")
             return null;
         var e = full.Get("event") as JsonObject ?? [];
         if (!e.Truthy("id"))
@@ -200,5 +200,30 @@ public static class Proposals
         else
             return null;
         return m;
+    }
+
+    /// <summary>A meeting email with its meeting expanded; null if the email itself has gone.
+    /// <para>When the meeting has already been deleted (a cancelled meeting taken off the calendar), Graph answers the
+    /// expanded read with 404 for the whole email, not an email without its event: seven cancellation notices did
+    /// this on 17 Nov 2026, and the run stopped at the first. So a 404 is read again without the expansion; the email
+    /// then comes back with no event, which the callers treat as a meeting that's gone (1.6.1).</para></summary>
+    private static JsonObject? WithEvent(IGraph graph, string id, string expandQuery)
+    {
+        try
+        {
+            return graph.Request($"/me/messages/{id}{expandQuery}", scopes: MailAndCalendar);
+        }
+        catch (M365Graph.GraphRequestException error) when ((int)error.Status == 404)
+        {
+            try
+            {
+                // Read whole: meetingMessageType can't be $select-ed (400), as on the collection.
+                return graph.Request($"/me/messages/{id}", scopes: MailAndCalendar);
+            }
+            catch (M365Graph.GraphRequestException again) when ((int)again.Status == 404)
+            {
+                return null;
+            }
+        }
     }
 }
