@@ -106,6 +106,7 @@ command = ['python', 'handlers/team-chat-draft.py', 'marketing']
 # cwd = '.'                             # relative to this file; default: its folder
 then = "delete"                          # once handled: delete | file (with to) | leave | review
 # timeout = 120; max_attempts = 4
+# attachments = true                    # save the email's file attachments for the handler (1.5.0)
 
 [[rule]]
 name = "Weekly marketing update"
@@ -135,7 +136,12 @@ reader silently drops the tables before a break when one kind is split by anothe
 - **The test for a rule is "does this need me to do something?"** A notification that only says something happened should be a delete rule. Hence the flow-failures check: a failure digest only matters if the flow is still failing.
 - **flow-failures never guesses that a flow is fine.** Power Automate doesn't say whether a flow has worked since, so each flow needs a `[[flow_check]]` saying what a good run leaves behind. With `pending`, a flow has recovered if nothing pending is newer than its newest output. Without it, if its output is newer than the digest. A flow without a check is raised.
 - **github-runs asks GitHub whether the workflow has passed since.** It reads the repository, workflow and branch from a "[owner/repo] Run failed: build - main (abc1234)" email, and asks the GitHub CLI (`gh run list`, as you) for that branch's latest finished run of that workflow. A success since deletes the email; a failure, or anything it can't tell (no `gh`, not signed in, no finished run), is raised with what it found.
-- **Handle gives the email to a command of yours, then does what the handler's `then` says.** mail-triage recognises the email; what's done with it (a draft written, a report reviewed) is a script you own, so the tool stays generic. The handler gets the email as JSON on stdin: `id`, `key` (internet message ID), `folder`, `from`, `subject`, `received`, `body` (as text), `webLink`, `hasAttachments` and `rule`. It fetches attachments itself, by `id`, with its own Graph sign-in.
+- **Handle gives the email to a command of yours, then does what the handler's `then` says.** mail-triage recognises the email; what's done with it (a draft written, a report reviewed) is a script you own, so the tool stays generic. The handler gets the email as JSON on stdin: `id`, `key` (internet message ID), `folder`, `from`, `subject`, `received`, `body` (as text), `webLink`, `hasAttachments` and `rule`.
+  - **With `attachments = true` (1.5.0) it also gets `attachments`:** `[{name, path, size, contentType}]`, each file
+    attachment already saved to a folder of its own (inline images and attached emails are left out). **The folder is
+    removed once the handler exits, so the handler copies what it keeps.** If the attachments can't be fetched, the
+    handler isn't run and the next run tries again, as for exit 75. Without it, a handler that needs attachments
+    fetches them itself, by `id`, with its own Graph sign-in.
   - **Exit 0: handled.** `then` applies (delete by default), and the first line of output is the note `deleted` shows.
   - **Exit 75: try again later.** The email is left alone, and the next run hands it over again, up to `max_attempts`; then it's queued.
   - **Anything else, or a timeout: queued**, with the first line of output (or of errors) as the reason. **Neither is retried**: after a timeout the handler may have done part of its work, and a second go could do it twice.

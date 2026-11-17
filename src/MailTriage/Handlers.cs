@@ -18,6 +18,10 @@ public sealed class Handler
     public string? To { get; init; }
     public long Timeout { get; init; } = 120;
     public long MaxAttempts { get; init; } = 4;
+
+    /// <summary>attachments = true (1.5.0): the email's file attachments are saved to a folder of their own, their
+    /// paths given in the input, and the folder removed once the handler has run.</summary>
+    public bool Attachments { get; init; }
 }
 
 /// <summary>What a handler made of an email. Result: done (apply then), retry (leave it, ask again next run) or
@@ -28,7 +32,8 @@ public sealed record HandleOutcome(string Result, string Note);
 /// email: again only after "try again later" (exit 75), never after it handled the email or failed.
 ///
 /// The contract: the email as JSON on stdin (id, key, folder, from, subject, received, body as text, webLink,
-/// hasAttachments, rule). Exit 0: handled; 75: try again later (up to max_attempts); anything else, or a timeout:
+/// hasAttachments, rule; and, for a handler with attachments = true, attachments: [{name, path, size, contentType}]).
+/// The attachment files are removed once the handler exits, so it copies what it keeps. Exit 0: handled; 75: try again later (up to max_attempts); anything else, or a timeout:
 /// raise it. The first line of output is the note. A timeout isn't retried: the handler may have done part of its work.
 /// The handler captures what it needs before it exits, because then may move the email (and moving changes its id).</summary>
 public sealed class Handlers(Settings settings)
@@ -53,7 +58,39 @@ public sealed class Handlers(Settings settings)
         if (previous?.Str("result") == "done")
             return new("done", previous.Str("note") ?? "");
         var attempts = (previous?.Get("attempts") is JsonValue v && v.TryGetValue<long>(out var n) ? n : 0) + 1;
-        var (exit, output, timedOut) = Process(handler, PyJson.Dump(Input(mailbox, message, folder, rule), null, false));
+        var input = Input(mailbox, message, folder, rule);
+        string? saved = null;
+        int exit;
+        string output;
+        bool timedOut;
+        try
+        {
+            if (handler.Attachments)
+            {
+                saved = Path.Combine(Path.GetDirectoryName(PyPath.Resolve(settings.HandledFile))!, "handler-attachments", Folder(key));
+                try
+                {
+                    input["attachments"] = SaveAttachments(mailbox, message.Req("id"), saved);
+                }
+                catch (Exception error) when (error is not (OutOfMemoryException or M365Graph.SignInNeededException))
+                {
+                    // Graph or the disk failed (a sign-in is the run's to report): nothing was handed over, so it's safe to ask again next run.
+                    (exit, output, timedOut) = (TryAgain, $"couldn't fetch the attachments: {PyStr.Head(error.Message, 150)}", false);
+                    return Record(handler, message, key, attempts, exit, output, timedOut);
+                }
+            }
+            (exit, output, timedOut) = Process(handler, PyJson.Dump(input, null, false));
+        }
+        finally
+        {
+            if (saved is not null)
+                RemoveQuietly(saved);
+        }
+        return Record(handler, message, key, attempts, exit, output, timedOut);
+    }
+
+    private HandleOutcome Record(Handler handler, JsonObject message, string key, long attempts, int exit, string output, bool timedOut)
+    {
         var first = PyStr.Head(output.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? "", 200);
         string result, note;
         if (timedOut)
@@ -73,6 +110,63 @@ public sealed class Handlers(Settings settings)
         };
         Save();   // at once: a failure after this (applying then) must never run the handler a second time
         return new(result, note);
+    }
+
+    /// <summary>A folder name for one email's attachments: its key, hashed (keys hold &lt; &gt; @ and the like).</summary>
+    private static string Folder(string key) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..16].ToLowerInvariant();
+
+    /// <summary>The email's file attachments (not inline images or attached emails), each saved under folder:
+    /// [{name, path, size, contentType}].</summary>
+    public static JsonArray SaveAttachments(Mailbox mailbox, string id, string folder)
+    {
+        RemoveQuietly(folder);
+        Directory.CreateDirectory(folder);
+        var found = new JsonArray();
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in mailbox.Graph.Pages($"/me/messages/{id}/attachments?$select=id,name,size,contentType,isInline",
+                     scopes: mailbox.ReadScopes))
+        {
+            if (item.Str("@odata.type") is { } type && type != "#microsoft.graph.fileAttachment")
+                continue;
+            if (item.Get("isInline") is JsonValue inline && inline.TryGetValue<bool>(out var isInline) && isInline)
+                continue;
+            var full = mailbox.Graph.Request($"/me/messages/{id}/attachments/{item.Req("id")}", scopes: mailbox.ReadScopes);
+            if (full.Str("contentBytes") is not { } content)
+                continue;
+            var name = SafeName(item.Str("name") ?? "attachment");
+            for (var i = 2; !used.Add(name); i++)
+                name = $"{Path.GetFileNameWithoutExtension(SafeName(item.Str("name") ?? "attachment"))} ({i}){Path.GetExtension(name)}";
+            var path = Path.Combine(folder, name);
+            var bytes = Convert.FromBase64String(content);
+            File.WriteAllBytes(path, bytes);
+            found.Add((JsonNode)new JsonObject
+            {
+                ["name"] = item.Str("name") ?? name, ["path"] = path, ["size"] = bytes.LongLength,
+                ["contentType"] = item.Str("contentType"),
+            });
+        }
+        return found;
+    }
+
+    private static string SafeName(string name)
+    {
+        var bad = Path.GetInvalidFileNameChars();
+        var clean = new string(Path.GetFileName(name).Select(c => bad.Contains(c) ? '_' : c).ToArray()).Trim();
+        return clean.Length == 0 ? "attachment" : clean;
+    }
+
+    private static void RemoveQuietly(string folder)
+    {
+        try
+        {
+            if (Directory.Exists(folder))
+                Directory.Delete(folder, true);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // A file still open (the handler's own child process, say): it goes next time this email is handled.
+        }
     }
 
     private void Save()

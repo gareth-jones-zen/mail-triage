@@ -260,6 +260,64 @@ public sealed class HandlersTests : IDisposable
         Assert.StartsWith("couldn't start no-such-handler.exe", missing.Item2);
     }
 
+    [Fact]
+    public void attachments_are_saved_for_the_handler_then_removed()
+    {
+        var text = Text.Replace("[[rule]]\nname = \"Marketing\"", """
+            [[handler]]
+            name = "deck"
+            command = ['deck.exe']
+            attachments = true
+
+            [[rule]]
+            name = "Marketing"
+            """).Replace("handler = \"draft\"", "handler = \"deck\"");
+        var withFiles = dir.Settings(text, "files.toml");
+        Assert.True(withFiles.Handlers["deck"].Attachments);
+        Assert.False(withFiles.Handlers["keep-it"].Attachments);
+
+        var seen = new List<(string Name, string Path, bool Existed, string Content)>();
+        Handlers.Process = (handler, input) =>
+        {
+            foreach (var a in ((JsonObject)JsonNode.Parse(input)!)["attachments"]!.AsArray().OfType<JsonObject>())
+            {
+                var path = a.Str("path")!;
+                seen.Add((a.Str("name")!, path, File.Exists(path), File.Exists(path) ? File.ReadAllText(path) : ""));
+            }
+            return (0, "reviewed", false);
+        };
+        var graph = new AttachmentGraph(new FakeGraph([Update()], body: "the update"));
+        var report = Triage.Run(withFiles, new Mailbox(graph, WriteDoor.Live(graph).Mail, false), null, false, lines.Add, new Handlers(withFiles));
+
+        Assert.Equal(1, report.Handled);
+        Assert.Equal(2, seen.Count);   // the inline logo and the attached email are left out
+        Assert.Equal(("Report.pptx", true, "deck bytes"), (seen[0].Name, seen[0].Existed, seen[0].Content));
+        Assert.Equal(("Report.pptx", true), (seen[1].Name, seen[1].Existed));   // same name twice: saved apart
+        Assert.NotEqual(seen[0].Path, seen[1].Path);
+        Assert.All(seen, s => Assert.False(File.Exists(s.Path)));   // gone once the handler has run
+    }
+
+    /// <summary>A FakeGraph whose message has two file attachments of the same name, an inline image and an attached
+    /// email.</summary>
+    private sealed class AttachmentGraph(FakeGraph inner) : IGraph
+    {
+        private static JsonObject File(string id, string name, bool inline = false, string type = "#microsoft.graph.fileAttachment") => new()
+        {
+            ["@odata.type"] = type, ["id"] = id, ["name"] = name, ["size"] = 10, ["contentType"] = "application/octet-stream", ["isInline"] = inline,
+        };
+
+        public IEnumerable<JsonObject> Pages(string url, IReadOnlyList<string>? scopes = null, IReadOnlyDictionary<string, string>? headers = null) =>
+            url.Contains("/attachments?", StringComparison.Ordinal)
+                ? [File("a1", "Report.pptx"), File("a2", "logo.png", inline: true), File("a3", "Fwd", type: "#microsoft.graph.itemAttachment"), File("a4", "Report.pptx")]
+                : inner.Pages(url, scopes, headers);
+
+        public JsonObject Request(string url, string method = "GET", JsonNode? body = null, IReadOnlyList<string>? scopes = null,
+            IReadOnlyDictionary<string, string>? headers = null) =>
+            url.Contains("/attachments/", StringComparison.Ordinal)
+                ? new JsonObject { ["contentBytes"] = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("deck bytes")) }
+                : inner.Request(url, method, body, scopes, headers);
+    }
+
     /// <summary>A FakeGraph that also answers a GET for one message by its id.</summary>
     private sealed class MessageGraph(FakeGraph inner) : IGraph
     {

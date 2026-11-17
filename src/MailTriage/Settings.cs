@@ -287,7 +287,7 @@ public sealed class Settings
                 {
                     Name = name, Command = command, Then = then, To = item.Get("to") is { } to ? Toml.Str(to) : null,
                     Cwd = Toml.Truthy(item.Get("cwd")) ? ToPath(Toml.Str(item.Get("cwd")), baseDir) : baseDir,
-                    Timeout = timeout, MaxAttempts = attempts,
+                    Timeout = timeout, MaxAttempts = attempts, Attachments = Toml.Truthy(item.Get("attachments")),
                 }))
                 throw new SettingsException($"Two handlers in {full} are called {Py.ReprString(name)}.");
         }
