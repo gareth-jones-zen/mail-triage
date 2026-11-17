@@ -105,6 +105,7 @@ public sealed class Settings
 
     public const string Template = """
         # mail-triage settings. See the README.
+        # base = "base-config.toml"   # optional: settings shared with other tools
         # login_hint = "you@example.com"
 
         # The folders to triage. Point Outlook rules at these, and leave your inbox alone.
@@ -162,19 +163,32 @@ public sealed class Settings
         return Rules.FirstOrDefault(rule => Applies(rule) && rule.Matches(sender, text));
     }
 
-    private static string ExpandPath(string value) => PyPath.ExpandVars(PyPath.ExpandUser(value, Env), Env);
+    /// <summary>Every top-level setting this file accepts (tables included): the ones a base file can supply.</summary>
+    public static readonly string[] KnownKeys =
+    [
+        "login_hint", "tenant", "msal_cache", "email", "queue_file", "state_file", "deleted_file", "accepted_file", "handled_file",
+        "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
+        "invite_rule", "movable_block", "one_to_ones", "one_to_one",
+    ];
+
+    /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
+    private static string ExpandPath(string value, Func<string, string?>? env = null)
+    {
+        env ??= Env;
+        return PyPath.ExpandVars(PyPath.ExpandUser(value, env), env);
+    }
 
     /// <summary>config._path: ~ and %VARIABLES% expanded; relative to the settings file's folder, resolved.</summary>
-    internal static string ToPath(string value, string baseDir)
+    internal static string ToPath(string value, string baseDir, Func<string, string?>? env = null)
     {
-        var path = ExpandPath(value);
+        var path = ExpandPath(value, env);
         return PyPath.IsAbsolute(path) ? PyPath.Pure(path) : PyPath.ResolveAgainst(baseDir, path);
     }
 
     /// <summary>config._pattern: a glob, expanded like a path but not resolved.</summary>
-    internal static string ToPattern(string value, string baseDir)
+    internal static string ToPattern(string value, string baseDir, Func<string, string?>? env = null)
     {
-        var path = ExpandPath(value);
+        var path = ExpandPath(value, env);
         if (PyPath.IsAbsolute(path))
             return PyPath.Pure(path);
         var p = path.Replace('/', '\\');
@@ -189,18 +203,33 @@ public sealed class Settings
         var full = PyPath.Resolve(path is { Length: > 0 } ? path : Env("MAIL_TRIAGE_CONFIG") is { Length: > 0 } e ? e : DefaultPath);
         if (!File.Exists(full))
             throw new FileNotFoundException($"No settings file at {full}. Run `mail-triage config` to create one.");
-        TomlTable raw;
+        TomlTable written;
         var text = File.ReadAllText(full, new UTF8Encoding(false, true));
         try
         {
-            raw = TomlSerializer.Deserialize(text, TomlContext.Default.TomlTable) ?? [];
+            written = TomlSerializer.Deserialize(text, TomlContext.Default.TomlTable) ?? [];
         }
         catch (Exception error) when (error is not IOException and not UnauthorizedAccessException)
         {
             throw new SettingsException($"{full} isn't valid TOML: {error.Message}");
         }
-        CheckTablesKept(text, raw, full);
-        return FromToml(raw, full);
+        CheckTablesKept(text, written, full);
+        // Then read strictly, with the base file it names (if any): the base's [paths] are variables for the paths
+        // here, and its other settings this file knows and doesn't set are added.
+        SettingsWithBase read;
+        try
+        {
+            read = BaseSettings.Read(text, full, Env, KnownKeys);
+        }
+        catch (TomlException error)
+        {
+            throw new SettingsException($"{full} isn't valid TOML: {error.Message}");
+        }
+        catch (FormatException error)
+        {
+            throw new SettingsException(error.Message);
+        }
+        return FromToml(read.Raw, full, read.Env);
     }
 
     /// <summary>Every [[name]] in the file must have arrived. The TOML reader drops the tables before a break when one
@@ -220,7 +249,7 @@ public sealed class Settings
         }
     }
 
-    internal static Settings FromToml(TomlTable raw, string full)
+    internal static Settings FromToml(TomlTable raw, string full, Func<string, string?>? env = null)
     {
         var baseDir = System.IO.Path.GetDirectoryName(full)!;
         var hours = Toml.Str(raw.Get("hours") ?? "07:00-19:00");
@@ -232,14 +261,14 @@ public sealed class Settings
         var notify = raw.Get("notify") ?? "new";
         if (notify is not ("new" or "errors"))
             throw new SettingsException($"notify in {full} should be \"new\" or \"errors\".");
-        string PathOr(string key, string fallback) => Toml.Truthy(raw.Get(key)) ? ToPath(Toml.Str(raw.Get(key)), baseDir) : fallback;
+        string PathOr(string key, string fallback) => Toml.Truthy(raw.Get(key)) ? ToPath(Toml.Str(raw.Get(key)), baseDir, env) : fallback;
         var hourParts = hours.Split('-');
         var settings = new Settings
         {
             Path = full,
             LoginHint = raw.Get("login_hint") is { } hint ? Toml.Str(hint) : null,
             Tenant = raw.Get("tenant") is { } tenant ? Toml.Str(tenant) : "organizations",
-            MsalCache = Toml.Truthy(raw.Get("msal_cache")) ? ToPath(Toml.Str(raw.Get("msal_cache")), baseDir) : null,
+            MsalCache = Toml.Truthy(raw.Get("msal_cache")) ? ToPath(Toml.Str(raw.Get("msal_cache")), baseDir, env) : null,
             QueueFile = PathOr("queue_file", System.IO.Path.Combine(Local, "queue.json")),
             StateFile = PathOr("state_file", System.IO.Path.Combine(Local, "raised.json")),
             DeletedFile = PathOr("deleted_file", System.IO.Path.Combine(Local, "deleted.json")),
@@ -286,7 +315,7 @@ public sealed class Settings
             if (!settings.Handlers.TryAdd(name, new Handler
                 {
                     Name = name, Command = command, Then = then, To = item.Get("to") is { } to ? Toml.Str(to) : null,
-                    Cwd = Toml.Truthy(item.Get("cwd")) ? ToPath(Toml.Str(item.Get("cwd")), baseDir) : baseDir,
+                    Cwd = Toml.Truthy(item.Get("cwd")) ? ToPath(Toml.Str(item.Get("cwd")), baseDir, env) : baseDir,
                     Timeout = timeout, MaxAttempts = attempts, Attachments = Toml.Truthy(item.Get("attachments")),
                 }))
                 throw new SettingsException($"Two handlers in {full} are called {Py.ReprString(name)}.");
@@ -331,8 +360,8 @@ public sealed class Settings
         {
             if (!Toml.Truthy(item.Get("flow")) || !Toml.Truthy(item.Get("output")))
                 throw new SettingsException($"A [[flow_check]] in {full} needs flow and output.");
-            var output = ToPattern(Toml.Str(item.Get("output")), baseDir);
-            var pending = Toml.Truthy(item.Get("pending")) ? ToPattern(Toml.Str(item.Get("pending")), baseDir) : null;
+            var output = ToPattern(Toml.Str(item.Get("output")), baseDir, env);
+            var pending = Toml.Truthy(item.Get("pending")) ? ToPattern(Toml.Str(item.Get("pending")), baseDir, env) : null;
             foreach (var pattern in new[] { output, pending })
                 if (pattern is not null && System.IO.Path.GetDirectoryName(pattern) is { } dir && (dir.Contains('*') || dir.Contains('?') || dir.Contains('[')))
                     throw new SettingsException($"A [[flow_check]] in {full} has wildcards in a folder name ({pattern}): only the file name may have them.");
