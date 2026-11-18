@@ -352,7 +352,11 @@ public sealed class Commands : TriageBase
         Assert.Contains("News (1)", deleted);
         Assert.Contains("Daily news", deleted);
         Assert.Contains("Boss: review", Cli("which", "boss@example.com").Out);
+        Assert.StartsWith("1 email and 0 invites to review; 1 deleted by the rules since the last clear (1 News)", Cli("summary").Out);
+        var counts = System.Text.Json.Nodes.JsonNode.Parse(Cli("summary", "--json").Out)!;
+        Assert.Equal((1, 0, 1, 1), ((int)counts["emails"]!, (int)counts["invites"]!, (int)counts["deleted"]!, (int)counts["deleted_by_rule"]!["News"]!));
         Assert.Equal(0, Cli("clear").Code);
+        Assert.StartsWith("0 emails and 0 invites to review; 0 deleted by the rules since the last clear\n", Cli("summary").Out.Replace("\r\n", "\n"));
         Assert.Contains("Nothing deleted", Cli("deleted").Out);
         Assert.Contains("Nothing waiting", Cli("list").Out);
     }

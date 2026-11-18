@@ -51,6 +51,8 @@ public static class Cli
             mail-triage keep 1 3            take them off the queue and leave them in the folder
             mail-triage clear               empty the queue (each email stays in its folder, never raised again)
             mail-triage deleted             what the rules deleted since the last clear, by rule (--all: the last 60 days)
+            mail-triage summary             one line for a session briefing: what's queued and what the rules deleted
+                                            since the last clear, by rule (--json for the counts)
             mail-triage which <sender> [subject]   which rule an email would meet
             mail-triage handle 3 [--handler NAME]  give a queued email (or any, by Graph id) to its rule's handler, then
                                             do what the handler's `then` says (rules with action = "handle" do this in a run)
@@ -73,7 +75,7 @@ public static class Cli
         """;
 
     private static readonly string[] Commands =
-        ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "raised", "which", "invite", "file",
+        ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
          "move", "leave", "one-to-ones", "autostart", "handle"];
 
     /// <summary>The parsed command line.</summary>
@@ -96,6 +98,7 @@ public static class Cli
         ["run"] = (["--dry-run", "--scheduled"], []),
         ["list"] = (["--json"], []),
         ["deleted"] = (["--all"], []),
+        ["summary"] = (["--json"], []),
         ["invite"] = (["--silent", "--series", "--move"], ["--note"]),
         ["file"] = ([], ["--to"]),
         ["handle"] = ([], ["--handler"]),
@@ -269,6 +272,8 @@ public static class Cli
             return List(settings, args.Flag("--json"), host);
         if (args.Command == "deleted")
             return DeletedCommand(Triage.Deleted(settings, args.Flag("--all")), host);
+        if (args.Command == "summary")
+            return Summary(settings, args.Flag("--json"), host);
         if (args.Command is "clear" or "raised" or "keep")
         {
             // Locked like a run, so a run in progress can't write back a queue that's just been cleared.
@@ -394,6 +399,41 @@ public static class Cli
             if (gone.Count > 0)
                 Print(host.Out, $"\n{gone.Count} deleted by the rules since the queue was last cleared: `mail-triage deleted`.");
         }
+        return 0;
+    }
+
+    /// <summary>For a session briefing (1.7.0, 18 Nov 2026): "28 emails and 1 invite to review; 24 deleted by the rules
+    /// since the last clear (15 Cancelled meetings, ...)", then where to look. --json: the counts. A briefing used to
+    /// read the queue and deletion files itself, and lost them when their paths moved to a base file.</summary>
+    private static int Summary(Settings settings, bool json, CliHost host)
+    {
+        var queue = Triage.Queue(settings);
+        var invites = queue.Count(i => i.Str("type") == "invite");
+        var emails = queue.Count - invites;
+        var byRule = new List<(string Rule, int Count)>();
+        foreach (var item in Triage.Deleted(settings))
+        {
+            var rule = item.Str("rule") is { Length: > 0 } r ? r : "(no rule)";
+            var at = byRule.FindIndex(g => g.Rule == rule);
+            if (at < 0)
+                byRule.Add((rule, 1));
+            else
+                byRule[at] = (rule, byRule[at].Count + 1);
+        }
+        byRule = byRule.OrderBy(g => -g.Count).ToList();
+        var deleted = byRule.Sum(g => g.Count);
+        if (json)
+        {
+            var rules = new JsonObject();
+            foreach (var (rule, count) in byRule)
+                rules[rule] = count;
+            Print(host.Out, PyJson.Dump(new JsonObject { ["emails"] = emails, ["invites"] = invites, ["deleted"] = deleted, ["deleted_by_rule"] = rules }, 2, false));
+            return 0;
+        }
+        static string Plural(int n, string one) => $"{n} {one}{(n == 1 ? "" : "s")}";
+        Print(host.Out, $"{Plural(emails, "email")} and {Plural(invites, "invite")} to review; {deleted} deleted by the rules since the last clear"
+                        + (byRule.Count > 0 ? $" ({string.Join(", ", byRule.Select(g => $"{g.Count} {g.Rule}"))})" : ""));
+        Print(host.Out, "   `mail-triage list` / `deleted`; invites: `invite accept|decline <n>`");
         return 0;
     }
 
