@@ -20,8 +20,17 @@ public sealed class Handler
     public long MaxAttempts { get; init; } = 4;
 
     /// <summary>attachments = true (1.5.0): the email's file attachments are saved to a folder of their own, their
-    /// paths given in the input, and the folder removed once the handler has run.</summary>
+    /// paths given in the input, and the folder removed once the handler has run (kept, for a queue handler).</summary>
     public bool Attachments { get; init; }
+
+    /// <summary>queue (1.8.0): instead of a command run now, the email is saved (as JSON, the same input a command
+    /// gets, under SaveTo) and this command is put on the claude-headless job queue, with {saved} replaced by the saved
+    /// file's path, to run later from Cwd. The handler is done once it's queued, so then applies at once. Null for a
+    /// command handler.</summary>
+    public List<string>? Queue { get; init; }
+
+    /// <summary>save_to: the folder a queue handler saves emails in (kept until the job deletes them).</summary>
+    public string? SaveTo { get; init; }
 }
 
 /// <summary>What a handler made of an email. Result: done (apply then), retry (leave it, ask again next run) or
@@ -43,6 +52,9 @@ public sealed class Handlers(Settings settings)
     /// <summary>Runs a handler on this input: (exit code, output, timed out?). Replaced in tests.</summary>
     public static Func<Handler, string, (int Exit, string Output, bool TimedOut)> Process = RunProcess;
 
+    /// <summary>Puts a command on the claude-headless job queue, to run from a folder. Replaced in tests.</summary>
+    public static Action<IReadOnlyList<string>, string> Enqueue = (argv, cwd) => ClaudeHeadless.JobQueue.Default.Add(argv, cwd);
+
     private JsonObject? state;
 
     private JsonObject State => state ??= StateFiles.LoadObject(settings.HandledFile, () => []);
@@ -63,6 +75,8 @@ public sealed class Handlers(Settings settings)
         int exit;
         string output;
         bool timedOut;
+        if (handler.Queue is not null)
+            return Queue(mailbox, message, key, attempts, input, handler);
         try
         {
             if (handler.Attachments)
@@ -110,6 +124,28 @@ public sealed class Handlers(Settings settings)
         };
         Save();   // at once: a failure after this (applying then) must never run the handler a second time
         return new(result, note);
+    }
+
+    /// <summary>A queue handler (1.8.0): save the email (and its attachments, if asked) under save_to, then queue the
+    /// command with {saved} filled in. Saving or queuing failing is "try again later"; nothing has been handed over.</summary>
+    private HandleOutcome Queue(Mailbox mailbox, JsonObject message, string key, long attempts, JsonObject input, Handler handler)
+    {
+        var received = message.Str("receivedDateTime") ?? input.Str("received") ?? "";
+        var stem = $"{(received.Length >= 10 ? received[..10] : "undated")}-{Folder(key)[..8]}";
+        var path = Path.Combine(handler.SaveTo!, stem + ".json");
+        try
+        {
+            Directory.CreateDirectory(handler.SaveTo!);
+            if (handler.Attachments)
+                input["attachments"] = SaveAttachments(mailbox, message.Req("id"), Path.Combine(handler.SaveTo!, stem + "-attachments"));
+            File.WriteAllText(path, PyJson.Dump(input, 1, false), new UTF8Encoding(false));
+            Enqueue(handler.Queue!.Select(a => a.Replace("{saved}", path, StringComparison.Ordinal)).ToList(), handler.Cwd);
+        }
+        catch (Exception error) when (error is not (OutOfMemoryException or M365Graph.SignInNeededException))
+        {
+            return Record(handler, message, key, attempts, TryAgain, $"couldn't save and queue it: {PyStr.Head(error.Message, 150)}", false);
+        }
+        return Record(handler, message, key, attempts, 0, $"queued: {Path.GetFileName(path)}", false);
     }
 
     /// <summary>A folder name for one email's attachments: its key, hashed (keys hold &lt; &gt; @ and the like).</summary>

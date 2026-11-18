@@ -70,12 +70,19 @@ public sealed class HandlersTests : IDisposable
     private readonly List<string> lines = [];
     private readonly List<(string Handler, JsonObject Input)> calls = [];
     private readonly Func<Handler, string, (int, string, bool)> saved = Handlers.Process;
+    private readonly Action<IReadOnlyList<string>, string> savedEnqueue = Handlers.Enqueue;
+    private readonly List<(IReadOnlyList<string> Argv, string Cwd)> queued = [];
 
-    public HandlersTests() => config = dir.Settings(Text);
+    public HandlersTests()
+    {
+        config = dir.Settings(Text);
+        Handlers.Enqueue = (argv, cwd) => queued.Add((argv, cwd));
+    }
 
     public void Dispose()
     {
         Handlers.Process = saved;
+        Handlers.Enqueue = savedEnqueue;
         dir.Dispose();
     }
 
@@ -145,6 +152,49 @@ public sealed class HandlersTests : IDisposable
         Assert.True(graph.Has("POST", "/me/messages/graph-1/move", new JsonObject { ["destinationId"] = "deleteditems" }));
         Assert.Equal("handled by draft: draft queued for 13/11", Assert.Single(Gone()).Str("did"));
         Assert.Empty(Triage.Queue(config));
+    }
+
+    [Fact]
+    public void a_queue_handler_saves_the_email_queues_its_command_and_then_applies()
+    {
+        var text = Text.Replace("name = \"draft\"\ncommand = ['python', 'draft.py']",
+            "name = \"draft\"\nqueue = ['python', 'draft.py', '--draft', '{saved}']\nsave_to = \"saved/marketing\"");
+        var settings = dir.Settings(text, "queue.toml");
+        Assert.Equal(["python", "draft.py", "--draft", "{saved}"], settings.Handlers["draft"].Queue);
+        var graph = new FakeGraph([Update()], body: "From 13/11: the update");
+        var report = Triage.Run(settings, new Mailbox(graph, WriteDoor.Live(graph).Mail, false), null, false, lines.Add, new Handlers(settings));
+        Assert.Equal((1, 1), (report.Handled, report.Deleted));
+        Assert.Empty(calls);   // nothing run now
+        var (argv, cwd) = Assert.Single(queued);
+        Assert.Equal(PyPath.Resolve(dir.Path), cwd);
+        var path = argv[3];
+        Assert.StartsWith(Path.Combine(PyPath.Resolve(dir.Path), "saved", "marketing"), path);
+        Assert.EndsWith(".json", path);
+        var email = (JsonObject)JsonNode.Parse(File.ReadAllText(path))!;
+        Assert.Equal(("FW: ExCo Marketing update - 13/11", "From 13/11: the update", "<1@example.com>"),
+            (email.Str("subject"), email.Str("body"), email.Str("key")));
+        Assert.StartsWith("handled by draft: queued: ", Triage.Deleted(settings, everything: true).Single().Str("did"));
+
+        Triage.Run(settings, new Mailbox(graph, WriteDoor.Live(graph).Mail, false), null, false, lines.Add, new Handlers(settings));
+        Assert.Single(queued);   // handled once, never queued twice
+    }
+
+    [Fact]
+    public void a_queue_handler_that_cant_queue_tries_again_later_and_settings_are_checked()
+    {
+        var text = Text.Replace("name = \"draft\"\ncommand = ['python', 'draft.py']", "name = \"draft\"\nqueue = ['python', 'draft.py', '{saved}']");
+        var settings = dir.Settings(text, "queue2.toml");
+        Assert.Contains("handler-saved", settings.Handlers["draft"].SaveTo);   // a default beside the handled file
+        Handlers.Enqueue = (_, _) => throw new IOException("queue locked");
+        var graph = new FakeGraph([Update()]);
+        Triage.Run(settings, new Mailbox(graph, WriteDoor.Live(graph).Mail, false), null, false, lines.Add, new Handlers(settings));
+        Assert.DoesNotContain(graph.Calls, c => c.Method == "POST");   // left alone, asked again next run
+        Assert.Equal("retry", new Handlers(settings).Record("<1@example.com>")!.Str("result"));
+
+        var both = Assert.Throws<SettingsException>(() => dir.Settings(text.Replace("queue = ['python'", "command = ['x']\nqueue = ['python'"), "both.toml"));
+        Assert.Contains("has command and queue", both.Message);
+        var stray = Assert.Throws<SettingsException>(() => dir.Settings(Text.Replace("command = ['keep.exe']", "command = ['keep.exe']\nsave_to = 'x'"), "stray.toml"));
+        Assert.Contains("save_to without queue", stray.Message);
     }
 
     [Fact]

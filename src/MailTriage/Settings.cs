@@ -301,8 +301,15 @@ public sealed class Settings
                 throw new SettingsException($"A [[handler]] in {full} has no name.");
             var name = Toml.Str(item.Get("name"));
             var command = item.Get("command") is { } c ? Toml.Strings(c) : [];
-            if (command.Count == 0 || command[0].Length == 0)
-                throw new SettingsException($"Handler {Py.ReprString(name)} in {full} needs command, a list such as ['python', 'handler.py'].");
+            var queue = item.Get("queue") is { } q ? Toml.Strings(q) : null;
+            if (queue is not null && command.Count > 0)
+                throw new SettingsException($"Handler {Py.ReprString(name)} in {full} has command and queue: give one (queue puts the command on the job queue).");
+            if (queue is not null && (queue.Count == 0 || queue[0].Length == 0))
+                throw new SettingsException($"Handler {Py.ReprString(name)} in {full} has an empty queue: give the command to queue, with {{saved}} for the saved email.");
+            if (queue is null && (command.Count == 0 || command[0].Length == 0))
+                throw new SettingsException($"Handler {Py.ReprString(name)} in {full} needs command, a list such as ['python', 'handler.py'] (or queue, for a job).");
+            if (queue is null && Toml.Truthy(item.Get("save_to")))
+                throw new SettingsException($"Handler {Py.ReprString(name)} in {full} has save_to without queue: save_to is for a queue handler.");
             var then = item.Get("then") is { } t ? Toml.Str(t) : "delete";
             if (!Handler.Thens.Contains(then))
                 throw new SettingsException($"Handler {Py.ReprString(name)} in {full} has then = {Py.ReprString(then)}: use delete, file, leave or review.");
@@ -314,7 +321,10 @@ public sealed class Settings
                 throw new SettingsException($"Handler {Py.ReprString(name)} in {full}: timeout and max_attempts should be at least 1.");
             if (!settings.Handlers.TryAdd(name, new Handler
                 {
-                    Name = name, Command = command, Then = then, To = item.Get("to") is { } to ? Toml.Str(to) : null,
+                    Name = name, Command = queue ?? command, Queue = queue, Then = then, To = item.Get("to") is { } to ? Toml.Str(to) : null,
+                    SaveTo = queue is null ? null : Toml.Truthy(item.Get("save_to")) ? ToPath(Toml.Str(item.Get("save_to")), baseDir, env)
+                        : System.IO.Path.Combine(System.IO.Path.GetDirectoryName(PyPath.Resolve(settings.HandledFile))!,
+                            "handler-saved", string.Concat(name.Select(ch => char.IsLetterOrDigit(ch) ? ch : '-'))),
                     Cwd = Toml.Truthy(item.Get("cwd")) ? ToPath(Toml.Str(item.Get("cwd")), baseDir, env) : baseDir,
                     Timeout = timeout, MaxAttempts = attempts, Attachments = Toml.Truthy(item.Get("attachments")),
                 }))

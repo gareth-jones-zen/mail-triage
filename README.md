@@ -124,6 +124,12 @@ then = "delete"                          # once handled: delete | file (with to)
 # timeout = 120; max_attempts = 4
 # attachments = true                    # save the email's file attachments for the handler (1.5.0)
 
+[[handler]]                              # or (1.8.0): save the email and queue a job, run later
+name = "marketing-draft"
+queue = ['claude-headless', 'job', 'marketing', '--input', '{saved}']   # {saved}: the saved email's path
+save_to = '%LOCALAPPDATA%/my-tools/marketing'   # default: handler-saved/<name>, beside handled_file
+then = "delete"
+
 [[rule]]
 name = "Weekly marketing update"
 sender = 'marketing@example\.com'
@@ -164,6 +170,7 @@ reader silently drops the tables before a break when one kind is split by anothe
   - **Each email is handed over once.** What each handler made of each email is recorded by its internet message ID (`handled_file`), before `then` is applied: if the delete fails, the next run retries only the delete.
   - **Capture what you need before exiting 0.** `then` may move the email, and moving changes its Graph id.
   - **Return quickly.** The watcher runs every few minutes; hand slow work to something else, and **start it without your output handles** (stdout and stderr to null), or mail-triage waits for that process too.
+- **Or a handler can queue the work instead (`queue`, 1.8.0).** mail-triage saves the email as JSON (the same input a command gets) in `save_to`, with any attachments (`attachments = true`) beside it in a `-attachments` folder that's kept, then puts the `queue` command on the [claude-headless](https://github.com/gareth-jones-zen/claude-headless) job queue (`%LOCALAPPDATA%\claude-headless\queue.json`) with `{saved}` replaced by the file's path, to run from `cwd`. That's the handler done, so `then` applies at once. mail-triage needs to know nothing about the job: whatever runs the queue runs it, one job at a time and after any usage limit. The job deletes the saved file when it's finished with it. If saving or queuing fails, the email is left for the next run, as for exit 75.
   - **A handler only runs when the run may write**: never in a dry run, nor with `--writes journal` or `refuse`, because it writes outside mail-triage. `run --dry-run` and `which` say which handler would run.
   - **`mail-triage handle <n>`** hands one email over by hand: a queued one by number, or any email by Graph id (`--handler NAME` if no rule names one). For testing a handler, and for an email that was queued before its rule existed.
   - **Mail is from people you don't control.** A handler that gives it to an AI model should treat it as data, not instructions, and keep a person between the draft and anyone else.
