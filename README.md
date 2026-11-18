@@ -17,6 +17,7 @@ mail-triage delete 1     # mark read, move to Deleted Items
 mail-triage keep 2       # off the queue, left in the folder
 mail-triage file 2 --to Inbox/Projects   # move it to a folder, left unread
 mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule
+mail-triage summary      # one line for a session briefing: what's queued and deleted (--json: the counts)
 ```
 
 It works on Microsoft 365 mail through Microsoft Graph, and runs on Windows (x64).
