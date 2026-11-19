@@ -126,10 +126,10 @@ public static class OneToOnePlanner
         return total;
     }
 
-    private static DateOnly Monday(DateOnly day) => day.AddDays(-PyTime.Weekday(day));
+    internal static DateOnly Monday(DateOnly day) => day.AddDays(-PyTime.Weekday(day));
 
-    /// <summary>Your time that's taken: anything busy, out of office or tentative, other than the 1:1 itself.</summary>
-    private static List<(DateTime Start, DateTime End)> Busy(List<JsonObject> events, JsonObject meeting) =>
+    /// <summary>Your time that's taken: anything busy, out of office or tentative, other than the meeting itself.</summary>
+    internal static List<(DateTime Start, DateTime End)> Busy(List<JsonObject> events, JsonObject meeting) =>
         events.Where(e => e.Req("id") != meeting.Req("id") && !e.Truthy("isCancelled") && e.Str("showAs") is { } s && Proposals.HoldsTime.Contains(s)
                           && e.Get("responseStatus").Str("response") != "declined")
             .Select(InviteTriage.Times).ToList();
@@ -137,6 +137,22 @@ public static class OneToOnePlanner
     /// <summary>The free slot to move a meeting to: the same time of day on the nearest day, and only if that time isn't
     /// free on any of these days, the slot nearest in time. Within working hours; on a tie, the later one.</summary>
     public static (DateTime Start, DateTime End)? Nearest(Settings settings, DateTime start, TimeSpan length, List<DateOnly> days,
+        List<(DateTime Start, DateTime End)> busy, DateTime now)
+    {
+        var options = FreeStarts(settings, start, length, days, busy, now);
+        if (options.Count == 0)
+            return null;
+        var same = options.Where(t => t.TimeOfDay == start.TimeOfDay).ToList();
+        var best = same.Count > 0
+            ? same.MinBy(t => (Math.Abs(DateOnly.FromDateTime(t).DayNumber - DateOnly.FromDateTime(start).DayNumber), -t.Ticks))
+            : options.MinBy(t => (Math.Abs((t - start).Ticks), -t.Ticks));
+        return (best, best + length);
+    }
+
+    /// <summary>Every start, a quarter hour apart, where a meeting of this length fits on these days: within working
+    /// hours, from now on, clear of everything busy, and not the meeting's own start. Shared with the double-booking
+    /// rules (1.13.0), which choose among them in their own order.</summary>
+    internal static List<DateTime> FreeStarts(Settings settings, DateTime start, TimeSpan length, IEnumerable<DateOnly> days,
         List<(DateTime Start, DateTime End)> busy, DateTime now)
     {
         var hours = settings.Invites!.WorkingHours;
@@ -149,17 +165,12 @@ public static class OneToOnePlanner
                 if (t >= now && t != start && !busy.Any(b => b.Start < t + length && b.End > t))
                     options.Add(t);
         }
-        if (options.Count == 0)
-            return null;
-        var same = options.Where(t => t.TimeOfDay == start.TimeOfDay).ToList();
-        var best = same.Count > 0
-            ? same.MinBy(t => (Math.Abs(DateOnly.FromDateTime(t).DayNumber - DateOnly.FromDateTime(start).DayNumber), -t.Ticks))
-            : options.MinBy(t => (Math.Abs((t - start).Ticks), -t.Ticks));
-        return (best, best + length);
+        return options;
     }
 
-    /// <summary>Each report's free/busy, a week at a time, fetched once a run. Null: it couldn't be read.</summary>
-    private sealed class Schedules(ICalendar calendar)
+    /// <summary>Each person's free/busy, a week at a time, fetched once a run. Null: it couldn't be read. Shared with the
+    /// double-booking rules (1.13.0).</summary>
+    internal sealed class Schedules(ICalendar calendar)
     {
         private readonly Dictionary<(string, DateOnly), List<(DateTime Start, DateTime End, string? Status)>?> cache = new();
 

@@ -666,12 +666,19 @@ public static class InviteTriage
     public static (List<JsonObject> Items, HashSet<string> Seen) DoubleBookings(Settings settings, List<JsonObject> events, JsonObject raised,
         Action<string> log, DateTime at)
     {
+        var (items, _, seen) = DoubleBookingPlanner.Run(settings, null, events, raised, log, at);
+        return (items, seen);
+    }
+
+    /// <summary>Each pair of overlapping meetings (or a meeting and a fixed block) from now on, as DoubleBookings finds
+    /// them: in start order, and not on days off.</summary>
+    public static List<Clash> DoubleBooked(Settings settings, List<JsonObject> events, DateTime at)
+    {
         var held = Commitments(settings, events).Where(h => h.Start > at).OrderBy(h => h.Start).ToList();
         var (away, _) = DaysOff(settings, events);
         string[] meetings = ["accepted", "tentative", "your meeting", "protected"];
         string[] blocks = ["fixed block", "travel mid-day"];
-        var items = new List<JsonObject>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var output = new List<Clash>();
         for (var i = 0; i < held.Count; i++)
         {
             for (var j = i + 1; j < held.Count && held[j].Start < held[i].End; j++)
@@ -682,26 +689,28 @@ public static class InviteTriage
                 if (away.Contains(DateOnly.FromDateTime(a.Start)) || away.Contains(DateOnly.FromDateTime(b.Start)))
                     continue;
                 var pair = string.CompareOrdinal(a.Id, b.Id) < 0 ? a.Id + "|" + b.Id : b.Id + "|" + a.Id;
-                var key = $"double:{pair}@{PyTime.Iso(b.Start, "minutes")}";
-                seen.Add(key);
-                if (raised.ContainsKey(key))
-                    continue;
-                var when = b.Start > a.Start ? b.Start : a.Start;
-                items.Add(new JsonObject
-                {
-                    ["folder"] = "Calendar", ["type"] = "double-booking", ["id"] = key, ["key"] = key,
-                    ["received"] = PyTime.Iso(when, "minutes"), ["from"] = "",
-                    ["subject"] = $"Double-booked: {a.Subject} ({Hm(a.Start)}–{Hm(a.End)}) and {b.Subject} ({Hm(b.Start)}–{Hm(b.End)}): {Day(when)}",
-                    ["rule"] = "double booking", ["recommendation"] = "check",
-                    ["check"] = $"CHECK: {a.Kind} \"{a.Subject}\" overlaps {b.Kind} \"{b.Subject}\". Decide which goes, change it in Outlook, then `mail-triage keep <n>`.",
-                    ["clashes"] = new JsonArray(new JsonObject { ["id"] = a.Id, ["subject"] = a.Subject, ["kind"] = a.Kind },
-                        new JsonObject { ["id"] = b.Id, ["subject"] = b.Subject, ["kind"] = b.Kind }),
-                });
-                raised[key] = PyTime.Iso(Clock.Now, "seconds");
-                log($"double booking queued  {a.Subject} / {b.Subject} ({Day(when)})");
+                output.Add(new Clash(a, b, $"double:{pair}@{PyTime.Iso(b.Start, "minutes")}", b.Start > a.Start ? b.Start : a.Start));
             }
         }
-        return (items, seen);
+        return output;
+    }
+
+    /// <summary>The queue item for a double booking; note (1.13.0) says what a double-booking rule made of it.</summary>
+    internal static JsonObject DoubleBookingItem(Clash c, string? note = null)
+    {
+        var (a, b) = (c.A, c.B);
+        var item = new JsonObject
+        {
+            ["folder"] = "Calendar", ["type"] = "double-booking", ["id"] = c.Key, ["key"] = c.Key,
+            ["received"] = PyTime.Iso(c.When, "minutes"), ["from"] = "",
+            ["subject"] = $"Double-booked: {a.Subject} ({Hm(a.Start)}–{Hm(a.End)}) and {b.Subject} ({Hm(b.Start)}–{Hm(b.End)}): {Day(c.When)}",
+            ["rule"] = "double booking", ["recommendation"] = "check",
+            ["check"] = $"CHECK: {a.Kind} \"{a.Subject}\" overlaps {b.Kind} \"{b.Subject}\"." + (note is null ? "" : $" {note}.")
+                        + " Decide which goes, change it in Outlook, then `mail-triage keep <n>`.",
+            ["clashes"] = new JsonArray(new JsonObject { ["id"] = a.Id, ["subject"] = a.Subject, ["kind"] = a.Kind },
+                new JsonObject { ["id"] = b.Id, ["subject"] = b.Subject, ["kind"] = b.Kind }),
+        };
+        return item;
     }
 
     /// <summary>Meetings others organise that fall in your leave and that you haven't declined, each with its note.</summary>

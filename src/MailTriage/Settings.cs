@@ -140,6 +140,44 @@ public sealed class OneToOnes
     public string BankHolidayNote { get; set; } = "Cancelling for the bank holiday";
 }
 
+/// <summary>A standing answer to one kind of double booking (1.13.0): when one meeting matches Keep and the other
+/// matches Other (if given) and has exactly one other person in it, from the group OtherWith (if given), the other is
+/// moved (one you organise) or declined (one someone else organises), that occurrence only.</summary>
+public sealed class DoubleBookingRule
+{
+    public static readonly string[] Actions = ["move", "decline"];
+    public static readonly string[] Keys = ["name", "keep", "other", "other_with", "action", "note", "why"];
+
+    public required string Name { get; init; }
+
+    /// <summary>A pattern for the subject of the meeting that stays (case is ignored).</summary>
+    public required string Keep { get; init; }
+
+    /// <summary>A pattern for the subject of the meeting that goes (case is ignored); null: any.</summary>
+    public string? Other { get; init; }
+
+    /// <summary>A [groups] name: the meeting that goes has exactly one person in it besides you, from this group.</summary>
+    public string? OtherWith { get; init; }
+
+    /// <summary>move or decline.</summary>
+    public required string Action { get; init; }
+
+    /// <summary>decline only: the note sent with the response.</summary>
+    public string Note { get; init; } = "";
+    public string Why { get; init; } = "";
+}
+
+/// <summary>[double_bookings] and its [[double_booking_rule]]s (1.13.0). Like [one_to_ones], it changes your calendar,
+/// so it starts with act = false, which only records what it would do.</summary>
+public sealed class DoubleBookingRules
+{
+    public static readonly string[] Keys = ["act", "max_actions"];
+
+    public bool Act { get; set; }
+    public long MaxActions { get; set; } = 20;
+    public List<DoubleBookingRule> Rules { get; set; } = [];
+}
+
 /// <summary>The settings file: which folders to triage, and the rules (config.py). Regular expressions are Python's,
 /// and only the part of Python's dialect that .NET reads the same way is accepted (PyRegex).</summary>
 public sealed class Settings
@@ -188,6 +226,10 @@ public sealed class Settings
     public string DaysOffFile { get; init; } = System.IO.Path.Combine(Local, "days-off.json");
     public string HandledFile { get; init; } = System.IO.Path.Combine(Local, "handled.json");
 
+    /// <summary>What the double-booking rules did, and (act = false) would have done, to each occurrence (1.13.0): so
+    /// none is moved or declined twice, and each preview is recorded once.</summary>
+    public string DoubleBookingsFile { get; init; } = System.IO.Path.Combine(Local, "double-bookings.json");
+
     /// <summary>Each email a forward rule has sent on, by internet message ID: "sending" before the POST, "sent" once
     /// it's answered, so a forward whose answer was lost is never sent twice (1.9.0).</summary>
     public string ForwardedFile { get; init; } = System.IO.Path.Combine(Local, "forwarded.json");
@@ -199,6 +241,12 @@ public sealed class Settings
     public string? Email { get; set; }
     public Invites? Invites { get; set; }
     public OneToOnes? OneToOnes { get; set; }
+
+    /// <summary>[groups] (1.13.0): named lists of addresses (lower case), for rules to name.</summary>
+    public Dictionary<string, List<string>> Groups { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>[double_bookings] and [[double_booking_rule]]s (1.13.0); null when there are none.</summary>
+    public DoubleBookingRules? DoubleBookings { get; set; }
 
     /// <summary>The first rule that matches and applies in this folder. A rule naming folders applies only in them;
     /// a folder with unmatched = "leave" (an inbox) gets only the rules that name it.</summary>
@@ -218,8 +266,9 @@ public sealed class Settings
     public static readonly string[] KnownKeys =
     [
         "login_hint", "tenant", "msal_cache", "email", "queue_file", "state_file", "deleted_file", "accepted_file", "days_off_file", "handled_file", "forwarded_file",
+        "double_bookings_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
-        "invite_rule", "movable_block", "one_to_ones", "one_to_one",
+        "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -326,6 +375,7 @@ public sealed class Settings
             AcceptedFile = PathOr("accepted_file", System.IO.Path.Combine(Local, "accepted.json")),
             DaysOffFile = PathOr("days_off_file", System.IO.Path.Combine(Local, "days-off.json")),
             HandledFile = PathOr("handled_file", System.IO.Path.Combine(Local, "handled.json")),
+            DoubleBookingsFile = PathOr("double_bookings_file", System.IO.Path.Combine(Local, "double-bookings.json")),
             ForwardedFile = PathOr("forwarded_file", System.IO.Path.Combine(Local, "forwarded.json")),
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
@@ -572,9 +622,91 @@ public sealed class Settings
                 BankHolidayNote = section.Get("bank_holiday_note") is { } bn ? Toml.Str(bn) : "Cancelling for the bank holiday",
             };
         }
+        ReadGroups(raw, full, settings);
+        ReadDoubleBookings(raw, full, settings);
         if (settings.Folders.Count == 0 && settings.Invites is null)
             throw new SettingsException($"{full} names no [[folder]] to triage, and no [invites].");
         return settings;
+    }
+
+    private static bool IsAddress(object? value) => value is string s && PyRegex.Get(@"^[^@\s]+@[^@\s]+\.[^@\s]+$").FullMatch(s);
+
+    /// <summary>[groups] (1.13.0): each a list of addresses, kept in lower case.</summary>
+    private static void ReadGroups(TomlTable raw, string full, Settings settings)
+    {
+        if (raw.Get("groups") is not { } value)
+            return;
+        var table = value as TomlTable ?? throw new SettingsException($"[groups] in {full} should be a table: name = ['someone@example.com', ...].");
+        foreach (var (name, list) in table)
+        {
+            if (list is not TomlArray addresses || addresses.Count == 0 || !addresses.All(IsAddress))
+                throw new SettingsException($"Group {Py.ReprString(name)} in [groups] in {full} should be a list of email addresses.");
+            settings.Groups[name] = addresses.Cast<string>().Select(a => a.ToLowerInvariant()).ToList();
+        }
+    }
+
+    /// <summary>[double_bookings] and [[double_booking_rule]] (1.13.0). Read strictly, unknown keys included: a misspelt
+    /// condition would otherwise be dropped, and the rule would act on more than it says.</summary>
+    private static void ReadDoubleBookings(TomlTable raw, string full, Settings settings)
+    {
+        var sectionValue = raw.Get("double_bookings");
+        var tables = Toml.Tables(raw.Get("double_booking_rule")).ToList();
+        if (sectionValue is null && tables.Count == 0)
+            return;
+        var section = sectionValue is null ? new TomlTable() : sectionValue as TomlTable ?? throw new SettingsException($"[double_bookings] in {full} should be a table.");
+        if (settings.Invites is not { DoubleBookings: true })
+            throw new SettingsException($"[double_bookings] and [[double_booking_rule]] in {full} need [invites] with double_bookings = true: "
+                                        + "a rule settles a double booking that would otherwise be queued.");
+        foreach (var key in section.Keys)
+            if (!DoubleBookingRules.Keys.Contains(key))
+                throw new SettingsException($"[double_bookings] in {full} has {Py.ReprString(key)}: it takes {string.Join(", ", DoubleBookingRules.Keys)}.");
+        if (section.Get("act") is { } act && act is not bool)
+            throw new SettingsException($"act in [double_bookings] in {full} should be true or false.");
+        var max = Toml.Int(section.Get("max_actions") ?? 20L);
+        if (max < 1)
+            throw new SettingsException($"max_actions in [double_bookings] in {full} should be at least 1 (act = false stops it acting).");
+        var config = new DoubleBookingRules { Act = section.Get("act") is true, MaxActions = max };
+        var i = 0;
+        foreach (var item in tables)
+        {
+            i++;
+            var name = item.Get("name") is { } n ? Toml.Str(n) : $"double booking rule {i}";
+            string Problem(string what) => $"Double booking rule {Py.ReprString(name)} in {full}: {what}";
+            foreach (var key in item.Keys)
+                if (!DoubleBookingRule.Keys.Contains(key))
+                    throw new SettingsException(Problem($"{Py.ReprString(key)} isn't a setting (it takes {string.Join(", ", DoubleBookingRule.Keys)})."));
+            if (!(item.Get("keep") is string keep && keep.Length > 0))
+                throw new SettingsException(Problem("keep, a pattern for the subject of the meeting that stays, is needed."));
+            foreach (var key in new[] { "keep", "other" })
+            {
+                if (item.Get(key) is not { } pattern)
+                    continue;
+                if (pattern is not string text || text.Length == 0)
+                    throw new SettingsException(Problem($"{key} should be a regular expression."));
+                if (PyRegex.Problem(text) is { } why)
+                    throw new SettingsException(Problem($"{key} isn't a valid regular expression ({why})."));
+            }
+            var action = item.Get("action") as string ?? "";
+            if (!DoubleBookingRule.Actions.Contains(action))
+                throw new SettingsException(Problem($"action is {Toml.Repr(item.Get("action"))}: use move or decline."));
+            var with = item.Get("other_with");
+            if (with is not null && !(with is string g && settings.Groups.ContainsKey(g)))
+                throw new SettingsException(Problem($"other_with = {Toml.Repr(with)} isn't a group in [groups]"
+                                                    + (settings.Groups.Count > 0 ? $" (one of {string.Join(", ", settings.Groups.Keys.Order(PyStr.Order))})." : ", and there are none.")));
+            var note = item.Get("note");
+            if (note is not null and not string)
+                throw new SettingsException(Problem("note should be text."));
+            if (note is not null && action == "move")
+                throw new SettingsException(Problem("note is for decline only: a move sends the attendees an update, with no note."));
+            if (config.Rules.Any(r => r.Name == name))
+                throw new SettingsException($"Two double booking rules in {full} are called {Py.ReprString(name)}.");
+            config.Rules.Add(new DoubleBookingRule
+            {
+                Name = name, Keep = (string)item.Get("keep")!, Other = item.Get("other") as string, OtherWith = with as string, Action = action,
+                Note = note as string ?? "", Why = item.Get("why") is { } w ? Toml.Str(w) : "",
+            });
+        }
+        settings.DoubleBookings = config;
     }
 
     /// <summary>config.create_default.</summary>
@@ -656,6 +788,26 @@ public sealed class Settings
         }
         else
             o["one_to_ones"] = null;
+        if (Groups.Count > 0)
+        {
+            var groups = new JsonObject();
+            foreach (var (name, addresses) in Groups)
+                groups[name] = Strs(addresses);
+            o["groups"] = groups;
+        }
+        if (DoubleBookings is { } d)
+        {
+            o["double_bookings_file"] = DoubleBookingsFile;
+            o["double_bookings"] = new JsonObject
+            {
+                ["act"] = d.Act, ["max_actions"] = d.MaxActions,
+                ["rules"] = new JsonArray(d.Rules.Select(r => (JsonNode)new JsonObject
+                {
+                    ["name"] = r.Name, ["keep"] = r.Keep, ["other"] = Opt(r.Other), ["other_with"] = Opt(r.OtherWith), ["action"] = r.Action,
+                    ["note"] = r.Note, ["why"] = r.Why,
+                }).ToArray()),
+            };
+        }
         return o;
     }
 }
