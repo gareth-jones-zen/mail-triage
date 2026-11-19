@@ -230,8 +230,33 @@ public sealed class HandlersTests : IDisposable
         Run(graph);
         Assert.Equal(2, calls.Count);
         var queue = Triage.Queue(config);
-        Assert.Equal(["draft failed (exit 2): Traceback: boom", "draft timed out after 30s: half done"], queue.Select(i => i.Str("check")));
+        Assert.Equal(["kept by draft (exit 2): Traceback: boom", "draft timed out after 30s: half done"], queue.Select(i => i.Str("check")));
         Assert.DoesNotContain(graph.Calls, c => c.Method == "POST");
+    }
+
+    [Fact]
+    public void a_crash_or_a_handler_that_wont_start_is_a_failure_and_an_ordinary_exit_is_kept()
+    {
+        Answer((1, "", false));
+        var graph = new FakeGraph([Update(1), Update(2), Update(3)]);
+        Handlers.Process = (handler, input) =>
+        {
+            var n = ((JsonObject)JsonNode.Parse(input)!).Str("id");
+            calls.Add((handler.Name, new JsonObject()));
+            return n switch
+            {
+                "graph-1" => (-1, "couldn't start draft.exe: The system cannot find the file specified.", false),
+                "graph-2" => (unchecked((int)0xE0434352), "Unhandled exception. System.Exception: boom", false),
+                _ => (1, "3 notifications, 2 of them leave requests: raised as usual", false),
+            };
+        };
+        Run(graph);
+        Assert.Equal(
+        [
+            "draft failed (exit -1): couldn't start draft.exe: The system cannot find the file specified.",
+            "draft failed (exit -532462766): Unhandled exception. System.Exception: boom",
+            "kept by draft (exit 1): 3 notifications, 2 of them leave requests: raised as usual",
+        ], Triage.Queue(config).Select(i => i.Str("check")));
     }
 
     [Fact]

@@ -115,8 +115,13 @@ public sealed class Handlers(Settings settings)
             (result, note) = ("retry", first);
         else if (exit == TryAgain)
             (result, note) = ("failed", $"{handler.Name} still not ready after {attempts} tries" + (first.Length > 0 ? $": {first}" : ""));
-        else
+        else if (exit < 0)
+            // Couldn't start (-1), or a crash: Windows reports an unhandled exception or a fault as a negative code.
             (result, note) = ("failed", $"{handler.Name} failed (exit {exit})" + (first.Length > 0 ? $": {first}" : ""));
+        else
+            // An ordinary non-zero exit is the handler's answer, not a fault (1.9.0): "this one isn't mine, raise it",
+            // as team-leave's digest says with exit 1 when a digest holds more than leave requests.
+            (result, note) = ("failed", $"kept by {handler.Name} (exit {exit})" + (first.Length > 0 ? $": {first}" : ""));
         State[key] = new JsonObject
         {
             ["handler"] = handler.Name, ["result"] = result, ["note"] = note, ["attempts"] = attempts,

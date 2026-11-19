@@ -181,6 +181,7 @@ reader silently drops the tables before a break when one kind is split by anothe
   - **Exit 0: handled.** `then` applies (delete by default), and the first line of output is the note `deleted` shows.
   - **Exit 75: try again later.** The email is left alone, and the next run hands it over again, up to `max_attempts`; then it's queued.
   - **Anything else, or a timeout: queued**, with the first line of output (or of errors) as the reason. **Neither is retried**: after a timeout the handler may have done part of its work, and a second go could do it twice.
+    - **Any other exit above 0 is the handler's answer, not a fault (1.9.0)**: "this one isn't for me, raise it". It's queued as *kept by &lt;handler&gt; (exit 1): …*. **A timeout, a handler that won't start, a crash** (Windows reports an unhandled exception as a negative code) **or exit 75 past `max_attempts`** is queued as *&lt;handler&gt; failed …*. Before 1.9.0 every non-zero exit read "failed", which made a handler's deliberate exit 1 look like a fault.
   - **Each email is handed over once.** What each handler made of each email is recorded by its internet message ID (`handled_file`), before `then` is applied: if the delete fails, the next run retries only the delete.
   - **Capture what you need before exiting 0.** `then` may move the email, and moving changes its Graph id.
   - **Return quickly.** The watcher runs every few minutes; hand slow work to something else, and **start it without your output handles** (stdout and stderr to null), or mail-triage waits for that process too.
