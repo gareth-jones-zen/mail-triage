@@ -82,6 +82,7 @@ public static class Triage
     {
         var raised = StateFiles.LoadObject(settings.StateFile, () => []);
         var previous = Queue(settings);
+        Checks.Graph = mailbox.Graph;   // for the checks that read Graph (sharepoint-access, 1.12.0)
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var added = new List<JsonObject>();
         int deleted = 0, again = 0, filed = 0, handled = 0, forwarded = 0;
@@ -102,7 +103,7 @@ public static class Triage
                 if (raised.ContainsKey(key))
                 {
                     if (waiting.TryGetValue(key, out var queued) && !resolved.Contains(key)
-                        && Recheck(settings, mailbox, message, queued) is { } passed)
+                        && Recheck(settings, mailbox, folder, message, queued) is { } passed)
                     {
                         // Its check passes now (1.9.0): deleted as a first-time pass would be, and off the queue.
                         var passLabel = $"[{passed.Rule.Name}] {Sender(message)}: {message.Fmt("subject")} ({passed.Why})";
@@ -385,13 +386,26 @@ public static class Triage
 
     /// <summary>A queued email raised by a `check` rule, checked again (1.9.0): the check ran once, when the email
     /// arrived, and a failed build checked while its fixing run was still going (17 Nov 2026) sat in the queue saying
-    /// "still failing" for two days. Only items whose rule (by name) is still a check rule. Returns the rule and why
+    /// "still failing" for two days. Items whose rule (by name) is still a check rule, and (1.12.0) items queued with no
+    /// rule that a check rule now matches, as a new check rule would have checked them (Stu Cowley's access request,
+    /// queued before the sharepoint-access rule, was approved by another owner meanwhile). Returns the rule and why
     /// when it passes now; otherwise null, with the item's note updated if the reason changed. A check that throws
     /// leaves the item as it was: an error never removes anything.</summary>
-    private static (Rule Rule, string Why)? Recheck(Settings settings, Mailbox mailbox, JsonObject message, JsonObject queued)
+    private static (Rule Rule, string Why)? Recheck(Settings settings, Mailbox mailbox, Folder folder, JsonObject message, JsonObject queued)
     {
-        if (settings.Rules.FirstOrDefault(r => r.Name == queued.Str("rule") && r.Action == "check") is not { Check: { } name } rule
-            || !Checks.All.TryGetValue(name, out var check))
+        var rule = settings.Rules.FirstOrDefault(r => r.Name == queued.Str("rule") && r.Action == "check");
+        if (rule is null && queued.Str("rule") == "no rule matched")
+        {
+            try
+            {
+                rule = settings.RuleFor(Sender(message), $"{message.Fmt("subject")}\n{message.Fmt("bodyPreview")}", folder) is { Action: "check" } now ? now : null;
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                return null;
+            }
+        }
+        if (rule is not { Check: { } name } || !Checks.All.TryGetValue(name, out var check))
             return null;
         bool fine;
         string why;

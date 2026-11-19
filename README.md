@@ -173,6 +173,17 @@ reader silently drops the tables before a break when one kind is split by anothe
 - **The test for a rule is "does this need me to do something?"** A notification that only says something happened should be a delete rule. Hence the flow-failures check: a failure digest only matters if the flow is still failing.
 - **flow-failures never guesses that a flow is fine.** Power Automate doesn't say whether a flow has worked since, so each flow needs a `[[flow_check]]` saying what a good run leaves behind. With `pending`, a flow has recovered if nothing pending is newer than its newest output. Without it, if its output is newer than the digest. A flow without a check is raised.
 - **github-runs asks GitHub whether the workflow has passed since.** It reads the repository, workflow and branch from a "[owner/repo] Run failed: build - main (abc1234)" email, and asks the GitHub CLI (`gh run list`, as you) for that branch's latest finished run of that workflow. A success since deletes the email; a failure, or anything it can't tell (no `gh`, not signed in, no finished run), is raised with what it found.
+- **sharepoint-access asks SharePoint whether someone else has already dealt with an access request** (1.12.0). A "Name wants to access 'Site'" email goes to every owner of the site, so another owner has often approved it by the time you see it. It reads the requested resource and who asked from the email, finds the request in that site's hidden Access Requests list by who asked and when (within 15 minutes of the email: the email's AccessRequestID isn't the list item's id), and deletes the email if it's approved, saying who approved it and when. Still waiting, any other status, or a request it can't find or read is raised with what it found. It reads the list with Files.ReadWrite.All (or Sites.Read.All), and only reads. A rule for it:
+
+  ```toml
+  [[rule]]
+  name = "SharePoint access requests"
+  sender = 'no-reply@sharepointonline\.com'
+  match = "wants to access '"
+  action = "check"
+  check = "sharepoint-access"
+  ```
+- **Queued emails are checked again on every run** when a check rule applies to them: one raised by a check rule, and (1.12.0) one queued with no rule that a check rule added since now matches, so adding a check rule clears requests already waiting once they pass.
 - **Handle gives the email to a command of yours, then does what the handler's `then` says.** mail-triage recognises the email; what's done with it (a draft written, a report reviewed) is a script you own, so the tool stays generic. The handler gets the email as JSON on stdin: `id`, `key` (internet message ID), `folder`, `from`, `subject`, `received`, `body` (as text), `webLink`, `hasAttachments` and `rule`.
   - **With `attachments = true` (1.5.0) it also gets `attachments`:** `[{name, path, size, contentType}]`, each file
     attachment already saved to a folder of its own (inline images and attached emails are left out). **The folder is

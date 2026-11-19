@@ -11,7 +11,11 @@ namespace MailTriage;
 /// needs a [[flow_check]] saying what a good run leaves behind; a flow without one is raised.
 ///
 /// github-runs: a GitHub Actions "Run failed" email only matters if the workflow is still failing on that branch.
-/// It asks the GitHub CLI (gh, signed in as you) for the branch's latest finished run of that workflow.</summary>
+/// It asks the GitHub CLI (gh, signed in as you) for the branch's latest finished run of that workflow.
+///
+/// sharepoint-access (1.12.0): a SharePoint "X wants to access 'Site'" request only matters if no other owner has dealt
+/// with it. It finds the request in the site's hidden Access Requests list (by who asked, and when: the email's own
+/// AccessRequestID isn't the list item's) and passes when it's approved.</summary>
 public static class Checks
 {
     public delegate (bool Fine, string Why) Check(JsonObject message, string bodyHtml, Settings settings);
@@ -22,7 +26,94 @@ public static class Checks
         {
             ["flow-failures"] = (true, CheckFlowFailures),
             ["github-runs"] = (false, CheckGitHubRun),
+            ["sharepoint-access"] = (true, CheckSharePointAccess),
         };
+
+    /// <summary>Graph, for the checks that read it (sharepoint-access): the run's mailbox sets it. Replaced in tests.</summary>
+    public static IGraph? Graph;
+
+    /// <summary>Reading a site's lists needs Sites.Read.All, or Files.ReadWrite.All, which the tenant-wide consent has.</summary>
+    public static readonly string[] SiteScopes = ["Files.ReadWrite.All"];
+
+    /// <summary>How far the request's time in the list may be from the email's: they're seconds apart.</summary>
+    public static readonly TimeSpan AccessRequestWindow = TimeSpan.FromMinutes(15);
+
+    private static readonly System.Text.RegularExpressions.Regex RequestedResource = new(
+        @"(?is)Requested resource:\s*(?:<[^>]*>\s*)*(?<url>https://[^<\s""]+)");
+
+    private static readonly System.Text.RegularExpressions.Regex RequestedBy = new(
+        @"(?is)Requested by:\s*(?:<[^>]*>\s*)*(?<name>[^(<]+?)\s*\((?<email>[^)\s<]+@[^)\s<]+)\)");
+
+    /// <summary>(the requested resource's URL, the requester's name, their email) from the request email's body, or null.</summary>
+    public static (string Url, string Name, string Email)? ParseAccessRequest(string bodyHtml)
+    {
+        var resource = RequestedResource.Match(bodyHtml);
+        var by = RequestedBy.Match(bodyHtml);
+        if (!resource.Success || !by.Success)
+            return null;
+        return (System.Net.WebUtility.HtmlDecode(resource.Groups["url"].Value), System.Net.WebUtility.HtmlDecode(by.Groups["name"].Value).Trim(),
+                by.Groups["email"].Value.Trim());
+    }
+
+    /// <summary>The Graph path of the site a SharePoint URL is in: "/sites/host:/sites/Name", or the root site's.</summary>
+    public static string? SitePath(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !uri.Host.EndsWith(".sharepoint.com", StringComparison.OrdinalIgnoreCase))
+            return null;
+        var parts = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 2 && parts[0].ToLowerInvariant() is "sites" or "teams" or "personal"
+            ? $"/sites/{uri.Host}:/{parts[0]}/{parts[1]}"
+            : $"/sites/{uri.Host}";
+    }
+
+    public static (bool, string) CheckSharePointAccess(JsonObject message, string bodyHtml, Settings settings)
+    {
+        if (ParseAccessRequest(bodyHtml) is not var (url, name, _))
+            return (false, "couldn't read the requested resource and who asked from the email");
+        if (SitePath(url) is not { } sitePath)
+            return (false, $"{url} isn't a SharePoint site, so can't look the request up");
+        if (Graph is not { } graph)
+            return (false, "no Graph to look the request up with");
+        if (!DateTime.TryParse(message.Str("receivedDateTime"), CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var received))
+            return (false, "the email has no received time to match the request by");
+        JsonObject? best = null;
+        var bestGap = TimeSpan.MaxValue;
+        try
+        {
+            var siteId = graph.Request($"{sitePath}?$select=id", scopes: SiteScopes).Req("id");
+            var listId = graph.Request($"/sites/{siteId}/lists/{Uri.EscapeDataString("Access Requests")}?$select=id", scopes: SiteScopes).Req("id");
+            foreach (var item in graph.Pages($"/sites/{siteId}/lists/{listId}/items?$expand=fields&$select=id,lastModifiedDateTime,lastModifiedBy&$top=200", SiteScopes))
+            {
+                var fields = item["fields"] as JsonObject;
+                var who = fields?["RequestedForDisplayNameDisp"]?.ToString() ?? fields?["RequestedByDisplayNameDisp"]?.ToString() ?? "";
+                if (!string.Equals(who.Trim(), name, StringComparison.OrdinalIgnoreCase)
+                    || !DateTime.TryParse(fields?["RequestDate"]?.ToString(), CultureInfo.InvariantCulture,
+                        DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var asked))
+                    continue;
+                var gap = (asked - received).Duration();
+                if (gap <= AccessRequestWindow && gap < bestGap)
+                    (best, bestGap) = (item, gap);
+            }
+        }
+        catch (Exception error) when (error is not (OutOfMemoryException or M365Graph.SignInNeededException))
+        {
+            return (false, $"couldn't read the site's access requests ({error.Message}), so can't tell whether it's been dealt with");
+        }
+        if (best is null)
+            return (false, $"{name}'s request isn't in the site's access requests, so can't tell whether it's been dealt with");
+        var status = best["fields"]?["StatusDisp"]?.ToString() ?? "";
+        var by = best["lastModifiedBy"]?["user"]?["displayName"]?.ToString() ?? "someone";
+        var when = DateTime.TryParse(best["lastModifiedDateTime"]?.ToString(), CultureInfo.InvariantCulture,
+            DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var changed)
+            ? TimeZoneInfo.ConvertTimeFromUtc(changed, Clock.Provider.LocalTimeZone).ToString("ddd d MMM HH:mm", CultureInfo.InvariantCulture) : "";
+        return status switch
+        {
+            "1" => (true, $"already approved by {by}{(when.Length > 0 ? $" ({when})" : "")}"),
+            "0" or "" => (false, "still waiting for approval"),
+            _ => (false, $"its status in the site's access requests is {status} (not approved), changed by {by}"),
+        };
+    }
 
     /// <summary>Runs gh with these arguments: (exit code, stdout). Replaced in tests.</summary>
     public static Func<IReadOnlyList<string>, (int Exit, string Output)> Gh = RunGh;
