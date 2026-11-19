@@ -29,8 +29,15 @@ public static class Checks
             ["sharepoint-access"] = (true, CheckSharePointAccess),
         };
 
-    /// <summary>Graph, for the checks that read it (sharepoint-access): the run's mailbox sets it. Replaced in tests.</summary>
-    public static IGraph? Graph;
+    private static readonly AsyncLocal<IGraph?> CurrentGraph = new();
+
+    /// <summary>Graph, for the checks that read it (sharepoint-access): the run's mailbox sets it. Per async flow (1.13.0),
+    /// as Clock is, so runs and tests side by side each see their own (a plain static let parallel tests overwrite it).</summary>
+    public static IGraph? Graph
+    {
+        get => CurrentGraph.Value;
+        set => CurrentGraph.Value = value;
+    }
 
     /// <summary>Reading a site's lists needs Sites.Read.All, or Files.ReadWrite.All, which the tenant-wide consent has.</summary>
     public static readonly string[] SiteScopes = ["Files.ReadWrite.All"];
