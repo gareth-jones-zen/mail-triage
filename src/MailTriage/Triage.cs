@@ -87,6 +87,11 @@ public static class Triage
         int deleted = 0, again = 0, filed = 0, handled = 0, forwarded = 0;
         var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
         var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
+        var waiting = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var i in previous)
+            if (i.Get("key") is { } k)
+                waiting.TryAdd(Py.Str(k), i);
+        var resolved = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var folder in settings.Folders)
         {
@@ -96,6 +101,26 @@ public static class Triage
                 seen.Add(key);
                 if (raised.ContainsKey(key))
                 {
+                    if (waiting.TryGetValue(key, out var queued) && !resolved.Contains(key)
+                        && Recheck(settings, mailbox, message, queued) is { } passed)
+                    {
+                        // Its check passes now (1.9.0): deleted as a first-time pass would be, and off the queue.
+                        var passLabel = $"[{passed.Rule.Name}] {Sender(message)}: {message.Fmt("subject")} ({passed.Why})";
+                        if (!dryRun)
+                        {
+                            mailbox.Delete(message.Req("id"));
+                            items.Add((JsonNode)new JsonObject
+                            {
+                                ["when"] = NowMicro(), ["folder"] = folder.Name, ["received"] = message.GetCopy("receivedDateTime"),
+                                ["from"] = Sender(message), ["subject"] = message.GetCopy("subject", ""), ["rule"] = passed.Rule.Name,
+                                ["check"] = passed.Why,
+                            });
+                            resolved.Add(key);
+                        }
+                        log($"{(dryRun ? "would delete" : "deleted")}  {passLabel}");
+                        deleted++;
+                        continue;
+                    }
                     again++;
                     continue;
                 }
@@ -316,7 +341,8 @@ public static class Triage
         }
         // Still waiting from earlier runs, and still in the folder (one deleted by hand in Outlook drops out).
         var newKeys = added.Select(i => Py.Str(i.Get("key"))).ToHashSet(StringComparer.Ordinal);
-        var carried = previous.Where(i => i.Get("key") is { } k && seen.Contains(Py.Str(k)) && !newKeys.Contains(Py.Str(k))).ToList();
+        var carried = previous.Where(i => i.Get("key") is { } k && seen.Contains(Py.Str(k)) && !newKeys.Contains(Py.Str(k))
+                                          && !resolved.Contains(Py.Str(k))).ToList();
         if (!dryRun)
         {
             StateFiles.Save(settings.StateFile, raised);
@@ -334,6 +360,33 @@ public static class Triage
             + (handled > 0 ? $"{handled} handled, " : "") + $"{added.Count} new to review"
             + (invitesNew > 0 ? $" ({invitesNew} invites)" : "") + $", {carried.Count} still waiting from earlier runs, {report.Kept} seen before and kept");
         return report;
+    }
+
+    /// <summary>A queued email raised by a `check` rule, checked again (1.9.0): the check ran once, when the email
+    /// arrived, and a failed build checked while its fixing run was still going (17 Nov 2026) sat in the queue saying
+    /// "still failing" for two days. Only items whose rule (by name) is still a check rule. Returns the rule and why
+    /// when it passes now; otherwise null, with the item's note updated if the reason changed. A check that throws
+    /// leaves the item as it was: an error never removes anything.</summary>
+    private static (Rule Rule, string Why)? Recheck(Settings settings, Mailbox mailbox, JsonObject message, JsonObject queued)
+    {
+        if (settings.Rules.FirstOrDefault(r => r.Name == queued.Str("rule") && r.Action == "check") is not { Check: { } name } rule
+            || !Checks.All.TryGetValue(name, out var check))
+            return null;
+        bool fine;
+        string why;
+        try
+        {
+            (fine, why) = check.Run(message, check.NeedsBody ? mailbox.Body(message.Req("id")) : "", settings);
+        }
+        catch (Exception error) when (error is not (OutOfMemoryException or M365Graph.SignInNeededException))
+        {
+            return null;
+        }
+        if (fine)
+            return (rule, why);
+        if (why.Length > 0 && why != queued.Str("check"))
+            queued["check"] = why;
+        return null;
     }
 
     /// <summary>Queue items by their number in `list` (1, 2...) or by Graph id. Unknown references throw.</summary>

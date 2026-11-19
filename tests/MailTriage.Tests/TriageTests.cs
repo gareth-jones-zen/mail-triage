@@ -253,6 +253,7 @@ public sealed class FlowFailures : TriageBase
     }
 }
 
+[Collection("Checks.Gh")]   // swaps Checks.Gh, as RecheckTests does: never at the same time
 public sealed class GitHubRuns : TriageBase
 {
     private static JsonObject Failed(string subject) => Message(7, "notifications@github.com", subject);
