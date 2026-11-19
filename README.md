@@ -325,6 +325,24 @@ double_bookings = true           # queue meetings that overlap another meeting o
   "Declined: bank holiday". Records of what was declined are kept in `days_off_file`.
 - An invite queued before these were switched on stays queued; only new ones are answered.
 
+**What you organise on your days off (1.14.0)**, also off unless switched on, over the same days off and
+`months_ahead`, each occurrence once, at most `max_declines` a run:
+
+```toml
+cancel_days_off = true           # a meeting you organise with one other person: cancel that occurrence
+remove_blocks_days_off = true    # your own blocks (no one else invited): delete that occurrence; no one is told
+raise_group_days_off = true      # a meeting you organise with two or more others: queue it for you, once
+```
+
+- **Cancelled** with `[one_to_ones]`' `my_note` ("Cancelling as I'm on leave"), or `bank_holiday_note` on a bank
+  holiday. Your manager's 1:1, if you send the invite, is cancelled too (it's only protected from being moved). Your
+  reports' 1:1s are left to `[one_to_ones]`, which may move them instead.
+- **A group meeting is yours to decide:** it may go ahead without you, or someone else chair it. Cancel it, hand it
+  over or leave it, then `keep <n>`.
+- Your leave and bank holiday entries themselves, all-day entries and anything shown as free are never touched.
+- `[one_to_ones]` with no `days_ahead` of its own now looks as far as `months_ahead` (it had stopped at the invites'
+  `days_ahead`).
+
 ### Double-booking rules (1.13.0)
 
 Some double bookings come up the same way every time, and you always settle them the same way. A

@@ -660,6 +660,106 @@ public static class InviteTriage
         return acted;
     }
 
+    /// <summary>Whether a meeting falls on your days off: a leave entry or bank holiday covers its day, or a half day
+    /// (its title says half, AM or PM) covers its hours.</summary>
+    private static bool OnDayOff(List<JsonObject> offs, DateTime start, DateTime end)
+    {
+        var day = DateOnly.FromDateTime(start);
+        var onDay = offs.Where(o => SpanDays(o).Contains(day)).ToList();
+        return onDay.Any(o => !HalfDay(o.StrOr("subject")))
+               || onDay.Any(o => HalfDay(o.StrOr("subject")) && Times(o).Start < end && Times(o).End > start);
+    }
+
+    private static List<JsonObject> DayOffEntries(Settings settings, List<JsonObject> events)
+    {
+        var categories = BankHolidayCategories(settings);
+        var pattern = PyRegex.Get(settings.Invites!.LeavePattern, true);
+        return events.Where(e => IsBankHoliday(settings, e, categories)
+                                 || (Organiser(e).Address == settings.Email && !e.Truthy("isCancelled") && pattern.MatchStart(e.StrOr("subject")) is not null))
+            .ToList();
+    }
+
+    /// <summary>What you organise on your days off (1.14.0), from now to months_ahead, each occurrence once (done):
+    /// a meeting with one other person cancelled (cancel_days_off; your reports' 1:1s are [one_to_ones]'), your own
+    /// blocks deleted (remove_blocks_days_off), a meeting with more people queued for you (raise_group_days_off).
+    /// Your leave and bank holiday entries themselves, all-day and free entries are left alone. Returns (queue items,
+    /// what was done, keys still to be seen).</summary>
+    public static (List<JsonObject> Items, List<JsonObject> Acted, HashSet<string> Seen) OwnDaysOff(Settings settings, ICalendar calendar,
+        List<JsonObject> events, JsonObject done, JsonObject raised, Action<string> log, DateTime at, bool dryRun = false)
+    {
+        var invites = settings.Invites!;
+        var offs = DayOffEntries(settings, events);
+        var offIds = offs.Select(o => o.Req("id")).ToHashSet(StringComparer.Ordinal);
+        var (_, bankOnly) = DaysOff(settings, events);
+        var reports = (settings.OneToOnes?.Reports ?? []).Select(r => r.Email.ToLowerInvariant()).ToHashSet();
+        var myNote = settings.OneToOnes?.MyNote ?? "Cancelling as I'm on leave";
+        var bankNote = settings.OneToOnes?.BankHolidayNote ?? "Cancelling for the bank holiday";
+        var items = new List<JsonObject>();
+        var acted = new List<JsonObject>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var count = 0;
+        foreach (var m in events.OrderBy(e => Times(e).Start))
+        {
+            if (!m.Truthy("isOrganizer") || m.Truthy("isCancelled") || m.Truthy("isAllDay") || m.Str("showAs") == "free" || offIds.Contains(m.Req("id")))
+                continue;
+            var (start, end) = Times(m);
+            if (start <= at || !OnDayOff(offs, start, end))
+                continue;
+            var others = People(m).Select(Address).Where(a => a.Length > 0 && a != settings.Email).Distinct().ToList();
+            var key = $"own:{m.Req("id")}@{Start16(m)}";
+            var bank = bankOnly.Contains(DateOnly.FromDateTime(start));
+            var subject = $"{(m.StrOr("subject") is { Length: > 0 } s ? s : "(no subject)")}: {Day(start)}–{Hm(end)}";
+            if (others.Count >= 2)
+            {
+                if (!invites.RaiseGroupDaysOff)
+                    continue;
+                seen.Add(key);
+                if (raised.ContainsKey(key))
+                    continue;
+                items.Add(new JsonObject
+                {
+                    ["folder"] = "Calendar", ["type"] = "own-meeting", ["id"] = key, ["key"] = key,
+                    ["received"] = PyTime.Iso(start, "minutes"), ["from"] = "", ["subject"] = $"On your {(bank ? "bank holiday" : "leave")}: {subject} ({others.Count} people)",
+                    ["rule"] = "your meeting on a day off", ["recommendation"] = "check",
+                    ["check"] = $"CHECK: your meeting with {others.Count} people falls on your {(bank ? "bank holiday" : "leave")}. Cancel it, hand it over, "
+                                + "or let it go ahead without you; then `mail-triage keep <n>`.",
+                });
+                raised[key] = PyTime.Iso(Clock.Now, "seconds");
+                log($"{(dryRun ? "would queue" : "queued")}  [your meeting on a day off] {m.StrOr("subject")} ({Day(start)})");
+                continue;
+            }
+            if (others.Count == 1 && (!invites.CancelDaysOff || reports.Contains(others[0])))
+                continue;   // your reports' 1:1s: [one_to_ones] cancels or moves them
+            if (others.Count == 0 && !invites.RemoveBlocksDaysOff)
+                continue;
+            if (done.ContainsKey(key))
+                continue;
+            if (++count > invites.MaxDeclines)
+            {
+                log($"days off: more than max_declines ({invites.MaxDeclines}) of your own to change; the rest next run");
+                break;
+            }
+            var note = bank ? bankNote : myNote;
+            if (!dryRun)
+            {
+                if (others.Count == 1)
+                    calendar.Cancel(m.Req("id"), note);   // that occurrence: the rest of the series is untouched
+                else
+                    calendar.Remove(m.Req("id"));
+                done[key] = PyTime.Iso(Clock.Now, "seconds");
+            }
+            var what = others.Count == 1 ? "Cancelled" : "Removed";
+            acted.Add(new JsonObject
+            {
+                ["received"] = PyTime.Iso(start, "minutes"), ["from"] = "", ["subject"] = subject,
+                ["why"] = others.Count == 1 ? note : "your own block, on a day off",
+                ["rule"] = $"{what}: your {(others.Count == 1 ? "meeting" : "block")}, {(bank ? "bank holiday" : "on leave")}",
+            });
+            log($"{(dryRun ? (others.Count == 1 ? "would cancel" : "would remove") : what.ToLowerInvariant())}  [days off] {m.StrOr("subject")} ({Day(start)})");
+        }
+        return (items, acted, seen);
+    }
+
     /// <summary>Meetings that overlap another meeting, or a fixed block, from now to months_ahead (1.11.0), each pair
     /// queued once for you to sort out (nothing is declined: which goes is your call). Your own movable blocks and
     /// travel at either end of the day don't count; nor do days off (declined above).</summary>

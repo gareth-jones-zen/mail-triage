@@ -215,7 +215,8 @@ public static class OneToOnePlanner
     {
         var at = now ?? Clock.Now;
         var config = settings.OneToOnes!;
-        var ahead = daysAhead is { } d and not 0 ? d : config.DaysAhead is { } c and not 0 ? c : settings.Invites!.DaysAhead;
+        // 1.14.0: with no days_ahead of its own, the invites' window (months_ahead, when set), not their days_ahead
+        var ahead = daysAhead is { } d and not 0 ? d : config.DaysAhead is { } c and not 0 ? c : settings.Invites!.Days(at);
         var today = DateOnly.FromDateTime(at);
         var first = Monday(today);
         var last = Monday(today.AddDays((int)ahead)).AddDays(14);   // a week either side, to suggest

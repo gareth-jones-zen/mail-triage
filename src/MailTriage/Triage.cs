@@ -302,6 +302,22 @@ public static class Triage
                 if (!dryRun)
                     StateFiles.Save(settings.DaysOffFile, done);
             }
+            if (invites.CancelDaysOff || invites.RemoveBlocksDaysOff || invites.RaiseGroupDaysOff)
+            {
+                // 1.14.0: what you organise on your days off
+                var done = StateFiles.LoadObject(settings.DaysOffFile, () => []);
+                var (oItems, oActed, oSeen) = InviteTriage.OwnDaysOff(settings, cal, calendarEvents, done, raised, log, Clock.Now, dryRun);
+                added.AddRange(oItems);
+                seen.UnionWith(oSeen);
+                foreach (var a in oActed)
+                    items.Add((JsonNode)new JsonObject
+                    {
+                        ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
+                        ["subject"] = a.GetCopy("subject"), ["rule"] = a.GetCopy("rule"), ["did"] = a.GetCopy("why"),
+                    });
+                if (!dryRun)
+                    StateFiles.Save(settings.DaysOffFile, done);
+            }
             if (invites.DoubleBookings)
             {
                 // 1.13.0: the [[double_booking_rule]]s settle what they can first; the rest is queued as before.
@@ -462,7 +478,7 @@ public static class Triage
         var invites = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) == "invite").Select(i => items[i].Fmt("subject")).ToList();
         if (invites.Count > 0)
             throw new LookupException($"{invites[0]} is an invite, not an email: answer it with `mail-triage invite decline <n>`.");
-        var meetings = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) is "one-to-one" or "double-booking").Select(i => items[i].Fmt("subject")).ToList();
+        var meetings = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) is "one-to-one" or "double-booking" or "own-meeting").Select(i => items[i].Fmt("subject")).ToList();
         if (meetings.Count > 0)
             throw new LookupException($"{meetings[0]} is your own meeting, not an email: change it in Outlook (or `mail-triage move`), "
                                       + "then `mail-triage keep <n>`.");
@@ -484,7 +500,7 @@ public static class Triage
     {
         var item = PyStr.IsDigit(reference) && reference.Length < 6 ? Pick(settings, [reference])[0]
             : Queue(settings).FirstOrDefault(i => i.Str("id") == reference);
-        if (TypeOf(item) is "invite" or "one-to-one" or "double-booking")
+        if (TypeOf(item) is "invite" or "one-to-one" or "double-booking" or "own-meeting")
             throw new LookupException($"{item!.Fmt("subject")} is a meeting, not an email.");
         var id = item?.Req("id") ?? reference;
         var message = mailbox.Graph.Request($"/me/messages/{id}?$select={Mailbox.Fields}", scopes: mailbox.ReadScopes);
@@ -542,7 +558,7 @@ public static class Triage
     public static int File(Settings settings, Mailbox? mailbox, IReadOnlyList<string> refs, string to, Action<string> log)
     {
         var chosen = Pick(settings, refs);
-        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking"))
+        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking" or "own-meeting"))
             throw new LookupException("A meeting can't be filed: answer an invite with `mail-triage invite`.");
         var box = mailbox ?? throw new InvalidOperationException("No mailbox.");
         var folderId = box.FolderPath(to);
@@ -562,7 +578,7 @@ public static class Triage
     public static int Forward(Settings settings, Mailbox mailbox, IReadOnlyList<string> refs, string? ruleName, Action<string> log)
     {
         var chosen = Pick(settings, refs);
-        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking"))
+        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking" or "own-meeting"))
             throw new LookupException("A meeting can't be forwarded.");
         Rule? named = null;
         if (ruleName is not null)

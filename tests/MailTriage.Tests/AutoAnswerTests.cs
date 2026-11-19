@@ -162,4 +162,48 @@ public sealed class AutoAnswers : IDisposable
         config.Invites.MonthsAhead = null;
         Assert.Equal(config.Invites.DaysAhead, config.Invites.Days(now));
     }
+
+    // 1.14.0: what you organise on your days off.
+    [Fact]
+    public void your_one_to_ones_are_cancelled_your_blocks_removed_and_your_group_meetings_raised_on_days_off()
+    {
+        config.Invites!.CancelDaysOff = true;
+        config.Invites.RemoveBlocksDaysOff = true;
+        config.Invites.RaiseGroupDaysOff = true;
+        var mine = new (string, string, string)[] { ("Alex Smith", Me, "required"), ("Pat Boss", "pat@example.com", "required") };
+        var group = new (string, string, string)[] { ("Alex Smith", Me, "required"), ("Sam", "sam@example.com", "required"), ("Robin", "robin@example.com", "required") };
+        JsonObject Own(string id, string subject, string day, string start, string end, (string, string, string)[]? people = null, string showAs = "busy") =>
+            Ev(id, subject, day, start, end, organiser: "Alex Smith", orgAddr: Me, attendees: people ?? [], response: "organizer", showAs: showAs);
+        var calendar = new FakeCalendar([
+            Self("leave", "Holiday (Architect)", "2026-12-16", "00:00", "23:59", endDay: "2026-12-18", showAs: "oof"),
+            Self("half", "Holiday (half day) (Architect)", "2026-11-27", "12:00", "23:59", showAs: "oof"),
+            Self("bh", "Bank holiday", "2026-12-25", "09:00", "17:00", showAs: "oof"),
+            Own("boss", "Weekly 1-2-1 - Alex", "2026-12-17", "16:00", "16:25", mine),
+            Own("catch", "Catch-up with Pat", "2026-11-27", "10:00", "10:30", mine),        // the morning of a PM half day: stays
+            Own("catch2", "Catch-up with Pat", "2026-11-27", "14:00", "14:30", mine),       // the afternoon: cancelled
+            Own("block", "JL pre-read", "2026-12-16", "16:30", "16:55"),
+            Own("block2", "Review briefings", "2026-12-25", "08:30", "09:25"),
+            Own("team", "Architecture catch-up", "2026-12-17", "14:00", "14:50", group),
+            Own("free", "Reminder", "2026-12-17", "09:00", "09:15", showAs: "free"),
+            Own("later", "JL pre-read", "2026-12-21", "16:30", "16:55"),                     // not a day off
+        ]);
+        var done = new JsonObject();
+        var raised = new JsonObject();
+        var (items, acted, seen) = InviteTriage.OwnDaysOff(config, calendar, calendar.Items, done, raised, Quiet, now);
+        Assert.Equal([("catch2", "Cancelling as I'm on leave"), ("boss", "Cancelling as I'm on leave")], calendar.Cancels);
+        Assert.Equal(["block", "block2"], calendar.Removed);
+        Assert.Equal(["Cancelled: your meeting, on leave", "Removed: your block, on leave", "Cancelled: your meeting, on leave",
+            "Removed: your block, bank holiday"], acted.Select(a => a.Req("rule")));
+        Assert.Single(items);
+        Assert.Equal("own-meeting", items[0].Req("type"));
+        Assert.StartsWith("On your leave: Architecture catch-up", items[0].Req("subject"));
+        // Each once; the group meeting stays seen (so it stays queued) but isn't queued twice
+        calendar.Cancels.Clear();
+        calendar.Removed.Clear();
+        var (again, acted2, seen2) = InviteTriage.OwnDaysOff(config, calendar, calendar.Items, done, raised, Quiet, now);
+        Assert.Empty(again);
+        Assert.Empty(acted2);
+        Assert.Equal(seen, seen2);
+        Assert.Empty(calendar.Cancels);
+    }
 }

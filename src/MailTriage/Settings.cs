@@ -85,6 +85,19 @@ public sealed class Invites
     /// auto_accept) and those occurrences declined.</summary>
     public bool DeclineDaysOff { get; set; }
 
+    /// <summary>cancel_days_off (1.14.0): cancel a meeting you organise with one other person (your manager's 1:1
+    /// included) that falls on your days off, that occurrence, with my_note or bank_holiday_note from [one_to_ones].
+    /// Your reports' 1:1s are left to [one_to_ones], which may move them instead.</summary>
+    public bool CancelDaysOff { get; set; }
+
+    /// <summary>remove_blocks_days_off (1.14.0): delete your own blocks (no one else invited) on your days off, that
+    /// occurrence; no one is told.</summary>
+    public bool RemoveBlocksDaysOff { get; set; }
+
+    /// <summary>raise_group_days_off (1.14.0): queue a meeting you organise with two or more others on your days off,
+    /// once: it may go ahead without you, or someone else chair it, so it's yours to decide.</summary>
+    public bool RaiseGroupDaysOff { get; set; }
+
     /// <summary>max_declines: never more days-off declines than this in one run.</summary>
     public int MaxDeclines { get; set; } = 20;
 
@@ -552,6 +565,9 @@ public sealed class Settings
                 AutoAcceptOptional = Toml.Truthy(section.Get("auto_accept_optional") ?? false),
                 AutoMoveBlocks = Toml.Truthy(section.Get("auto_move_blocks") ?? false),
                 DeclineDaysOff = Toml.Truthy(section.Get("decline_days_off") ?? false),
+                CancelDaysOff = Toml.Truthy(section.Get("cancel_days_off") ?? false),
+                RemoveBlocksDaysOff = Toml.Truthy(section.Get("remove_blocks_days_off") ?? false),
+                RaiseGroupDaysOff = Toml.Truthy(section.Get("raise_group_days_off") ?? false),
                 MaxDeclines = section.Get("max_declines") is { } md ? (int)Toml.Int(md) : 20,
                 DoubleBookings = Toml.Truthy(section.Get("double_bookings") ?? false),
                 FixedBlocks = Toml.Strings(section.Get("fixed_blocks")),
@@ -758,7 +774,8 @@ public sealed class Settings
             {
                 ["days_ahead"] = i.DaysAhead, ["months_ahead"] = i.MonthsAhead, ["auto_accept"] = i.AutoAccept,
                 ["auto_accept_outside"] = i.AutoAcceptOutside, ["auto_accept_optional"] = i.AutoAcceptOptional, ["auto_move_blocks"] = i.AutoMoveBlocks,
-                ["decline_days_off"] = i.DeclineDaysOff, ["max_declines"] = i.MaxDeclines, ["double_bookings"] = i.DoubleBookings,
+                ["decline_days_off"] = i.DeclineDaysOff, ["cancel_days_off"] = i.CancelDaysOff,
+                ["remove_blocks_days_off"] = i.RemoveBlocksDaysOff, ["raise_group_days_off"] = i.RaiseGroupDaysOff, ["max_declines"] = i.MaxDeclines, ["double_bookings"] = i.DoubleBookings,
                 ["fixed_blocks"] = Strs(i.FixedBlocks), ["commute_blocks"] = Strs(i.CommuteBlocks),
                 ["movable"] = new JsonArray(i.Movable.Select(m => (JsonNode)new JsonObject { ["subject"] = m.Subject, ["within"] = Opt(m.Within), ["before"] = Opt(m.Before) }).ToArray()),
                 ["protected"] = Strs(i.Protected), ["leave_note"] = i.LeaveNote, ["bank_holiday_note"] = i.BankHolidayNote,
