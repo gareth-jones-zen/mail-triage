@@ -318,11 +318,79 @@ double_bookings = true           # queue meetings that overlap another meeting o
   series free apart from them is accepted and those occurrences declined.
 - **`double_bookings`** queues, once, each meeting that overlaps another meeting (accepted, tentative, or yours) or a
   fixed block (out of office, `fixed_blocks`, travel in the middle of the day). Nothing is declined: decide which
-  goes, change it in Outlook, then `keep <n>`. Your own movable blocks don't count, nor do days off.
+  goes, change it in Outlook, then `keep <n>`. Your own movable blocks don't count, nor do days off. Clashes that
+  happen the same way every time can be settled by rules: see the next section.
 - **What it did** is recorded with the rest (`deleted`, and the session summary): "Accepted: no clash", "Accepted:
   your own blocks moved", "Accepted: declined on your days off", "Declined: on your days off", "Declined: on leave",
   "Declined: bank holiday". Records of what was declined are kept in `days_off_file`.
 - An invite queued before these were switched on stays queued; only new ones are answered.
+
+### Double-booking rules (1.13.0)
+
+Some double bookings come up the same way every time, and you always settle them the same way. A
+`[[double_booking_rule]]` says how, so they're settled before they reach the queue. Two examples: a monthly in-person
+leadership day always beats a catch-up you hold with one of your peers (the catch-up moves), and always beats another
+team's regular meeting (you decline that occurrence).
+
+```toml
+[invites]
+double_bookings = true           # the rules need this: they settle what would otherwise be queued
+
+[groups]                         # named lists of addresses, for rules to name
+first_team = ['rich@example.com', 'kurt@example.com', 'sarah@example.com']
+
+[double_bookings]
+act = false                      # true: move and decline; false: only record what it would do
+# max_actions = 20               # never more changes in one run
+
+[[double_booking_rule]]
+name = "In-person SLT beats a first-team catch-up"
+keep = '^In Person Monthly Catchup- SysDev & PMO SLT'   # the meeting that stays
+other = 'catch-?up'                                      # the meeting that goes (optional)
+other_with = 'first_team'                                # ...has one person in it besides you, from this group (optional)
+action = "move"
+
+[[double_booking_rule]]
+name = "In-person SLT beats ERT"
+keep = '^In Person Monthly Catchup- SysDev & PMO SLT'
+other = '^Regular ERT/Sys Dev Catchup'
+action = "decline"
+note = "Sorry, there's an in-person SysDev & PMO SLT that day"
+```
+
+```
+mail-triage double-bookings      # each upcoming double booking, and what the rules would do; changes nothing
+  Thu 19 Nov 11:00  In Person Monthly Catchup- SysDev & PMO SLT / GJ and RE catchup: MOVE "GJ and RE catchup" to Thu 19 Nov 09:30–10:00 [In-person SLT beats a first-team catch-up]
+  Thu 19 Nov 13:00  In Person Monthly Catchup- SysDev & PMO SLT / Regular ERT/Sys Dev Catchup: DECLINE "Regular ERT/Sys Dev Catchup" (note: "Sorry, there's an in-person SysDev & PMO SLT that day") [In-person SLT beats ERT]
+  Thu 19 Nov 12:00  In Person Monthly Catchup- SysDev & PMO SLT / Board prep: QUEUE (no rule)
+```
+
+- **Which rule.** For each double booking, the first rule where one meeting's subject matches `keep` and the other's
+  matches `other` (if given) and, with `other_with`, has exactly one person in it besides you (attendees and
+  organiser, rooms aside) who is in that `[groups]` list. Patterns ignore case. No rule: it's queued as before. A rule
+  that fits both meetings (so which stays isn't clear) doesn't act.
+- **`move`** only a meeting you organise (not one in `protected`, nor a block): that occurrence, never the series, the
+  same length, to the nearest time when you and everyone in it are free (busy, out of office and tentative hold time;
+  their free/busy comes from getSchedule, as for 1:1s), within `working_hours`, on a weekday of the same week that
+  isn't one of your days off, and within `months_ahead` (or `days_ahead`). **The nearest time that day first; then
+  the same time on the nearest other day; then the nearest time that week.** On a tie, the later. Attendees get the
+  update, as from Outlook.
+- **`decline`** only a meeting someone else organises (not one in `protected`): that occurrence, never the series,
+  with `note`, sending a response unless the organiser asked for none.
+- **When a rule can't act** (someone else's meeting to move, your own to decline, no free slot that week, an
+  attendee's calendar that can't be read, or an occurrence a rule has already moved or declined once) the double
+  booking is queued as before, with the reason in its `check`.
+- **Each occurrence once.** What the rules did is kept in `double_bookings_file` (default
+  `%LOCALAPPDATA%\mail-triage\double-bookings.json`), so an occurrence is never moved or declined twice; past ones are
+  forgotten. **At most `max_actions` changes a run**; the rest wait for the next run.
+- **`act = false`** changes nothing: each "would move" or "would decline" is recorded once (for `deleted` and the
+  session summary, under "Double booking (preview): would move" / "would decline"), and the double booking is still
+  queued, saying what the rule would do. With `act = true` they're recorded as "Double booking: moved" and "Double
+  booking: declined", with the rule's name. `run --dry-run` changes and records nothing; `--writes journal` records
+  the calendar writes instead of sending them, but (as for days-off declines) still counts them as done.
+- **Keep all the `[[double_booking_rule]]` tables together** (as for every kind of `[[...]]` table): one split by
+  another table is refused, rather than silently losing the rules before the break. Settings are checked strictly: an
+  unknown key, an unknown group, an `action` other than move or decline, or a `note` on a move is an error.
 
 ## Your 1:1s, when someone's on leave
 
