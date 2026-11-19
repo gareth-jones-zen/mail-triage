@@ -304,9 +304,19 @@ public static class Triage
             }
             if (invites.DoubleBookings)
             {
-                var (dItems, dSeen) = InviteTriage.DoubleBookings(settings, calendarEvents, raised, log, Clock.Now);
+                // 1.13.0: the [[double_booking_rule]]s settle what they can first; the rest is queued as before.
+                var done = StateFiles.LoadObject(settings.DoubleBookingsFile, () => []);
+                var (dItems, dActed, dSeen) = DoubleBookingPlanner.Run(settings, cal, calendarEvents, raised, log, Clock.Now, done, dryRun);
                 added.AddRange(dItems);
                 seen.UnionWith(dSeen);
+                foreach (var a in dActed)
+                    items.Add((JsonNode)new JsonObject
+                    {
+                        ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
+                        ["subject"] = a.GetCopy("subject"), ["rule"] = a.GetCopy("rule"), ["did"] = a.GetCopy("why"),
+                    });
+                if (!dryRun && settings.DoubleBookings is not null)
+                    StateFiles.Save(settings.DoubleBookingsFile, done);
             }
             if (invites.ProposalsFolders.Count > 0)
             {

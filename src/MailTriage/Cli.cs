@@ -68,6 +68,8 @@ public static class Cli
             mail-triage move <event id> 2026-11-11T16:00 [16:50]   move one of your own meetings or blocks
             mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
             mail-triage one-to-ones         with [one_to_ones]: what each run would do with your 1:1s and leave (changes nothing)
+            mail-triage double-bookings     each upcoming double booking, and what the [[double_booking_rule]]s would do
+                                            with it (changes nothing)
 
             mail-triage watch              run now, then every every_minutes in working hours; what autostart runs
             mail-triage autostart on        the watcher at every logon, and now (off, restart, status)
@@ -78,7 +80,7 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
-         "move", "leave", "one-to-ones", "autostart", "handle", "forward"];
+         "move", "leave", "one-to-ones", "double-bookings", "autostart", "handle", "forward"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -312,6 +314,8 @@ public static class Cli
             var graph = host.Graph(settings, scheduled ? false : null);
             if (args.Command == "one-to-ones")
                 return OneToOnesCommand(args, settings, graph, host);
+            if (args.Command == "double-bookings")
+                return DoubleBookingsCommand(settings, graph, host);
             if (args.Command is "invite" or "move" or "leave")
             {
                 if (settings.Invites is null)
@@ -549,6 +553,32 @@ public static class Cli
         var mode = settings.OneToOnes.Act ? "acts on these" : "only records these (act = false)";
         Print(host.Out, $"{found.Count} 1:1(s) in the next {days} days; a run {mode}"
                         + (settings.OneToOnes.Act ? $", up to {settings.OneToOnes.MaxActions} changes at a time." : "."));
+        return 0;
+    }
+
+    /// <summary>A preview (1.13.0): it only reads (your calendar, and attendees' free/busy). Writes are refused outright.</summary>
+    private static int DoubleBookingsCommand(Settings settings, IGraph graph, CliHost host)
+    {
+        if (settings.Invites is not { DoubleBookings: true })
+        {
+            Print(host.Err, $"{settings.Path} doesn't have double_bookings = true in [invites].");
+            return 2;
+        }
+        var found = DoubleBookingPlanner.Plan(settings, new Calendar(graph, WriteDoor.Refusing().Calendar));
+        var days = settings.Invites.Days(Clock.Now);
+        if (found.Count == 0)
+        {
+            Print(host.Out, $"No double bookings in the next {days} days.");
+            return 0;
+        }
+        foreach (var r in found)
+            Print(host.Out, "  " + DoubleBookingPlanner.Describe(r));
+        var config = settings.DoubleBookings;
+        var acting = found.Count(r => r.Action is "move" or "decline");
+        Print(host.Out, $"{found.Count} double booking(s) in the next {days} days, {acting} settled by a rule; "
+                        + (config is null ? "there are no [[double_booking_rule]]s, so each is queued."
+                            : config.Act ? $"a run acts on these, up to {config.MaxActions} changes at a time."
+                            : "a run only records these (act = false), and queues each as before."));
         return 0;
     }
 
