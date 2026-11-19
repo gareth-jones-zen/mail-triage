@@ -277,6 +277,42 @@ action = "skip"                  # or "review": always raise
 # also: organiser, via_group, optional, min_people (all must hold)
 ```
 
+### Answering without asking, days off, and double bookings (1.11.0)
+
+Each is off unless switched on in `[invites]`:
+
+```toml
+months_ahead = 3                 # how far ahead all of this looks (overrides days_ahead)
+auto_accept = true               # accept an invite with no clash, and markers that hold no time
+# auto_accept_outside = false    # ...from an outside organiser too
+# auto_accept_optional = false   # ...where you're optional, or invited through a group, too
+auto_move_blocks = true          # accept one that clashes only with your own blocks or end-of-day travel, and move them
+decline_days_off = true          # decline meetings on your leave and bank holidays
+# max_declines = 20              # never more days-off declines in one run
+double_bookings = true           # queue meetings that overlap another meeting or a fixed block
+```
+
+- **`auto_accept`** answers a new invite the triage would recommend accepting with no clash, a whole series at
+  once. All-day and free markers are accepted whoever sent them. **Asked as before:** an outside organiser, an
+  invite where you're optional or invited through a group (unless allowed above), anything an `[[invite_rule]]`
+  names, and any real clash.
+- **`auto_move_blocks`** accepts an invite that clashes only with **your own blocks and travel at either end of the
+  day**, and moves them to the nearest free slot within their limits; no one is told. A clash with a meeting you
+  organise (moving it updates its attendees) is still asked.
+- **`decline_days_off`:** your leave (`leave_pattern`) and bank holidays (`bank_holiday_categories`, or a "Bank
+  holiday" title) are days off, never clashes. Each run declines meetings others organise that you've accepted or
+  tentatively accepted on a day off, from now to `months_ahead`: **each occurrence once** (one you accept again is
+  left alone), with the leave note, or `bank_holiday_note` on a bank holiday. A half day (its title says half, AM or
+  PM) counts only for meetings in its hours. A new invite wholly on your days off is declined; with `auto_accept`, a
+  series free apart from them is accepted and those occurrences declined.
+- **`double_bookings`** queues, once, each meeting that overlaps another meeting (accepted, tentative, or yours) or a
+  fixed block (out of office, `fixed_blocks`, travel in the middle of the day). Nothing is declined: decide which
+  goes, change it in Outlook, then `keep <n>`. Your own movable blocks don't count, nor do days off.
+- **What it did** is recorded with the rest (`deleted`, and the session summary): "Accepted: no clash", "Accepted:
+  your own blocks moved", "Accepted: declined on your days off", "Declined: on your days off", "Declined: on leave",
+  "Declined: bank holiday". Records of what was declined are kept in `days_off_file`.
+- An invite queued before these were switched on stays queued; only new ones are answered.
+
 ## Your 1:1s, when someone's on leave
 
 With a `[one_to_ones]` section (it needs `[invites]`), each run also looks after the weekly 1:1s you hold with

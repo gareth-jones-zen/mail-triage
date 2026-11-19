@@ -62,6 +62,39 @@ public sealed class Invites
 {
     public const string DefaultLeavePattern = @"^(\w+ )?(holidays?|annual leave|leave|bank holiday)\b";
     public long DaysAhead { get; set; } = 42;
+
+    /// <summary>months_ahead (1.11.0): how far ahead invites, days off and double bookings are looked at, in months;
+    /// overrides days_ahead.</summary>
+    public int? MonthsAhead { get; set; }
+
+    /// <summary>auto_accept (1.11.0): answer an invite with no clash without asking (markers that hold no time too).</summary>
+    public bool AutoAccept { get; set; }
+
+    /// <summary>auto_accept_outside: ...from an organiser outside your organisation too (default: asked).</summary>
+    public bool AutoAcceptOutside { get; set; }
+
+    /// <summary>auto_accept_optional: ...where you're optional, or invited through a group, too (default: asked).</summary>
+    public bool AutoAcceptOptional { get; set; }
+
+    /// <summary>auto_move_blocks: accept an invite that clashes only with your own blocks or travel at either end of the
+    /// day, and move those (they notify no one). A clash with a meeting you organise is still asked.</summary>
+    public bool AutoMoveBlocks { get; set; }
+
+    /// <summary>decline_days_off: decline meetings others organise on your leave and bank holidays, each occurrence once,
+    /// whether accepted already or a new invite; a series that's free apart from your days off is accepted (with
+    /// auto_accept) and those occurrences declined.</summary>
+    public bool DeclineDaysOff { get; set; }
+
+    /// <summary>max_declines: never more days-off declines than this in one run.</summary>
+    public int MaxDeclines { get; set; } = 20;
+
+    /// <summary>double_bookings: raise a meeting that overlaps another meeting, or a fixed block, once each.</summary>
+    public bool DoubleBookings { get; set; }
+
+    /// <summary>How many days ahead to look, from a moment.</summary>
+    public long Days(DateTime at) => MonthsAhead is { } m
+        ? DateOnly.FromDateTime(at).AddMonths(m).DayNumber - DateOnly.FromDateTime(at).DayNumber
+        : DaysAhead;
     public List<string> FixedBlocks { get; set; } = [];
     public List<string> CommuteBlocks { get; set; } = [];
     public List<MovableBlock> Movable { get; set; } = [];
@@ -151,6 +184,8 @@ public sealed class Settings
     public string StateFile { get; init; } = System.IO.Path.Combine(Local, "raised.json");
     public string DeletedFile { get; init; } = System.IO.Path.Combine(Local, "deleted.json");
     public string AcceptedFile { get; init; } = System.IO.Path.Combine(Local, "accepted.json");
+    /// <summary>Meetings declined for your days off (1.11.0): each occurrence once only.</summary>
+    public string DaysOffFile { get; init; } = System.IO.Path.Combine(Local, "days-off.json");
     public string HandledFile { get; init; } = System.IO.Path.Combine(Local, "handled.json");
 
     /// <summary>Each email a forward rule has sent on, by internet message ID: "sending" before the POST, "sent" once
@@ -182,7 +217,7 @@ public sealed class Settings
     /// <summary>Every top-level setting this file accepts (tables included): the ones a base file can supply.</summary>
     public static readonly string[] KnownKeys =
     [
-        "login_hint", "tenant", "msal_cache", "email", "queue_file", "state_file", "deleted_file", "accepted_file", "handled_file", "forwarded_file",
+        "login_hint", "tenant", "msal_cache", "email", "queue_file", "state_file", "deleted_file", "accepted_file", "days_off_file", "handled_file", "forwarded_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one",
     ];
@@ -289,6 +324,7 @@ public sealed class Settings
             StateFile = PathOr("state_file", System.IO.Path.Combine(Local, "raised.json")),
             DeletedFile = PathOr("deleted_file", System.IO.Path.Combine(Local, "deleted.json")),
             AcceptedFile = PathOr("accepted_file", System.IO.Path.Combine(Local, "accepted.json")),
+            DaysOffFile = PathOr("days_off_file", System.IO.Path.Combine(Local, "days-off.json")),
             HandledFile = PathOr("handled_file", System.IO.Path.Combine(Local, "handled.json")),
             ForwardedFile = PathOr("forwarded_file", System.IO.Path.Combine(Local, "forwarded.json")),
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
@@ -460,6 +496,14 @@ public sealed class Settings
             var invites = new Invites
             {
                 DaysAhead = Toml.Int(section.Get("days_ahead") ?? 42L),
+                MonthsAhead = section.Get("months_ahead") is { } ma ? (int)Toml.Int(ma) : null,
+                AutoAccept = Toml.Truthy(section.Get("auto_accept") ?? false),
+                AutoAcceptOutside = Toml.Truthy(section.Get("auto_accept_outside") ?? false),
+                AutoAcceptOptional = Toml.Truthy(section.Get("auto_accept_optional") ?? false),
+                AutoMoveBlocks = Toml.Truthy(section.Get("auto_move_blocks") ?? false),
+                DeclineDaysOff = Toml.Truthy(section.Get("decline_days_off") ?? false),
+                MaxDeclines = section.Get("max_declines") is { } md ? (int)Toml.Int(md) : 20,
+                DoubleBookings = Toml.Truthy(section.Get("double_bookings") ?? false),
                 FixedBlocks = Toml.Strings(section.Get("fixed_blocks")),
                 CommuteBlocks = Toml.Strings(section.Get("commute_blocks")),
                 Movable = movable,
@@ -572,7 +616,7 @@ public sealed class Settings
             }).ToArray()),
             ["flow_checks"] = new JsonArray(FlowChecks.Select(f => (JsonNode)new JsonObject { ["flow"] = f.Flow, ["output"] = f.Output, ["pending"] = Opt(f.Pending) }).ToArray()),
             ["login_hint"] = Opt(LoginHint), ["tenant"] = Tenant, ["msal_cache"] = Opt(MsalCache), ["queue_file"] = QueueFile,
-            ["state_file"] = StateFile, ["deleted_file"] = DeletedFile, ["accepted_file"] = AcceptedFile, ["log_file"] = LogFile,
+            ["state_file"] = StateFile, ["deleted_file"] = DeletedFile, ["accepted_file"] = AcceptedFile, ["days_off_file"] = DaysOffFile, ["log_file"] = LogFile,
             ["notify"] = Notify, ["every_minutes"] = EveryMinutes, ["hours"] = Strs([Hours.Start, Hours.End]), ["weekdays"] = Weekdays,
             ["email"] = Opt(Email),
         };
@@ -580,7 +624,10 @@ public sealed class Settings
         {
             o["invites"] = new JsonObject
             {
-                ["days_ahead"] = i.DaysAhead, ["fixed_blocks"] = Strs(i.FixedBlocks), ["commute_blocks"] = Strs(i.CommuteBlocks),
+                ["days_ahead"] = i.DaysAhead, ["months_ahead"] = i.MonthsAhead, ["auto_accept"] = i.AutoAccept,
+                ["auto_accept_outside"] = i.AutoAcceptOutside, ["auto_accept_optional"] = i.AutoAcceptOptional, ["auto_move_blocks"] = i.AutoMoveBlocks,
+                ["decline_days_off"] = i.DeclineDaysOff, ["max_declines"] = i.MaxDeclines, ["double_bookings"] = i.DoubleBookings,
+                ["fixed_blocks"] = Strs(i.FixedBlocks), ["commute_blocks"] = Strs(i.CommuteBlocks),
                 ["movable"] = new JsonArray(i.Movable.Select(m => (JsonNode)new JsonObject { ["subject"] = m.Subject, ["within"] = Opt(m.Within), ["before"] = Opt(m.Before) }).ToArray()),
                 ["protected"] = Strs(i.Protected), ["leave_note"] = i.LeaveNote, ["bank_holiday_note"] = i.BankHolidayNote,
                 ["bank_holiday_categories"] = i.BankHolidayCategories is null ? null : Strs(i.BankHolidayCategories), ["date_format"] = i.DateFormat,

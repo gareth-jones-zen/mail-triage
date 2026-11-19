@@ -20,7 +20,8 @@ public sealed class Held
 }
 
 /// <summary>The recommendation for one invite (invites.assess).</summary>
-public sealed record Verdict(string Recommendation, string Why, List<string> Decline, string Note, JsonArray Clashes);
+public sealed record Verdict(string Recommendation, string Why, List<string> Decline, string Note, JsonArray Clashes,
+    bool LeaveOnly = false, bool OwnMovesOnly = false, bool Marker = false);
 
 /// <summary>Meeting invites: raised with a recommendation, answered on your say-so (invites.py). Judged on time and
 /// context, not sender: leave, a clash with something fixed (decline), clashes only with what can move (accept and
@@ -164,10 +165,16 @@ public static class InviteTriage
     {
         var invites = settings.Invites!;
         var output = new List<Held>();
+        var categories = BankHolidayCategories(settings);
+        var leave = PyRegex.Get(invites.LeavePattern, true);
         foreach (var e in events)
         {
             var response = e.Get("responseStatus").Str("response");
             if (e.Truthy("isCancelled") || e.Truthy("isAllDay") || e.Str("showAs") == "free" || response is null || !Committed.Contains(response))
+                continue;
+            // Your leave and bank holidays are days off, not clashes (1.11.0): until then a leave entry shown as out of
+            // office also counted as a fixed block, so a series free apart from your leave looked like it clashed.
+            if (IsBankHoliday(settings, e, categories) || (Organiser(e).Address == settings.Email && leave.MatchStart(e.StrOr("subject")) is not null))
                 continue;
             var subject = e.StrOr("subject");
             var own = e.Truthy("isOrganizer");
@@ -306,7 +313,7 @@ public static class InviteTriage
         if (place != "required")
             notes.Add(place == "optional" ? "you're optional" : "you're invited through a group");
         if (e.Str("type") is "occurrence" or "exception" or "seriesMaster")
-            notes.Add($"a recurring series ({occurrences.Count} in the next {settings.Invites!.DaysAhead} days)");
+            notes.Add($"a recurring series ({occurrences.Count} in the next {settings.Invites!.Days(at)} days)");
         if (People(e).Count > 50)
             notes.Add($"a broadcast ({People(e).Count} people)");
         var (_, address) = Organiser(e);
@@ -364,7 +371,12 @@ public static class InviteTriage
             }
             clashes.Add((JsonNode)o);
         }
-        return new Verdict(rec, why + (notes.Count > 0 ? $" ({string.Join("; ", notes)})" : ""), decline, note, clashes);
+        // What auto-answering needs to know (1.11.0): only days off stand in the way; the moves touch only your own
+        // blocks and travel (which notify no one); it holds no time.
+        var leaveOnly = onLeave.Count > 0 && fixedHits.Count == 0 && rec is "decline" or "accept, and decline the clashing ones";
+        var ownMoves = rec == "accept and move" && movable.All(h => h.C.Kind is "your block" or "travel");
+        var marker = rec == "accept" && hits.Count == 0 && (e.Truthy("isAllDay") || e.Str("showAs") == "free");
+        return new Verdict(rec, why + (notes.Count > 0 ? $" ({string.Join("; ", notes)})" : ""), decline, note, clashes, leaveOnly, ownMoves, marker);
     }
 
     private static string Start16(JsonObject e) => e.Get("start").Req("dateTime") is var s && s.Length > 16 ? s[..16] : e.Get("start").Req("dateTime");
@@ -427,11 +439,13 @@ public static class InviteTriage
     /// <summary>(new queue items, the keys of every pending invite seen, skipped count). accepted: what the last run
     /// remembered, replaced in place with this run's. acted: each invite answered without asking. dryRun answers nothing.</summary>
     public static (List<JsonObject> Items, HashSet<string> Seen, int Skipped) Triage(Settings settings, ICalendar calendar, JsonObject raised,
-        Action<string> log, DateTime? now = null, JsonObject? accepted = null, List<JsonObject>? acted = null, bool dryRun = false)
+        Action<string> log, DateTime? now = null, JsonObject? accepted = null, List<JsonObject>? acted = null, bool dryRun = false,
+        List<JsonObject>? eventsOut = null)
     {
         var invites = settings.Invites!;
         var at = now ?? Clock.Now;
-        var events = calendar.Events(DateOnly.FromDateTime(at), invites.DaysAhead);
+        var events = calendar.Events(DateOnly.FromDateTime(at), invites.Days(at));
+        eventsOut?.AddRange(events);
         var (away, bankOnly) = DaysOff(settings, events);
         var held = Commitments(settings, events);
         var pending = events.Where(e => !e.Truthy("isOrganizer") && !e.Truthy("isCancelled")
@@ -523,6 +537,20 @@ public static class InviteTriage
                 ["recommendation"] = verdict.Recommendation, ["decline"] = J.Array(verdict.Decline), ["note"] = verdict.Note,
                 ["clashes"] = verdict.Clashes, ["webLink"] = first.Get("webLink").Copy(),
             };
+            if (Auto(settings, first, verdict, rule) is { } auto)
+            {
+                if (!dryRun)
+                    MailTriage.Triage.Apply(calendar, item, auto.Action, auto.Move, log);
+                raised[k] = PyTime.Iso(Clock.Now, "seconds");
+                acted?.Add(new JsonObject
+                {
+                    ["received"] = PyTime.Iso(start, "minutes"), ["from"] = name.Length > 0 ? name : address, ["subject"] = item.GetCopy("subject"),
+                    ["why"] = verdict.Why + (verdict.Note.Length > 0 && verdict.Decline.Count > 0 ? $" (declined {verdict.Decline.Count}: \"{verdict.Note}\")" : ""),
+                    ["rule"] = auto.Label,
+                });
+                log($"{(dryRun ? "would answer" : "invite answered")}  [{auto.Label}] {Py.Str(first.Get("subject"))} ({Day(start)})");
+                continue;
+            }
             items.Add(item);
             raised[k] = PyTime.Iso(Clock.Now, "seconds");
             log($"invite queued  {Py.Str(first.Get("subject"))} ({Day(start)}): {verdict.Recommendation}");
@@ -534,6 +562,146 @@ public static class InviteTriage
                 accepted[key] = value!.DeepClone();
         }
         return (items, seen, skipped);
+    }
+
+    /// <summary>Whether to answer an invite without asking (1.11.0), and how: (action, move your own blocks, label for the
+    /// record of what was done). Null: ask. A rule naming the invite always asks. Days off: declined whoever sent it.
+    /// Otherwise auto_accept: no clash, or a marker that holds no time; with auto_move_blocks, clashes only with your own
+    /// blocks and travel; with decline_days_off, a series free apart from your days off (those occurrences declined).
+    /// Outside organisers, and invites where you're optional or invited through a group, are asked (unless allowed),
+    /// except markers.</summary>
+    internal static (string Action, bool Move, string Label)? Auto(Settings settings, JsonObject e, Verdict v, InviteRule? rule)
+    {
+        var invites = settings.Invites!;
+        if (rule is not null)
+            return null;
+        if (v.Recommendation == "decline" && v.LeaveOnly && invites.DeclineDaysOff)
+            return ("decline", false, "Declined: on your days off");
+        if (!invites.AutoAccept)
+            return null;
+        if (!v.Marker)
+        {
+            var (_, address) = Organiser(e);
+            var outside = settings.Email is { Length: > 0 } email && address.Length > 0 && address.Split('@')[^1] != email.Split('@')[^1];
+            if (outside && !invites.AutoAcceptOutside)
+                return null;
+            if (MyPlace(e, settings.Email) != "required" && !invites.AutoAcceptOptional)
+                return null;
+        }
+        return v.Recommendation switch
+        {
+            "accept" => ("accept", false, v.Marker ? "Accepted: holds no time" : "Accepted: no clash"),
+            "accept and move" when v.OwnMovesOnly && invites.AutoMoveBlocks => ("accept", true, "Accepted: your own blocks moved"),
+            "accept, and decline the clashing ones" when v.LeaveOnly && invites.DeclineDaysOff => ("accept", false, "Accepted: declined on your days off"),
+            _ => null,
+        };
+    }
+
+    private static bool HalfDay(string subject) => PyRegex.IsMatch(@"\bhalf\b|\b(am|pm)\b", subject, true);
+
+    /// <summary>Decline meetings others organise that fall on your days off (1.11.0), from now to months_ahead: accepted
+    /// or tentative, each occurrence once (done records it, so one you accept again is left alone), up to max_declines
+    /// a run. A day is off when a leave entry (leave_pattern) or bank holiday covers it; a half day (its title says half,
+    /// AM or PM) only for meetings in its hours. Returns what was done, for the record.</summary>
+    public static List<JsonObject> DeclineDaysOff(Settings settings, ICalendar calendar, List<JsonObject> events, JsonObject done,
+        Action<string> log, DateTime at, bool dryRun = false)
+    {
+        var invites = settings.Invites!;
+        var categories = BankHolidayCategories(settings);
+        var pattern = PyRegex.Get(invites.LeavePattern, true);
+        var offs = events.Where(e => IsBankHoliday(settings, e, categories)
+                                     || (Organiser(e).Address == settings.Email && !e.Truthy("isCancelled") && pattern.MatchStart(e.StrOr("subject")) is not null))
+            .ToList();
+        var (away, bankOnly) = DaysOff(settings, events);
+        var acted = new List<JsonObject>();
+        foreach (var key in done.Select(kv => kv.Key).ToList())
+            if (PyStr.CompareCodePoints(key[(key.LastIndexOf('@') + 1)..], PyTime.Iso(at.Date, "minutes")) < 0)
+                done.Remove(key);   // past occurrences: forgotten
+        var count = 0;
+        foreach (var m in events.OrderBy(e => Times(e).Start))
+        {
+            var response = m.Get("responseStatus").Str("response");
+            if (m.Truthy("isOrganizer") || m.Truthy("isCancelled") || m.Truthy("isAllDay") || m.Str("showAs") == "free"
+                || response is not ("accepted" or "tentativelyAccepted"))
+                continue;
+            var (start, end) = Times(m);
+            if (start <= at)
+                continue;
+            var day = DateOnly.FromDateTime(start);
+            var onDay = offs.Where(o => SpanDays(o).Contains(day)).ToList();
+            var off = onDay.Any(o => !HalfDay(o.StrOr("subject")))
+                      || onDay.Any(o => HalfDay(o.StrOr("subject")) && Times(o).Start < end && Times(o).End > start);
+            if (!off)
+                continue;
+            var key = $"{m.Req("id")}@{Start16(m)}";
+            if (done.ContainsKey(key))
+                continue;
+            if (++count > invites.MaxDeclines)
+            {
+                log($"days off: more than max_declines ({invites.MaxDeclines}) to decline; the rest next run");
+                break;
+            }
+            var note = OffNote(settings, day, away, bankOnly);
+            var send = !m.Has("responseRequested") || Py.Truthy(m.Get("responseRequested"));
+            if (!dryRun)
+            {
+                calendar.Respond(m.Req("id"), "decline", note, send);   // the occurrence: the rest of the series is untouched
+                done[key] = PyTime.Iso(Clock.Now, "seconds");
+            }
+            var (name, address) = Organiser(m);
+            acted.Add(new JsonObject
+            {
+                ["received"] = PyTime.Iso(start, "minutes"), ["from"] = name.Length > 0 ? name : address,
+                ["subject"] = $"{(m.StrOr("subject") is { Length: > 0 } s ? s : "(no subject)")}: {Day(start)}–{Hm(end)}",
+                ["why"] = note, ["rule"] = bankOnly.Contains(day) ? "Declined: bank holiday" : "Declined: on leave",
+            });
+            log($"{(dryRun ? "would decline" : "declined")}  [days off: {note}] {m.StrOr("subject")} ({Day(start)})");
+        }
+        return acted;
+    }
+
+    /// <summary>Meetings that overlap another meeting, or a fixed block, from now to months_ahead (1.11.0), each pair
+    /// queued once for you to sort out (nothing is declined: which goes is your call). Your own movable blocks and
+    /// travel at either end of the day don't count; nor do days off (declined above).</summary>
+    public static (List<JsonObject> Items, HashSet<string> Seen) DoubleBookings(Settings settings, List<JsonObject> events, JsonObject raised,
+        Action<string> log, DateTime at)
+    {
+        var held = Commitments(settings, events).Where(h => h.Start > at).OrderBy(h => h.Start).ToList();
+        var (away, _) = DaysOff(settings, events);
+        string[] meetings = ["accepted", "tentative", "your meeting", "protected"];
+        string[] blocks = ["fixed block", "travel mid-day"];
+        var items = new List<JsonObject>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < held.Count; i++)
+        {
+            for (var j = i + 1; j < held.Count && held[j].Start < held[i].End; j++)
+            {
+                var (a, b) = (held[i], held[j]);
+                if (!(meetings.Contains(a.Kind) || meetings.Contains(b.Kind)) || !(meetings.Concat(blocks).Contains(a.Kind) && meetings.Concat(blocks).Contains(b.Kind)))
+                    continue;
+                if (away.Contains(DateOnly.FromDateTime(a.Start)) || away.Contains(DateOnly.FromDateTime(b.Start)))
+                    continue;
+                var pair = string.CompareOrdinal(a.Id, b.Id) < 0 ? a.Id + "|" + b.Id : b.Id + "|" + a.Id;
+                var key = $"double:{pair}@{PyTime.Iso(b.Start, "minutes")}";
+                seen.Add(key);
+                if (raised.ContainsKey(key))
+                    continue;
+                var when = b.Start > a.Start ? b.Start : a.Start;
+                items.Add(new JsonObject
+                {
+                    ["folder"] = "Calendar", ["type"] = "double-booking", ["id"] = key, ["key"] = key,
+                    ["received"] = PyTime.Iso(when, "minutes"), ["from"] = "",
+                    ["subject"] = $"Double-booked: {a.Subject} ({Hm(a.Start)}–{Hm(a.End)}) and {b.Subject} ({Hm(b.Start)}–{Hm(b.End)}): {Day(when)}",
+                    ["rule"] = "double booking", ["recommendation"] = "check",
+                    ["check"] = $"CHECK: {a.Kind} \"{a.Subject}\" overlaps {b.Kind} \"{b.Subject}\". Decide which goes, change it in Outlook, then `mail-triage keep <n>`.",
+                    ["clashes"] = new JsonArray(new JsonObject { ["id"] = a.Id, ["subject"] = a.Subject, ["kind"] = a.Kind },
+                        new JsonObject { ["id"] = b.Id, ["subject"] = b.Subject, ["kind"] = b.Kind }),
+                });
+                raised[key] = PyTime.Iso(Clock.Now, "seconds");
+                log($"double booking queued  {a.Subject} / {b.Subject} ({Day(when)})");
+            }
+        }
+        return (items, seen);
     }
 
     /// <summary>Meetings others organise that fall in your leave and that you haven't declined, each with its note.</summary>

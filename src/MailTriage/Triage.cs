@@ -277,15 +277,36 @@ public static class Triage
             // The first run has nothing to compare with, so it only remembers what's accepted.
             var accepted = StateFiles.LoadObject(settings.AcceptedFile, () => []);
             var acted = new List<JsonObject>();
-            var (inviteItems, pendingKeys, _) = InviteTriage.Triage(settings, cal, raised, log, accepted: accepted, acted: acted, dryRun: dryRun);
+            var calendarEvents = new List<JsonObject>();
+            var (inviteItems, pendingKeys, _) = InviteTriage.Triage(settings, cal, raised, log, accepted: accepted, acted: acted, dryRun: dryRun,
+                eventsOut: calendarEvents);
             if (!dryRun)
                 StateFiles.Save(settings.AcceptedFile, accepted);
             foreach (var a in acted)
                 items.Add((JsonNode)new JsonObject
                 {
                     ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
-                    ["subject"] = a.GetCopy("subject"), ["rule"] = "Accepted: already accepted, only shortened", ["accepted"] = a.GetCopy("why"),
+                    ["subject"] = a.GetCopy("subject"), ["rule"] = a.Str("rule") ?? "Accepted: already accepted, only shortened",
+                    [a.Has("rule") ? "did" : "accepted"] = a.GetCopy("why"),
                 });
+            if (invites.DeclineDaysOff)
+            {
+                var done = StateFiles.LoadObject(settings.DaysOffFile, () => []);
+                foreach (var a in InviteTriage.DeclineDaysOff(settings, cal, calendarEvents, done, log, Clock.Now, dryRun))
+                    items.Add((JsonNode)new JsonObject
+                    {
+                        ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
+                        ["subject"] = a.GetCopy("subject"), ["rule"] = a.GetCopy("rule"), ["did"] = a.GetCopy("why"),
+                    });
+                if (!dryRun)
+                    StateFiles.Save(settings.DaysOffFile, done);
+            }
+            if (invites.DoubleBookings)
+            {
+                var (dItems, dSeen) = InviteTriage.DoubleBookings(settings, calendarEvents, raised, log, Clock.Now);
+                added.AddRange(dItems);
+                seen.UnionWith(dSeen);
+            }
             if (invites.ProposalsFolders.Count > 0)
             {
                 var (pItems, pActed, pSeen) = Proposals.Run(settings, mailbox, cal, raised, log, dryRun);
@@ -417,7 +438,7 @@ public static class Triage
         var invites = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) == "invite").Select(i => items[i].Fmt("subject")).ToList();
         if (invites.Count > 0)
             throw new LookupException($"{invites[0]} is an invite, not an email: answer it with `mail-triage invite decline <n>`.");
-        var meetings = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) == "one-to-one").Select(i => items[i].Fmt("subject")).ToList();
+        var meetings = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) is "one-to-one" or "double-booking").Select(i => items[i].Fmt("subject")).ToList();
         if (meetings.Count > 0)
             throw new LookupException($"{meetings[0]} is your own meeting, not an email: change it in Outlook (or `mail-triage move`), "
                                       + "then `mail-triage keep <n>`.");
@@ -439,7 +460,7 @@ public static class Triage
     {
         var item = PyStr.IsDigit(reference) && reference.Length < 6 ? Pick(settings, [reference])[0]
             : Queue(settings).FirstOrDefault(i => i.Str("id") == reference);
-        if (TypeOf(item) is "invite" or "one-to-one")
+        if (TypeOf(item) is "invite" or "one-to-one" or "double-booking")
             throw new LookupException($"{item!.Fmt("subject")} is a meeting, not an email.");
         var id = item?.Req("id") ?? reference;
         var message = mailbox.Graph.Request($"/me/messages/{id}?$select={Mailbox.Fields}", scopes: mailbox.ReadScopes);
@@ -497,7 +518,7 @@ public static class Triage
     public static int File(Settings settings, Mailbox? mailbox, IReadOnlyList<string> refs, string to, Action<string> log)
     {
         var chosen = Pick(settings, refs);
-        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one"))
+        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking"))
             throw new LookupException("A meeting can't be filed: answer an invite with `mail-triage invite`.");
         var box = mailbox ?? throw new InvalidOperationException("No mailbox.");
         var folderId = box.FolderPath(to);
@@ -517,7 +538,7 @@ public static class Triage
     public static int Forward(Settings settings, Mailbox mailbox, IReadOnlyList<string> refs, string? ruleName, Action<string> log)
     {
         var chosen = Pick(settings, refs);
-        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one"))
+        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking"))
             throw new LookupException("A meeting can't be forwarded.");
         Rule? named = null;
         if (ruleName is not null)
@@ -628,6 +649,30 @@ public static class Triage
         var gone = chosen.Select(i => i.Req("id")).Except(keep).ToHashSet(StringComparer.Ordinal);
         SaveQueue(settings, Queue(settings).Where(i => !gone.Contains(i.Req("id"))).ToList());
         return chosen.Count;
+    }
+
+    /// <summary>Answer an invite without asking (1.11.0): accept (the series, and any occurrence changed on its own) or
+    /// decline (the occurrences named), then any moves of your own blocks, then the occurrences on your days off.</summary>
+    internal static void Apply(ICalendar calendar, JsonObject item, string action, bool move, Action<string> log)
+    {
+        var respond = !item.Has("responseRequested") || Py.Truthy(item.Get("responseRequested"));
+        var note = item.Str("note") ?? "";
+        if (action == "decline")
+        {
+            foreach (var target in item.Truthy("decline") ? item.Get("decline").Strings() : [item.Req("occurrence")])
+                calendar.Respond(target, "decline", note, respond);
+            return;
+        }
+        foreach (var target in new[] { item.Truthy("series") ? item.Req("series") : item.Req("occurrence") }.Concat(item.Get("exceptions").Strings()))
+            calendar.Respond(target, "accept", "", respond);
+        if (move)
+            foreach (var c in item.Get("clashes").Objects().Where(c => c.Truthy("to")))
+            {
+                calendar.Move(c.Req("id"), PyTime.FromIso(c.Req("to")), PyTime.FromIso(c.Req("to_end")));
+                log($"moved  {c.Fmt("subject")} to {c.Req("to")}");
+            }
+        foreach (var target in item.Get("decline").Strings())
+            calendar.Respond(target, "decline", note, respond);
     }
 
     /// <summary>Take emails off the queue and leave them in their folder. They won't be raised again.</summary>
