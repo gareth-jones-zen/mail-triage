@@ -64,13 +64,8 @@ public static class OneToOnePlanner
 
     public static HashSet<DateOnly> BankHolidays(Settings settings, List<JsonObject> events)
     {
-        var cats = settings.OneToOnes!.BankHolidayCategories.Select(c => c.ToLowerInvariant()).ToHashSet();
-        var days = new Dictionary<DateOnly, string>();
-        foreach (var e in events)
-            if (Mine(settings, e) && ((e.Truthy("isAllDay") && e.Get("categories").Strings().Any(c => cats.Contains(c.ToLowerInvariant())))
-                                      || PyRegex.Get(@"bank holiday\b", true).MatchStart(e.StrOr("subject")) is not null))
-                Spread(days, e, null, null, null);
-        return days.Keys.ToHashSet();
+        // InviteTriage's test (1.10.0): a category on any entry of yours, all day or a block, or a "Bank holiday" title.
+        return InviteTriage.BankHolidayDays(settings, events, settings.OneToOnes!.BankHolidayCategories);
     }
 
     /// <summary>Your leave, {day: full | AM | PM | half}. Only "half" makes a half day.</summary>

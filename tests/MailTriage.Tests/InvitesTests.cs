@@ -174,6 +174,35 @@ public sealed class Invites : IDisposable
     }
 
     [Fact]
+    public void a_bank_holiday_alone_declines_with_its_own_note_whether_all_day_or_a_block()
+    {
+        // 1.10.0: an all-day entry in the category, a "Bank holiday" block, or a block in the category: each is enough.
+        config.Invites!.BankHolidayCategories = ["Bank holiday"];
+        var markers = new[]
+        {
+            Self("bh", "Good Friday", "2026-11-20", "00:00", "00:00", endDay: "2026-11-21", isAllDay: true, showAs: "free", categories: ["Bank holiday"]),
+            Self("bh", "Bank holiday", "2026-11-20", "09:00", "17:00", showAs: "oof"),
+            Self("bh", "Good Friday", "2026-11-20", "09:00", "17:00", showAs: "oof", categories: ["Bank holiday"]),
+        };
+        foreach (var marker in markers)
+        {
+            var cal = new FakeCalendar([marker, Ev("i-bh", "Team planning", "2026-11-20", "10:00", "11:00")]);
+            var (items, _, _) = InviteTriage.Triage(config, cal, [], Quiet, now);
+            var item = items.Single(i => i.Req("subject").StartsWith("Team planning", StringComparison.Ordinal));
+            Assert.Equal(("decline", "Bank holiday"), (item.Req("recommendation"), item.Req("note")));
+            Assert.Equal([("i-bh", "Bank holiday")], InviteTriage.LeaveSweep(config, cal, DateOnly.FromDateTime(now), 30).Select(e => (e.Req("id"), e.Req("note"))));
+        }
+        // Not in the category and not titled "Bank holiday": not one (Outlook's own holiday calendar, here)
+        var other = new FakeCalendar([Self("x", "St Patrick's Day", "2026-11-20", "00:00", "00:00", endDay: "2026-11-21", isAllDay: true, showAs: "free",
+            categories: ["Holiday"]), Ev("i-bh", "Team planning", "2026-11-20", "10:00", "11:00")]);
+        Assert.Equal("accept", InviteTriage.Triage(config, other, [], Quiet, now).Items.Single(i => i.Req("subject").StartsWith("Team planning", StringComparison.Ordinal)).Req("recommendation"));
+        // A bank holiday inside leave: the leave note, spanning it
+        var both = new FakeCalendar([Self("leave", "Holiday", "2026-12-16", "00:00", "23:59", endDay: "2026-12-18", showAs: "oof"),
+            Self("bh", "Bank holiday", "2026-12-17", "09:00", "17:00", showAs: "oof"), Ev("i-leave", "Planning day", "2026-12-17", "10:00", "12:00")]);
+        Assert.Equal("On annual leave 16/12 to 18/12", InviteTriage.LeaveSweep(config, both, DateOnly.FromDateTime(now), 60).Single().Req("note"));
+    }
+
+    [Fact]
     public void a_single_day_of_leave_has_the_plain_note()
     {
         Assert.Equal("On annual leave", InviteTriage.LeaveNote(config, new DateOnly(2026, 11, 20), [new DateOnly(2026, 11, 20)]));

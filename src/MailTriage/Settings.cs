@@ -67,6 +67,12 @@ public sealed class Invites
     public List<MovableBlock> Movable { get; set; } = [];
     public List<string> Protected { get; set; } = [];
     public string LeaveNote { get; set; } = "On annual leave";
+
+    /// <summary>The decline note on a day that's only a bank holiday (1.10.0).</summary>
+    public string BankHolidayNote { get; set; } = "Bank holiday";
+
+    /// <summary>Entries of yours in these categories mark a bank holiday (1.10.0); null: [one_to_ones]', else "Holiday".</summary>
+    public List<string>? BankHolidayCategories { get; set; }
     public string DateFormat { get; set; } = "%d/%m";
     public (string Start, string End) WorkingHours { get; set; } = ("08:00", "18:00");
     public (string Start, string End) TravelHours { get; set; } = ("06:00", "21:00");
@@ -460,6 +466,8 @@ public sealed class Settings
                 Protected = Toml.Strings(section.Get("protected")),
                 LeavePattern = section.Get("leave_pattern") is { } lp ? Toml.Str(lp) : Invites.DefaultLeavePattern,
                 LeaveNote = section.Get("leave_note") is { } ln ? Toml.Str(ln) : "On annual leave",
+                BankHolidayNote = section.Get("bank_holiday_note") is { } bn ? Toml.Str(bn) : "Bank holiday",
+                BankHolidayCategories = section.Get("bank_holiday_categories") is { } bc ? Toml.Strings(bc) : null,
                 DateFormat = section.Get("date_format") is { } df ? Toml.Str(df) : "%d/%m",
                 WorkingHours = Span("working_hours", ("08:00", "18:00")),
                 TravelHours = Span("travel_hours", ("06:00", "21:00")),
@@ -574,7 +582,8 @@ public sealed class Settings
             {
                 ["days_ahead"] = i.DaysAhead, ["fixed_blocks"] = Strs(i.FixedBlocks), ["commute_blocks"] = Strs(i.CommuteBlocks),
                 ["movable"] = new JsonArray(i.Movable.Select(m => (JsonNode)new JsonObject { ["subject"] = m.Subject, ["within"] = Opt(m.Within), ["before"] = Opt(m.Before) }).ToArray()),
-                ["protected"] = Strs(i.Protected), ["leave_note"] = i.LeaveNote, ["date_format"] = i.DateFormat,
+                ["protected"] = Strs(i.Protected), ["leave_note"] = i.LeaveNote, ["bank_holiday_note"] = i.BankHolidayNote,
+                ["bank_holiday_categories"] = i.BankHolidayCategories is null ? null : Strs(i.BankHolidayCategories), ["date_format"] = i.DateFormat,
                 ["working_hours"] = Strs([i.WorkingHours.Start, i.WorkingHours.End]), ["travel_hours"] = Strs([i.TravelHours.Start, i.TravelHours.End]),
                 ["requests_folders"] = Strs(i.RequestsFolders), ["accept_shortened"] = i.AcceptShortened,
                 ["proposals_folders"] = Strs(i.ProposalsFolders), ["accept_proposals"] = i.AcceptProposals, ["leave_pattern"] = i.LeavePattern,

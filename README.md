@@ -241,6 +241,10 @@ mail-triage leave --decline                            # decline them, each with
 - **Blocked-out time is assumed movable**, within `working_hours`, to the nearest free slot on the same day or the next week. Limit it with a `[[movable_block]]`: `within = "day"` keeps it on its day; `before = '<subject>'` keeps it before the next meeting of that name. Name blocks that never move in `fixed_blocks`. A meeting you organise counts as movable too (moving it sends attendees an update), so put any you never move, such as your own manager's 1:1 if you send it, in `protected`.
 - **Travel (`commute_blocks`) moves only at either end of the day**, within `travel_hours`: morning travel earlier (come in earlier), evening travel later (leave later). Travel in the middle of the day, and any block shown as out of office, never moves.
 - **Each invite is raised once:** a recurring series once as a whole, a one-off once per start time, so a moved meeting comes back. **So does one week of a series that the organiser changed on its own** (an exception), once the rest of the series is answered: it's raised and answered on its own. Answering the series doesn't answer such a week, so accepting a new series also accepts any changed weeks in it. An invite answered in Outlook drops off the queue by itself.
+- **Bank holidays are days off too** (1.10.0): an invite on one is declined with `bank_holiday_note` ("Bank holiday"),
+  or, inside a stretch of leave, the leave note. A bank holiday is any entry of yours, all day or a block of time,
+  in a `bank_holiday_categories` category (`[invites]`' own, else `[one_to_ones]`', else "Holiday"), or titled
+  "Bank holiday...". Before 1.10.0 invites saw only that title, so an all-day bank holiday entry alone was missed.
 - **`delete` refuses an invite**; answer it instead. **`move` refuses someone else's meeting.**
 - It needs `Calendars.ReadWrite`.
 
@@ -254,6 +258,7 @@ protected = ['^1:1 with my manager$']
 # working_hours = "08:00-18:00"; travel_hours = "06:00-21:00"
 # leave_note = "On annual leave"; date_format = "%d/%m"
 # leave_pattern = '^(\w+ )?(holidays?|annual leave|leave|bank holiday)\b'
+# bank_holiday_note = "Bank holiday"; bank_holiday_categories = ["Bank holiday"]   # default: [one_to_ones]', else ["Holiday"]
 
 [[movable_block]]
 subject = '^Weekly report'
@@ -299,8 +304,9 @@ mail-triage deleted              # each one cancelled or moved (or, with act = f
   the afternoon only) or `(to AM)` (the last day is the morning only); `half` with no half is a half day of
   unknown half. You: your `leave_pattern` entries. People First enters leave as `Holiday (<job title>)`, 00:00
   to 23:59 and not all-day: every day it touches is a full day, and `Holiday (half day) (<job title>)` is a half
-  day of unknown half. Bank holidays: your all-day entries in a `bank_holiday_categories` category (Outlook's
-  UK holidays are in "Holiday"), and entries named "Bank holiday". They count as a day off for both of you.
+  day of unknown half. Bank holidays: your entries in a `bank_holiday_categories` category, all day or a block of time
+  (Outlook's UK holidays are in "Holiday"; until 1.10.0 only all-day ones counted), and entries named "Bank
+  holiday". They count as a day off for both of you.
 - **Their free/busy** comes from Graph's getSchedule, one week at a time. Like yours, anything busy, out of
   office or tentative holds the time; the 1:1 itself doesn't.
 - **Only the occurrence, never the series**, and only meetings you organise with that report in them, matched by

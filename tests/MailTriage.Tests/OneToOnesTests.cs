@@ -209,8 +209,10 @@ public sealed class OneToOnes_ : OneToOneBase
         found = Plan([holiday, Away("l", "Jordan Lee on leave", "2026-11-23", "2026-11-24")]);
         Assert.Equal(("cancel", "Cancelling for the bank holiday"), (found["jordan-11-25"].Action, found["jordan-11-25"].Note));
         Assert.Equal("move", found["robin-11-25"].Action);
-        // Not in the Holiday category, and not all-day: not a bank holiday
+        // Not in the Holiday category, and not titled "Bank holiday": not a bank holiday
         Assert.Empty(Plan([Away("n", "Founders' Day", "2026-11-25", "2026-11-25")]));
+        // 1.10.0: a block of time in the category is enough too, not only an all-day entry
+        Assert.Equal(2, Plan([Self("t", "Founders' Day", "2026-11-25", "09:00", "17:00", showAs: "oof", categories: ["Holiday"])]).Count);
     }
 
     [Fact]
