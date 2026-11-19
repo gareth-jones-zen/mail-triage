@@ -471,6 +471,10 @@ internal sealed class ProposalGraph : IGraph, IMailWriter
     public void Delete(string messageId) => Deleted.Add(messageId);
 
     public void File(string messageId, string folderId) => throw new InvalidOperationException("not in these tests");
+
+    public void Forward(string messageId, IReadOnlyList<string> to, string comment) => throw new InvalidOperationException("not in these tests");
+
+    public void MarkRead(string messageId) => throw new InvalidOperationException("not in these tests");
 }
 
 public sealed class Proposals_ : IDisposable

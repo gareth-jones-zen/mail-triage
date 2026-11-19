@@ -77,6 +77,10 @@ public sealed class Mailbox
         Graph.Request($"/me/messages/{messageId}?$select=body", scopes: ReadScopes).Get("body").Req("content");
 
     public void Delete(string messageId) => Writer.Delete(messageId);
+
+    public void Forward(string messageId, IReadOnlyList<string> to, string comment) => Writer.Forward(messageId, to, comment);
+
+    public void MarkRead(string messageId) => Writer.MarkRead(messageId);
 }
 
 /// <summary>Not found (Python's LookupError): a folder, a queue number, an id.</summary>

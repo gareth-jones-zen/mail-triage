@@ -9,6 +9,9 @@ public sealed record RunReport(int Deleted, int Filed, int New, int Waiting, int
 {
     /// <summary>Emails a handler handled (each also counted under what then did with it).</summary>
     public int Handled { get; init; }
+
+    /// <summary>Emails a forward rule sent on (1.9.0).</summary>
+    public int Forwarded { get; init; }
 }
 
 /// <summary>One triage run, and what happens to the queue afterwards (triage.py).
@@ -81,7 +84,7 @@ public static class Triage
         var previous = Queue(settings);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var added = new List<JsonObject>();
-        int deleted = 0, again = 0, filed = 0, handled = 0;
+        int deleted = 0, again = 0, filed = 0, handled = 0, forwarded = 0;
         var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
         var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
 
@@ -168,6 +171,26 @@ public static class Triage
                 }
                 var label = $"[{(rule is not null ? rule.Name : "no rule")}] {Sender(message)}: {message.Fmt("subject")}"
                             + (note is { Length: > 0 } ? $" ({note})" : did is not null ? $" ({did})" : "");
+                if (action == "forward")
+                {
+                    if (dryRun)
+                    {
+                        log($"would {Forwarding.Describe(rule!)}  {label}");
+                        forwarded++;
+                        continue;
+                    }
+                    var why = Forwarding.Apply(settings, mailbox, key, message.Req("id"), rule!);
+                    if (why is null)
+                    {
+                        items.Add((JsonNode)Forwarding.Entry(folder.Name, message, rule!, NowMicro()));
+                        log($"{Forwarding.Describe(rule!, done: true)}  {label}");
+                        forwarded++;
+                        continue;
+                    }
+                    action = "review";   // an earlier forward's answer was lost: a person checks, it's never resent
+                    note = why;
+                    label += $" ({why})";
+                }
                 if (action == "delete")
                 {
                     if (!dryRun)
@@ -306,8 +329,9 @@ public static class Triage
             StateFiles.Save(settings.DeletedFile, record);
             SaveQueue(settings, [.. carried, .. added]);
         }
-        var report = new RunReport(deleted, filed, added.Count, carried.Count, Math.Max(0, again - carried.Count), invitesNew) { Handled = handled };
-        log($"done: {deleted} deleted, " + (filed > 0 ? $"{filed} filed, " : "") + (handled > 0 ? $"{handled} handled, " : "") + $"{added.Count} new to review"
+        var report = new RunReport(deleted, filed, added.Count, carried.Count, Math.Max(0, again - carried.Count), invitesNew) { Handled = handled, Forwarded = forwarded };
+        log($"done: {deleted} deleted, " + (filed > 0 ? $"{filed} filed, " : "") + (forwarded > 0 ? $"{forwarded} forwarded, " : "")
+            + (handled > 0 ? $"{handled} handled, " : "") + $"{added.Count} new to review"
             + (invitesNew > 0 ? $" ({invitesNew} invites)" : "") + $", {carried.Count} still waiting from earlier runs, {report.Kept} seen before and kept");
         return report;
     }
@@ -432,6 +456,64 @@ public static class Triage
         var gone = chosen.Select(i => i.Req("id")).ToHashSet(StringComparer.Ordinal);
         SaveQueue(settings, Queue(settings).Where(i => !gone.Contains(i.Req("id"))).ToList());
         return chosen.Count;
+    }
+
+    /// <summary>Apply a forward rule to queued emails (by number or Graph id): the rule they now match, or the one named.
+    /// For an email queued before its rule existed. Each is forwarded once at most (Forwarding), recorded like a run's
+    /// forward, and taken off the queue. Returns 0, or 1 if any was left queued because an earlier forward's answer was lost.</summary>
+    public static int Forward(Settings settings, Mailbox mailbox, IReadOnlyList<string> refs, string? ruleName, Action<string> log)
+    {
+        var chosen = Pick(settings, refs);
+        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one"))
+            throw new LookupException("A meeting can't be forwarded.");
+        Rule? named = null;
+        if (ruleName is not null)
+            named = settings.Rules.FirstOrDefault(r => r.Name == ruleName)
+                    ?? throw new LookupException($"No rule called {Py.ReprString(ruleName)} in {settings.Path}.");
+        if (named is not null && named.Action != "forward")
+            throw new LookupException($"Rule {Py.ReprString(named.Name)} doesn't forward (its action is {named.Action}).");
+        var plan = new List<(JsonObject Item, JsonObject Message, Rule Rule)>();
+        foreach (var item in chosen)
+        {
+            var message = mailbox.Graph.Request($"/me/messages/{item.Req("id")}?$select={Mailbox.Fields}", scopes: mailbox.ReadScopes);
+            var rule = named ?? settings.RuleFor(Sender(message), $"{message.Fmt("subject")}\n{message.Fmt("bodyPreview")}");
+            if (rule is not { Action: "forward" })
+                throw new LookupException($"No forward rule matches {Py.ReprString(message.Fmt("subject"))}: name one with --rule.");
+            plan.Add((item, message, rule));
+        }
+        var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
+        var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
+        var raised = StateFiles.LoadObject(settings.StateFile, () => []);
+        var gone = new HashSet<string>(StringComparer.Ordinal);
+        var notes = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var (item, message, rule) in plan)
+            {
+                var label = $"{Sender(message)}: {message.Fmt("subject")}";
+                var why = Forwarding.Apply(settings, mailbox, Key(message), item.Req("id"), rule);
+                if (why is not null)
+                {
+                    notes[item.Req("id")] = why;
+                    log($"not forwarded ({why})  {label}");
+                    continue;
+                }
+                items.Add((JsonNode)Forwarding.Entry(item.Str("folder") ?? "", message, rule, NowMicro()));
+                if (!raised.ContainsKey(Key(message)))
+                    raised[Key(message)] = NowSeconds();
+                gone.Add(item.Req("id"));
+                log($"{Forwarding.Describe(rule, done: true)} by hand  {label}");
+            }
+        }
+        finally
+        {
+            // What was done is recorded even if a later one fails.
+            StateFiles.Save(settings.DeletedFile, record);
+            StateFiles.Save(settings.StateFile, raised);
+            SaveQueue(settings, Queue(settings).Where(i => !gone.Contains(i.Req("id")))
+                .Select(i => { if (notes.TryGetValue(i.Req("id"), out var n)) i["check"] = n; return i; }).ToList());
+        }
+        return notes.Count > 0 ? 1 : 0;
     }
 
     /// <summary>Answer queued invites (by number): accept, tentative or decline. Accepting a series accepts it whole,

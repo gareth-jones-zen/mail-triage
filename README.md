@@ -16,6 +16,7 @@ mail-triage list
 mail-triage delete 1     # mark read, move to Deleted Items
 mail-triage keep 2       # off the queue, left in the folder
 mail-triage file 2 --to Inbox/Projects   # move it to a folder, left unread
+mail-triage forward 2    # apply the forward rule it matches: forward, mark read, file (1.9.0)
 mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule
 mail-triage summary      # one line for a session briefing: what's queued and deleted (--json: the counts)
 ```
@@ -93,8 +94,8 @@ folders = ["Inbox"]       # optional: only in these folders
 name = "Vendor newsletters"
 sender = '@news\.example\.com$'          # regular expression on the sender's address, ignoring case
 match = 'newsletter|digest'              # optional: on the subject and preview
-action = "delete"                        # delete | review | check | file | handle
-# to = 'Inbox/Projects'                 # for file: the folder, as a path from the top
+action = "delete"                        # delete | review | check | file | handle | forward
+# to = 'Inbox/Projects'                 # for file (and forward): the folder, as a path from the top
 why = "News, not action."                # say why: it's what keeps a rule list maintainable
 
 [[rule]]
@@ -115,6 +116,15 @@ sender = 'notifications@github\.com'
 match = '^\[[^\]]+\] Run failed: '
 action = "check"
 check = "github-runs"                   # needs the GitHub CLI (gh), signed in
+
+[[rule]]                                 # 1.9.0: pass it on, then put it away
+name = "Trooli maintenance notices"
+sender = 'NetworkMaintenanceChange@trooli\.com'
+action = "forward"
+forward_to = ["ert@example.com"]         # one or more addresses
+comment = "Hi - Trooli's maintenance notice below, for your awareness. Thanks"
+to = 'HSuppliers/Trooli/API/Change notifications'   # optional: file it afterwards
+# mark_read = true                      # the default for forward (file leaves mail unread)
 
 [[handler]]                              # a command a "handle" rule gives the email to
 name = "team-chat-draft"
@@ -141,7 +151,7 @@ handler = "team-chat-draft"
 Write regular expressions in TOML's single-quoted literal strings, so backslashes stay as they
 are. `mail-triage which <sender> "<subject>"` says which rule an email would meet, which is the
 quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-in), `tenant`,
-`queue_file`, `state_file`, `handled_file`, `log_file`.
+`queue_file`, `state_file`, `handled_file`, `forwarded_file`, `log_file`.
 
 **Keep each kind of table together**: all the `[[rule]]`s in one run, then the `[[handler]]`s, and so on. The TOML
 reader silently drops the tables before a break when one kind is split by another, so since 1.3.1 a file whose
@@ -153,6 +163,10 @@ reader silently drops the tables before a break when one kind is split by anothe
 - **Review** leaves it where it is and queues it.
 - **Your inbox can take a few rules without being triaged.** A folder with `unmatched = "leave"` gets only the rules that name it in `folders`, and mail no rule names is left alone, never queued: tidy the noise (meeting acceptances) without every email becoming a question. A rule with `folders` acts only there; one without acts in every folder except those.
 - **File** moves it to the folder in `to` (a path such as `Inbox/Projects`), left unread: for mail you keep but needn't decide on. `deleted` lists what was filed too.
+- **Forward (1.9.0)** sends the email on to `forward_to` with `comment` above it (Outlook's Forward), then marks it read (`mark_read`, on by default) and files it to `to` if given. `deleted` lists each one ("forwarded to …"). It needs **Mail.Send** as well as Mail.ReadWrite.
+  - **An email is never forwarded twice.** Its internet message ID is written to `forwarded_file` as "sending" before the forward goes, and as "sent" once Graph answers. If the answer is lost (a timeout or a dropped connection, after which the forward may well have gone), the email is queued saying so, to check Sent Items: it's never resent. If the forward went but marking or filing failed, the next run does only those.
+  - **`mail-triage forward <n>`** applies the rule to emails already in the queue, by number or Graph id (`--rule NAME` to name one): for mail queued before its rule existed. It's recorded and taken off the queue the same way.
+  - A dry run says what it would do ("would forward to … and file to …"); `--writes journal` records the forward and sends nothing, and doesn't count it as sent.
 - **Check** runs a test on the email and deletes it only if there's nothing to do; otherwise it's queued with what the test found.
 - **Each email is raised once.** Every email ever queued is recorded by its internet message ID (Graph's own id changes when an email moves), so one you've seen and kept in the folder doesn't come back. The first version re-queued everything still in the folders on every run, and the same six emails were put to their owner twice. **What's waiting stays in the queue until you `delete`, `keep` or `clear` it**, and an email deleted in Outlook drops out by itself.
 - **The test for a rule is "does this need me to do something?"** A notification that only says something happened should be a delete rule. Hence the flow-failures check: a failure digest only matters if the flow is still failing.

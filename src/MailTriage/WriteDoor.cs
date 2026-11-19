@@ -11,6 +11,12 @@ public interface IMailWriter
 
     /// <summary>Move to a folder, left unread.</summary>
     void File(string messageId, string folderId);
+
+    /// <summary>Forward to these addresses with a covering comment (sends mail: never resent, see Forwarding).</summary>
+    void Forward(string messageId, IReadOnlyList<string> to, string comment);
+
+    /// <summary>Mark read, and nothing else.</summary>
+    void MarkRead(string messageId);
 }
 
 /// <summary>Every change to the calendar goes through one of these. Each notifies other people.</summary>
@@ -98,12 +104,21 @@ public sealed class WriteDoor
 internal sealed class GraphWrites : IMailWriter, ICalendarWriter
 {
     private static readonly string[] MailScopes = ["Mail.ReadWrite"];
+    private static readonly string[] SendScopes = ["Mail.Send"];
     private static readonly string[] CalendarScopes = ["Calendars.ReadWrite"];
     private readonly Action<WriteCall, string[]> send;
 
-    public GraphWrites(IGraph graph) => send = (call, scopes) => graph.Request(call.Url, call.Method, call.Body, scopes);
+    public GraphWrites(IGraph graph)
+    {
+        send = (call, scopes) => graph.Request(call.Url, call.Method, call.Body, scopes);
+        Sends = true;
+    }
 
     public GraphWrites(Action<WriteCall> sink) => send = (call, _) => sink(call);
+
+    /// <summary>Whether writes really reach Graph (Live), rather than a journal or a refusal: a forward is only
+    /// recorded as sent when it was.</summary>
+    public bool Sends { get; }
 
     public void Delete(string messageId)
     {
@@ -113,6 +128,16 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
 
     public void File(string messageId, string folderId) =>
         send(new WriteCall("POST", $"/me/messages/{messageId}/move", new JsonObject { ["destinationId"] = folderId }), MailScopes);
+
+    public void Forward(string messageId, IReadOnlyList<string> to, string comment) =>
+        send(new WriteCall("POST", $"/me/messages/{messageId}/forward", new JsonObject
+        {
+            ["comment"] = comment,
+            ["toRecipients"] = new JsonArray(to.Select(a => (JsonNode)new JsonObject { ["emailAddress"] = new JsonObject { ["address"] = a } }).ToArray()),
+        }), SendScopes);
+
+    public void MarkRead(string messageId) =>
+        send(new WriteCall("PATCH", $"/me/messages/{messageId}", new JsonObject { ["isRead"] = true }), MailScopes);
 
     public void Respond(string eventId, string action, string note, bool send)
     {

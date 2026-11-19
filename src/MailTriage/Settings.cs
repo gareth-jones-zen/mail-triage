@@ -30,6 +30,12 @@ public sealed class Rule
     public string? Handler { get; init; }
     public List<string>? Folders { get; init; }
 
+    /// <summary>forward: who it goes to, the covering text above the original, and whether it's marked read
+    /// (forward only: file leaves mail unread on purpose).</summary>
+    public List<string>? ForwardTo { get; init; }
+    public string? Comment { get; init; }
+    public bool MarkRead { get; init; }
+
     public bool Matches(string sender, string text) =>
         PyRegex.IsMatch(Sender, sender, true) && (Match is null || PyRegex.IsMatch(Match, text, true));
 }
@@ -99,7 +105,7 @@ public sealed class OneToOnes
 /// and only the part of Python's dialect that .NET reads the same way is accepted (PyRegex).</summary>
 public sealed class Settings
 {
-    public static readonly string[] Actions = ["delete", "review", "check", "file", "handle"];
+    public static readonly string[] Actions = ["delete", "review", "check", "file", "handle", "forward"];
     private static readonly Dictionary<string, string> Aliases = new() { ["resolve"] = "delete" };   // the first name for delete
     private const string HoursPattern = "([01]\\d|2[0-3]):[0-5]\\d-([01]\\d|2[0-4]):[0-5]\\d";
 
@@ -140,6 +146,10 @@ public sealed class Settings
     public string DeletedFile { get; init; } = System.IO.Path.Combine(Local, "deleted.json");
     public string AcceptedFile { get; init; } = System.IO.Path.Combine(Local, "accepted.json");
     public string HandledFile { get; init; } = System.IO.Path.Combine(Local, "handled.json");
+
+    /// <summary>Each email a forward rule has sent on, by internet message ID: "sending" before the POST, "sent" once
+    /// it's answered, so a forward whose answer was lost is never sent twice (1.9.0).</summary>
+    public string ForwardedFile { get; init; } = System.IO.Path.Combine(Local, "forwarded.json");
     public string LogFile { get; init; } = System.IO.Path.Combine(Local, "mail-triage.log");
     public string Notify { get; init; } = "new";
     public long EveryMinutes { get; init; } = 15;
@@ -166,7 +176,7 @@ public sealed class Settings
     /// <summary>Every top-level setting this file accepts (tables included): the ones a base file can supply.</summary>
     public static readonly string[] KnownKeys =
     [
-        "login_hint", "tenant", "msal_cache", "email", "queue_file", "state_file", "deleted_file", "accepted_file", "handled_file",
+        "login_hint", "tenant", "msal_cache", "email", "queue_file", "state_file", "deleted_file", "accepted_file", "handled_file", "forwarded_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one",
     ];
@@ -274,6 +284,7 @@ public sealed class Settings
             DeletedFile = PathOr("deleted_file", System.IO.Path.Combine(Local, "deleted.json")),
             AcceptedFile = PathOr("accepted_file", System.IO.Path.Combine(Local, "accepted.json")),
             HandledFile = PathOr("handled_file", System.IO.Path.Combine(Local, "handled.json")),
+            ForwardedFile = PathOr("forwarded_file", System.IO.Path.Combine(Local, "forwarded.json")),
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
             EveryMinutes = every,
@@ -341,9 +352,19 @@ public sealed class Settings
             var given = item.Get("action") is { } a ? Toml.Str(a) : "";
             var action = Aliases.GetValueOrDefault(given, given);
             if (!Actions.Contains(action))
-                throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action {Toml.Repr(item.Get("action"))}: use delete, review, check, file or handle.");
+                throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action {Toml.Repr(item.Get("action"))}: use delete, review, check, file, handle or forward.");
             if (action == "file" && !Toml.Truthy(item.Get("to")))
                 throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action file but no `to` folder.");
+            if (action == "forward")
+            {
+                if (item.Get("forward_to") is not TomlArray list || list.Count == 0
+                    || list.Any(x => x is not string address || !PyRegex.Get(@"^[^@\s]+@[^@\s]+\.[^@\s]+$").FullMatch(address)))
+                    throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action forward: forward_to should be a list of email addresses.");
+                if (!(item.Get("comment") is string text && PyStr.Strip(text).Length > 0))
+                    throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action forward but no `comment` (the covering message).");
+                if (item.Get("mark_read") is { } mr && mr is not bool)
+                    throw new SettingsException($"Rule {Py.ReprString(name)} in {full}: mark_read should be true or false.");
+            }
             if (action == "check" && !(item.Get("check") is string c && Checks.All.ContainsKey(c)))
                 throw new SettingsException($"Rule {Py.ReprString(name)} in {full} needs check = one of {string.Join(", ", Checks.All.Keys.Order(PyStr.Order))}.");
             if (action == "handle" && !(item.Get("handler") is string hn && settings.Handlers.ContainsKey(hn)))
@@ -363,6 +384,9 @@ public sealed class Settings
                 To = item.Get("to") is { } to ? Toml.Str(to) : null,
                 Handler = action == "handle" ? Toml.Str(item.Get("handler")) : null,
                 Folders = Toml.Truthy(item.Get("folders")) ? Toml.Strings(item.Get("folders")) : null,
+                ForwardTo = action == "forward" ? Toml.Strings(item.Get("forward_to")) : null,
+                Comment = action == "forward" ? Toml.Str(item.Get("comment")) : null,
+                MarkRead = action == "forward" && (item.Get("mark_read") is not bool read || read),
             });
         }
 
@@ -523,10 +547,20 @@ public sealed class Settings
         {
             ["path"] = Path,
             ["folders"] = new JsonArray(Folders.Select(f => (JsonNode)new JsonObject { ["name"] = f.Name, ["since"] = Opt(f.Since), ["unmatched"] = f.Unmatched }).ToArray()),
-            ["rules"] = new JsonArray(Rules.Select(r => (JsonNode)new JsonObject
+            ["rules"] = new JsonArray(Rules.Select(r =>
             {
-                ["name"] = r.Name, ["sender"] = r.Sender, ["action"] = r.Action, ["match"] = Opt(r.Match), ["check"] = Opt(r.Check),
-                ["why"] = r.Why, ["to"] = Opt(r.To), ["folders"] = r.Folders is null ? null : Strs(r.Folders),
+                var rule = new JsonObject
+                {
+                    ["name"] = r.Name, ["sender"] = r.Sender, ["action"] = r.Action, ["match"] = Opt(r.Match), ["check"] = Opt(r.Check),
+                    ["why"] = r.Why, ["to"] = Opt(r.To), ["folders"] = r.Folders is null ? null : Strs(r.Folders),
+                };
+                if (r.Action == "forward")
+                {
+                    rule["forward_to"] = Strs(r.ForwardTo);
+                    rule["comment"] = r.Comment;
+                    rule["mark_read"] = r.MarkRead;
+                }
+                return (JsonNode)rule;
             }).ToArray()),
             ["flow_checks"] = new JsonArray(FlowChecks.Select(f => (JsonNode)new JsonObject { ["flow"] = f.Flow, ["output"] = f.Output, ["pending"] = Opt(f.Pending) }).ToArray()),
             ["login_hint"] = Opt(LoginHint), ["tenant"] = Tenant, ["msal_cache"] = Opt(MsalCache), ["queue_file"] = QueueFile,

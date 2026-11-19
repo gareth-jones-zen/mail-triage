@@ -56,6 +56,8 @@ public static class Cli
             mail-triage which <sender> [subject]   which rule an email would meet
             mail-triage handle 3 [--handler NAME]  give a queued email (or any, by Graph id) to its rule's handler, then
                                             do what the handler's `then` says (rules with action = "handle" do this in a run)
+            mail-triage forward 2 3 [--rule NAME]  apply the forward rule they match (or the one named) to queued emails:
+                                            forward, mark read, file, and off the queue (never forwards one twice)
 
             With [invites] in the settings, unanswered meeting invites are queued too, each with a recommendation:
             mail-triage file 4 --to Inbox/Projects   move queued emails to a folder, left unread
@@ -76,7 +78,7 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
-         "move", "leave", "one-to-ones", "autostart", "handle"];
+         "move", "leave", "one-to-ones", "autostart", "handle", "forward"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -102,6 +104,7 @@ public static class Cli
         ["invite"] = (["--silent", "--series", "--move"], ["--note"]),
         ["file"] = ([], ["--to"]),
         ["handle"] = ([], ["--handler"]),
+        ["forward"] = ([], ["--rule"]),
         ["leave"] = (["--decline"], ["--days", "--note"]),
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
     };
@@ -188,6 +191,9 @@ public static class Cli
                 Count(2, int.MaxValue, "action, refs");
                 if (a.Positional[0] is not ("accept" or "tentative" or "decline"))
                     throw new UsageException($"argument action: invalid choice: {Py.ReprString(a.Positional[0])} (choose from 'accept', 'tentative', 'decline')");
+                break;
+            case "forward":
+                Count(1, int.MaxValue, "refs");
                 break;
             case "file":
                 Count(1, int.MaxValue, "refs");
@@ -329,6 +335,8 @@ public static class Cli
                     Triage.File(settings, new Mailbox(graph, door.Mail), args.Positional, args.Value("--to")!, log);
                     return 0;
                 }
+                if (args.Command == "forward")
+                    return Triage.Forward(settings, new Mailbox(graph, door.Mail), args.Positional, args.Value("--rule"), log);
                 if (args.Command == "handle")
                 {
                     if (door.Mode != WriteMode.Live)
