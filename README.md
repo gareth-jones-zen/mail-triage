@@ -315,7 +315,7 @@ double_bookings = true           # queue meetings that overlap another meeting o
 - **`decline_days_off`:** your leave (`leave_pattern`) and bank holidays (`bank_holiday_categories`, or a "Bank
   holiday" title) are days off, never clashes. Each run declines meetings others organise that you've accepted or
   tentatively accepted on a day off, from now to `months_ahead`: **each occurrence once** (one you accept again is
-  left alone), with the leave note, or `bank_holiday_note` on a bank holiday. A half day (its title says half, AM or
+  left alone; all-day and free entries are never declined, as they hold no time), with the leave note, or `bank_holiday_note` on a bank holiday. A half day (its title says half, AM or
   PM) counts only for meetings in its hours. A new invite wholly on your days off is declined; with `auto_accept`, a
   series free apart from them is accepted and those occurrences declined.
 - **`double_bookings`** queues, once, each meeting that overlaps another meeting (accepted, tentative, or yours) or a
