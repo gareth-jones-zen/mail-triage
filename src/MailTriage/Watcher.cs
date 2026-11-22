@@ -14,13 +14,8 @@ public static class Watcher
 {
     public const int AlreadyRunning = 3;
 
-    public static bool Due(Settings settings, DateTime now)
-    {
-        if (settings.Weekdays && PyTime.Weekday(now) >= 5)
-            return false;
-        var hm = PyTime.Strftime(now, "%H:%M");
-        return string.CompareOrdinal(settings.Hours.Start, hm) <= 0 && string.CompareOrdinal(hm, settings.Hours.End) < 0;
-    }
+    /// <summary>Whether a run is due now: inside [schedule]'s hours and days (the shared IsActive).</summary>
+    public static bool Due(Settings settings, DateTime now) => settings.Schedule.IsActive(now);
 
     public static string RunLock(Settings settings) => $"mail-triage-run-{Locks.Key(settings.Path)}";
     public static string WatchLock(Settings settings) => $"mail-triage-watch-{Locks.Key(settings.Path)}";
@@ -39,8 +34,9 @@ public static class Watcher
             log("another watcher is already running for these settings; not starting a second");
             return AlreadyRunning;
         }
-        log($"watching {settings.Folders.Count} folder(s) every {settings.EveryMinutes} min, "
-            + $"{settings.Hours.Start}-{settings.Hours.End}{(settings.Weekdays ? " Mon-Fri" : "")}, and once now");
+        log($"watching {settings.Folders.Count} folder(s) {settings.ScheduleText("min")}, and once now");
+        if (settings.ScheduleFromOldKeys)
+            log("settings: every_minutes, hours and weekdays at the top level are the old form; move them to [schedule] (README, Settings)");
         var nextRun = DateTime.MinValue;
         var beat = clock();
         string? failing = null;

@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using PyCompat;
 using Tomlyn;
 using Tomlyn.Model;
+using WinBackground;
 
 namespace MailTriage;
 
@@ -261,9 +262,36 @@ public sealed class Settings
     public string ForwardedFile { get; init; } = System.IO.Path.Combine(Local, "forwarded.json");
     public string LogFile { get; init; } = System.IO.Path.Combine(Local, "mail-triage.log");
     public string Notify { get; init; } = "new";
-    public long EveryMinutes { get; init; } = 15;
-    public (string Start, string End) Hours { get; init; } = ("07:00", "19:00");
-    public bool Weekdays { get; set; } = true;
+    /// <summary>When the watcher triages: [schedule] (background-tools-lib's shared scheduling settings, 1.16.0), a
+    /// watcher's every_minutes being how often it polls. Until 1.16.0 these were every_minutes, hours and weekdays at the
+    /// top level, still read (the old form; the watcher logs it once at start).</summary>
+    public ScheduleSettings Schedule { get; set; } = DefaultSchedule;
+
+    /// <summary>True when the schedule came from the old top-level keys.</summary>
+    public bool ScheduleFromOldKeys { get; init; }
+
+    public static readonly ScheduleSettings DefaultSchedule = new()
+    {
+        EveryMinutes = 15,
+        Hours = (new TimeSpan(7, 0, 0), new TimeSpan(19, 0, 0)),
+        Days = new HashSet<DayOfWeek> { DayOfWeek.Monday, DayOfWeek.Tuesday, DayOfWeek.Wednesday, DayOfWeek.Thursday, DayOfWeek.Friday },
+    };
+
+    public long EveryMinutes => Schedule.EveryMinutes ?? 15;
+    public (string Start, string End) Hours => Schedule.Hours is var (from, to) ? (Clock(from), Clock(to)) : ("00:00", "24:00");
+    /// <summary>Whether the watcher keeps to Monday to Friday (the old weekdays setting).</summary>
+    public bool Weekdays => Schedule.Days is { Count: 5 } d && !d.Contains(DayOfWeek.Saturday) && !d.Contains(DayOfWeek.Sunday);
+
+    /// <summary>"every 15 minutes, 07:00-19:00 Mon-Fri", for messages.</summary>
+    public string ScheduleText(string unit = "minutes")
+    {
+        var days = Schedule.Days is null || Schedule.Days.Count == 7 ? ""
+            : Weekdays ? " Mon-Fri"
+            : " " + string.Join(",", Schedule.Days.OrderBy(d => ((int)d + 6) % 7).Select(d => d.ToString()[..3]));
+        return $"every {EveryMinutes} {unit}, {Hours.Start}-{Hours.End}{days}";
+    }
+
+    private static string Clock(TimeSpan t) => t.TotalHours >= 24 ? "24:00" : $"{(int)t.TotalHours:00}:{t.Minutes:00}";
     public string? Email { get; set; }
     public Invites? Invites { get; set; }
     public OneToOnes? OneToOnes { get; set; }
@@ -294,7 +322,7 @@ public sealed class Settings
         "login_hint", "tenant", "msal_cache", "email", "queue_file", "state_file", "deleted_file", "accepted_file", "days_off_file", "handled_file", "forwarded_file",
         "double_bookings_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
-        "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule",
+        "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule",
         "calendar_months_ahead",
     ];
 
@@ -376,20 +404,57 @@ public sealed class Settings
         }
     }
 
-    internal static Settings FromToml(TomlTable raw, string full, Func<string, string?>? env = null)
+    private static readonly string[] OldScheduleKeys = ["every_minutes", "hours", "weekdays"];
+
+    /// <summary>The watcher's schedule: [schedule] (1.16.0), or the old top-level every_minutes, hours and weekdays
+    /// (still read, so a settings file from before keeps working). Both at once is refused.</summary>
+    private static (ScheduleSettings Schedule, bool OldKeys) ReadSchedule(TomlTable raw, string full)
     {
-        var baseDir = System.IO.Path.GetDirectoryName(full)!;
+        var old = OldScheduleKeys.Where(raw.ContainsKey).ToList();
+        if (raw.Get("schedule") is { } table)
+        {
+            if (old.Count > 0)
+                throw new SettingsException($"{full} sets {string.Join(", ", old)} at the top level and has a [schedule]: "
+                                            + "keep them in [schedule] only (the top-level keys are the old form).");
+            if (table is not TomlTable schedule)
+                throw new SettingsException($"schedule in {full} should be a [schedule] table.");
+            ScheduleSettings parsed;
+            try
+            {
+                parsed = ScheduleSettings.Parse(schedule, DefaultSchedule, TaskKind.Watcher, $"[schedule] in {full}");
+            }
+            catch (FormatException error)
+            {
+                throw new SettingsException(error.Message);
+            }
+            if (parsed.EveryMinutes is not > 0)
+                throw new SettingsException($"[schedule] in {full}: every_minutes (how often the watcher triages) should be at least 1.");
+            return (parsed, false);
+        }
+        if (old.Count == 0)
+            return (DefaultSchedule, false);
         var hours = Toml.Str(raw.Get("hours") ?? "07:00-19:00");
         if (!PyRegex.Get(HoursPattern).FullMatch(hours))
             throw new SettingsException($"hours in {full} should look like \"07:00-19:00\".");
         var every = Toml.Int(raw.Get("every_minutes") ?? 15L);
         if (every < 1)
             throw new SettingsException($"every_minutes in {full} should be at least 1.");
+        return (DefaultSchedule with
+        {
+            EveryMinutes = (int)every,
+            Hours = ScheduleSettings.ParseHours(hours, full),
+            Days = Toml.Truthy(raw.Get("weekdays") ?? true) ? DefaultSchedule.Days : null,
+        }, true);
+    }
+
+    internal static Settings FromToml(TomlTable raw, string full, Func<string, string?>? env = null)
+    {
+        var baseDir = System.IO.Path.GetDirectoryName(full)!;
+        var (schedule, oldKeys) = ReadSchedule(raw, full);
         var notify = raw.Get("notify") ?? "new";
         if (notify is not ("new" or "errors"))
             throw new SettingsException($"notify in {full} should be \"new\" or \"errors\".");
         string PathOr(string key, string fallback) => Toml.Truthy(raw.Get(key)) ? ToPath(Toml.Str(raw.Get(key)), baseDir, env) : fallback;
-        var hourParts = hours.Split('-');
         var settings = new Settings
         {
             Path = full,
@@ -406,9 +471,8 @@ public sealed class Settings
             ForwardedFile = PathOr("forwarded_file", System.IO.Path.Combine(Local, "forwarded.json")),
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
-            EveryMinutes = every,
-            Hours = (hourParts[0], hourParts[1]),
-            Weekdays = Toml.Truthy(raw.Get("weekdays") ?? true),
+            Schedule = schedule,
+            ScheduleFromOldKeys = oldKeys,
         };
 
         foreach (var item in Toml.Tables(raw.Get("folder")))

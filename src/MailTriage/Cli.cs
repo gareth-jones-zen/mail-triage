@@ -589,9 +589,9 @@ public static class Cli
         {
             host.Tasks(Autostart.OldTaskName).Disable();
             var (exe, args) = Autostart.Command(host.ProgramDir, settings.Path);
-            var command = task.Enable(exe, args, Path.GetDirectoryName(settings.Path));
+            var command = task.Enable(exe, args, Path.GetDirectoryName(settings.Path), settings.Schedule.ToTaskSchedule(TaskKind.Watcher));
             Print(host.Out, $"Autostart is on: '{Autostart.TaskName}' runs at every logon, and has started now. It triages at once, then "
-                            + $"every {settings.EveryMinutes} minutes, {settings.Hours.Start}-{settings.Hours.End}{(settings.Weekdays ? " Mon-Fri" : "")}.\n  {command}");
+                            + $"{settings.ScheduleText()}.\n  {command}");
         }
         else if (action == "off")
         {
@@ -622,6 +622,8 @@ public static class Cli
                 Print(host.Out, $"Autostart is on ('{Autostart.TaskName}').");
                 foreach (var name in new[] { "state", "last_run", "last_result", "next_run", "command" })
                     Print(host.Out, $"  {name.Replace('_', ' '),-12} {info.GetValueOrDefault(name, "")}");
+                if (ScheduleDrift.Advice(ScheduleDrift.Check(info, settings.Schedule.Fingerprint(TaskKind.Watcher)), "mail-triage") is { } advice)
+                    Print(host.Out, "  " + advice);
             }
         }
         return 0;

@@ -325,7 +325,7 @@ public sealed class Watching : TriageBase
         Assert.False(Watcher.Due(Config, monday.AddHours(19)));
         Assert.False(Watcher.Due(Config, monday.AddHours(6).AddMinutes(59)));
         Assert.False(Watcher.Due(Config, new DateTime(2026, 11, 14, 10, 0, 0)));   // Saturday
-        Config.Weekdays = false;
+        Config.Schedule = Config.Schedule with { Days = null };
         Assert.True(Watcher.Due(Config, new DateTime(2026, 11, 14, 10, 0, 0)));
     }
 

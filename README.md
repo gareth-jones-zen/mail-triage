@@ -77,10 +77,12 @@ equally far ahead: how far `[invites]` looks, in months, when `[invites]` gives 
 ```toml
 base = "base-config.toml"   # optional: settings shared with other tools
 login_hint = "you@example.com"
-every_minutes = 15        # the watcher runs this often...
-hours = "07:00-19:00"     # ...between these times, and once at start whatever the time...
-weekdays = true           # ...Monday to Friday
 notify = "new"            # "new": the watcher notifies new emails to review; "errors": only problems
+
+[schedule]                # when the watcher triages (the shared [schedule] settings, below)
+every_minutes = 15        # this often...
+hours = "07:00-19:00"     # ...between these times, and once at start whatever the time...
+days = "Mon-Fri"          # ...on these days
 
 [[folder]]
 name = "Newsletters"      # display name, found anywhere in your folder tree
@@ -163,6 +165,17 @@ quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-
 **Keep each kind of table together**: all the `[[rule]]`s in one run, then the `[[handler]]`s, and so on. The TOML
 reader silently drops the tables before a break when one kind is split by another, so since 1.3.1 a file whose
 `[[...]]` count doesn't match what was read is refused, saying which.
+
+### `[schedule]`: when the watcher triages (1.16.0)
+
+The shared scheduling settings from background-tools-lib (its README, "[schedule]: the shared scheduling settings"), the
+same keys in every tool. mail-triage is a watcher: it starts at logon and keeps running, so `every_minutes` is how often
+it triages, and `hours` and `days` when; `daily_at` and `after_unlock_minutes` don't apply. **Defaults:** every 15 minutes,
+07:00-19:00, Mon-Fri. The watcher re-reads its settings at each run, so a change takes effect from the next one; no
+re-registering is needed. `autostart status` says if the registered task no longer matches the settings.
+
+**Until 1.16.0** these were `every_minutes`, `hours` and `weekdays` at the top level (`weekdays = false` is `days =
+"Mon-Sun"`). They're still read, and the watcher logs once at start that they're the old form; a file with both is refused.
 
 ## How it works, and why
 
