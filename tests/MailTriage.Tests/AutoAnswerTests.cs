@@ -19,7 +19,7 @@ public sealed class AutoAnswers : IDisposable
         invites.AutoMoveBlocks = true;
         invites.DeclineDaysOff = true;
         invites.MonthsAhead = 3;
-        invites.BankHolidayCategories = ["Bank holiday"];
+        config.Leave = config.Leave with { BankHolidayCategories = ["Bank holiday"] };   // [leave] (1.17.0)
     }
 
     public void Dispose() => dir.Dispose();

@@ -177,6 +177,29 @@ re-registering is needed. `autostart status` says if the registered task no long
 **Until 1.16.0** these were `every_minutes`, `hours` and `weekdays` at the top level (`weekdays = false` is `days =
 "Mon-Sun"`). They're still read, and the watcher logs once at start that they're the old form; a file with both is refused.
 
+### `[leave]`: what counts as your leave and your bank holidays (1.17.0)
+
+The shared leave rules from background-tools-lib (its README, CalendarDays, "`[leave]`: the shared leave settings"),
+the same keys calendar-out-of-office, calendar-work-location and meeting-preps read, so they all agree on a day:
+`subjects`, `categories`, `min_hours`, `half_day`, `bank_holiday_subjects` and `bank_holiday_categories`. Kept once in a
+base file's `[leave]`, with an empty `[leave]` here (a table applies only to a tool that has the section).
+
+mail-triage adds one rule on top: **a half day counts only for what it overlaps.** A half day whose half is known (its
+title says AM or PM, or "from PM" / "to AM" on a longer entry) is off for that half (before or after `[one_to_ones]`'
+`midday`, 13:00 by default); a few hours marked as leave are off for those hours; one whose half can't be told (People
+First's `Holiday (half day) (<job title>)`) is never acted on: invites on it are asked, accepted meetings left alone,
+and 1:1s raised. `mail-triage days-off` shows each weekday's verdict (`--differences`: only where the rules before 1.17.0
+said otherwise; that comparison goes in 1.18.0).
+
+A file with neither `[leave]` nor the old settings keeps mail-triage's old defaults (`leave_pattern`'s
+`^(w+ )?(holidays?|annual leave|leave|bank holiday)` and the "Holiday" category) under the new rules.
+
+**Until 1.17.0** these were `leave_pattern` in `[invites]` (any length of entry matching it was a whole day off) and
+`bank_holiday_categories` in `[invites]` and `[one_to_ones]`. They're still read, as `subjects` and
+`bank_holiday_categories` (the two lists must agree), and the watcher logs once that they're the old form; a file with
+both forms is refused. `[one_to_ones]` `leave_pattern` stays: it's how your reports' leave entries are named, read with
+background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync writes.
+
 ## How it works, and why
 
 - **Delete** marks the email read and moves it to Deleted Items, so it's recoverable.

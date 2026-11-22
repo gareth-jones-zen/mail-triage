@@ -21,7 +21,7 @@ public sealed class Held
 
 /// <summary>The recommendation for one invite (invites.assess).</summary>
 public sealed record Verdict(string Recommendation, string Why, List<string> Decline, string Note, JsonArray Clashes,
-    bool LeaveOnly = false, bool OwnMovesOnly = false, bool Marker = false);
+    bool LeaveOnly = false, bool OwnMovesOnly = false, bool Marker = false, bool HalfDayUnknown = false);
 
 /// <summary>Meeting invites: raised with a recommendation, answered on your say-so (invites.py). Judged on time and
 /// context, not sender: leave, a clash with something fixed (decline), clashes only with what can move (accept and
@@ -74,11 +74,7 @@ public static class InviteTriage
         return DaysOf(start, end);
     }
 
-    /// <summary>The bank-holiday categories: [invites]' own, else [one_to_ones]', else "Holiday".</summary>
-    public static IReadOnlyList<string> BankHolidayCategories(Settings settings) =>
-        settings.Invites?.BankHolidayCategories ?? settings.OneToOnes?.BankHolidayCategories ?? ["Holiday"];
-
-    /// <summary>Whether an entry of yours marks a bank holiday (1.10.0): in one of the bank-holiday categories, all
+    /// <summary>OLD (for `days-off`'s comparison only; REMOVE IN 1.18.0: [leave] decides, Leave.View). Whether an entry of yours marks a bank holiday (1.10.0): in one of the bank-holiday categories, all
     /// day or a block of time, or titled "Bank holiday...". So an all-day entry alone, or a block alone, is enough (until
     /// 1.10.0 invite triage saw only a "Bank holiday" title, and the 1:1 rule a category only on an all-day entry).</summary>
     public static bool IsBankHoliday(Settings settings, JsonObject e, IReadOnlyList<string> categories)
@@ -90,45 +86,18 @@ public static class InviteTriage
                || PyRegex.Get(@"bank holiday\b", true).MatchStart(e.StrOr("subject")) is not null;
     }
 
-    public static HashSet<DateOnly> BankHolidayDays(Settings settings, List<JsonObject> events, IReadOnlyList<string> categories)
-    {
-        var days = new HashSet<DateOnly>();
-        foreach (var e in events)
-            if (IsBankHoliday(settings, e, categories))
-                days.UnionWith(SpanDays(e));
-        return days;
-    }
-
-    /// <summary>Days you're off for invites: your leave (leave_pattern) and bank holidays; and those that are only a bank
-    /// holiday, which get the bank holiday note rather than the leave one.</summary>
+    /// <summary>Your days off (1.17.0: [leave], the shared rules; see DaysOffView): whole days off, and those that are only
+    /// a bank holiday, which get the bank holiday note rather than the leave one.</summary>
     public static (HashSet<DateOnly> Away, HashSet<DateOnly> BankOnly) DaysOff(Settings settings, List<JsonObject> events)
     {
-        var categories = BankHolidayCategories(settings);
-        var bank = BankHolidayDays(settings, events, categories);
-        var leave = LeaveDays(settings, events.Where(e => !IsBankHoliday(settings, e, categories)).ToList());
-        var bankOnly = bank.Where(d => !leave.Contains(d)).ToHashSet();
-        leave.UnionWith(bank);
-        return (leave, bankOnly);
+        var view = Leave.View(settings, events);
+        return (view.Away, view.BankOnly);
     }
 
     /// <summary>The decline note for a day off: the bank holiday note on a day that's only a bank holiday, else the leave
     /// note (which spans the whole stretch away, bank holidays included).</summary>
     public static string OffNote(Settings settings, DateOnly day, HashSet<DateOnly> away, HashSet<DateOnly>? bankOnly) =>
         bankOnly is not null && bankOnly.Contains(day) ? settings.Invites!.BankHolidayNote : LeaveNote(settings, day, away);
-
-    public static HashSet<DateOnly> LeaveDays(Settings settings, List<JsonObject> events)
-    {
-        var pattern = PyRegex.Get(settings.Invites!.LeavePattern, true);
-        var days = new HashSet<DateOnly>();
-        foreach (var e in events)
-        {
-            var (_, address) = Organiser(e);
-            if (address != settings.Email || e.Truthy("isCancelled") || pattern.MatchStart(e.StrOr("subject")) is null)
-                continue;
-            days.UnionWith(SpanDays(e));
-        }
-        return days;
-    }
 
     /// <summary>"On annual leave", or "On annual leave 16/12 to 31/12" for leave longer than a day. A weekend inside
     /// the leave doesn't break it; one at either end isn't counted.</summary>
@@ -165,8 +134,6 @@ public static class InviteTriage
     {
         var invites = settings.Invites!;
         var output = new List<Held>();
-        var categories = BankHolidayCategories(settings);
-        var leave = PyRegex.Get(invites.LeavePattern, true);
         foreach (var e in events)
         {
             var response = e.Get("responseStatus").Str("response");
@@ -174,7 +141,7 @@ public static class InviteTriage
                 continue;
             // Your leave and bank holidays are days off, not clashes (1.11.0): until then a leave entry shown as out of
             // office also counted as a fixed block, so a series free apart from your leave looked like it clashed.
-            if (IsBankHoliday(settings, e, categories) || (Organiser(e).Address == settings.Email && leave.MatchStart(e.StrOr("subject")) is not null))
+            if (Leave.IsLeaveEntry(settings, Leave.ToDayEvent(settings, e)))
                 continue;
             var subject = e.StrOr("subject");
             var own = e.Truthy("isOrganizer");
@@ -285,11 +252,15 @@ public static class InviteTriage
 
     /// <summary>The recommendation for one invite (for a series, across its occurrences in the window).</summary>
     public static Verdict Assess(Settings settings, JsonObject e, List<Held> held, HashSet<DateOnly> away, List<JsonObject> seriesEvents,
-        DateTime? now = null, HashSet<DateOnly>? bankOnly = null)
+        DateTime? now = null, HashSet<DateOnly>? bankOnly = null, DaysOffView? view = null)
     {
         var at = now ?? Clock.Now;
         var occurrences = seriesEvents.Count > 0 ? seriesEvents : [e];
-        var onLeave = occurrences.Where(o => away.Contains(DateOnly.FromDateTime(Times(o).Start))).ToList();
+        // With the days-off view (1.17.0), a half day counts only for the half it covers, and one whose half isn't known
+        // is left for you (never answered on its own). Without it (older callers), any day in away is a day off.
+        var onLeave = occurrences.Where(o => view is null ? away.Contains(DateOnly.FromDateTime(Times(o).Start)) : view.OffAt(Times(o).Start, Times(o).End) == true).ToList();
+        var unknownHalf = view is null ? [] : occurrences.Where(o => view.OffAt(Times(o).Start, Times(o).End) is null).ToList();
+        var avoidDays = view?.AnyLeave ?? away;
         var hits = new List<(JsonObject O, Held C)>();
         foreach (var o in occurrences)
         {
@@ -298,7 +269,7 @@ public static class InviteTriage
                 var c = original.Copy();
                 if (MovableKinds.Contains(c.Kind))
                 {
-                    if (FreeSlot(settings, c, held, Times(o), away, at) is { } slot)
+                    if (FreeSlot(settings, c, held, Times(o), avoidDays, at) is { } slot)
                         c.To = slot;
                     else
                         c.Kind += ", no free slot to move it to";
@@ -314,6 +285,8 @@ public static class InviteTriage
             notes.Add(place == "optional" ? "you're optional" : "you're invited through a group");
         if (e.Str("type") is "occurrence" or "exception" or "seriesMaster")
             notes.Add($"a recurring series ({occurrences.Count} in the next {settings.Invites!.Days(at)} days)");
+        if (unknownHalf.Count > 0)
+            notes.Add($"on your half day {PyTime.Strftime(Times(unknownHalf[0]).Start, "%a %d %b")}, and which half isn't known");
         if (People(e).Count > 50)
             notes.Add($"a broadcast ({People(e).Count} people)");
         var (_, address) = Organiser(e);
@@ -376,7 +349,8 @@ public static class InviteTriage
         var leaveOnly = onLeave.Count > 0 && fixedHits.Count == 0 && rec is "decline" or "accept, and decline the clashing ones";
         var ownMoves = rec == "accept and move" && movable.All(h => h.C.Kind is "your block" or "travel");
         var marker = rec == "accept" && hits.Count == 0 && (e.Truthy("isAllDay") || e.Str("showAs") == "free");
-        return new Verdict(rec, why + (notes.Count > 0 ? $" ({string.Join("; ", notes)})" : ""), decline, note, clashes, leaveOnly, ownMoves, marker);
+        return new Verdict(rec, why + (notes.Count > 0 ? $" ({string.Join("; ", notes)})" : ""), decline, note, clashes, leaveOnly, ownMoves, marker,
+            unknownHalf.Count > 0);
     }
 
     private static string Start16(JsonObject e) => e.Get("start").Req("dateTime") is var s && s.Length > 16 ? s[..16] : e.Get("start").Req("dateTime");
@@ -446,7 +420,8 @@ public static class InviteTriage
         var at = now ?? Clock.Now;
         var events = calendar.Events(DateOnly.FromDateTime(at), invites.Days(at));
         eventsOut?.AddRange(events);
-        var (away, bankOnly) = DaysOff(settings, events);
+        var view = Leave.View(settings, events);
+        var (away, bankOnly) = (view.Away, view.BankOnly);
         var held = Commitments(settings, events);
         var pending = events.Where(e => !e.Truthy("isOrganizer") && !e.Truthy("isCancelled")
                                         && e.Get("responseStatus").Str("response") is { } r && Pending.Contains(r) && Times(e).Start > at).ToList();
@@ -521,7 +496,7 @@ public static class InviteTriage
                 continue;
             }
             var whole = first.Truthy("seriesMasterId") && !Lone(group);   // a series, answered as a whole
-            var verdict = Assess(settings, first, held, away, whole ? group : [], at, bankOnly);
+            var verdict = Assess(settings, first, held, away, whole ? group : [], at, bankOnly, view);
             var (name, address) = Organiser(first);
             var item = new JsonObject
             {
@@ -575,6 +550,8 @@ public static class InviteTriage
         var invites = settings.Invites!;
         if (rule is not null)
             return null;
+        if (v.HalfDayUnknown)
+            return null;   // on a half day whose half isn't known: yours to decide (1.17.0)
         if (v.Recommendation == "decline" && v.LeaveOnly && invites.DeclineDaysOff)
             return ("decline", false, "Declined: on your days off");
         if (!invites.AutoAccept)
@@ -597,7 +574,6 @@ public static class InviteTriage
         };
     }
 
-    private static bool HalfDay(string subject) => PyRegex.IsMatch(@"\bhalf\b|\b(am|pm)\b", subject, true);
 
     /// <summary>Decline meetings others organise that fall on your days off (1.11.0), from now to months_ahead: accepted
     /// or tentative, each occurrence once (done records it, so one you accept again is left alone), up to max_declines
@@ -607,12 +583,8 @@ public static class InviteTriage
         Action<string> log, DateTime at, bool dryRun = false)
     {
         var invites = settings.Invites!;
-        var categories = BankHolidayCategories(settings);
-        var pattern = PyRegex.Get(invites.LeavePattern, true);
-        var offs = events.Where(e => IsBankHoliday(settings, e, categories)
-                                     || (Organiser(e).Address == settings.Email && !e.Truthy("isCancelled") && pattern.MatchStart(e.StrOr("subject")) is not null))
-            .ToList();
-        var (away, bankOnly) = DaysOff(settings, events);
+        var view = Leave.View(settings, events);
+        var (away, bankOnly) = (view.Away, view.BankOnly);
         var acted = new List<JsonObject>();
         foreach (var key in done.Select(kv => kv.Key).ToList())
             if (PyStr.CompareCodePoints(key[(key.LastIndexOf('@') + 1)..], PyTime.Iso(at.Date, "minutes")) < 0)
@@ -628,11 +600,8 @@ public static class InviteTriage
             if (start <= at)
                 continue;
             var day = DateOnly.FromDateTime(start);
-            var onDay = offs.Where(o => SpanDays(o).Contains(day)).ToList();
-            var off = onDay.Any(o => !HalfDay(o.StrOr("subject")))
-                      || onDay.Any(o => HalfDay(o.StrOr("subject")) && Times(o).Start < end && Times(o).End > start);
-            if (!off)
-                continue;
+            if (view.OffAt(start, end) != true)
+                continue;   // a half day whose half isn't known is left alone (`days-off` shows it)
             var key = $"{m.Req("id")}@{Start16(m)}";
             if (done.ContainsKey(key))
                 continue;
@@ -660,25 +629,6 @@ public static class InviteTriage
         return acted;
     }
 
-    /// <summary>Whether a meeting falls on your days off: a leave entry or bank holiday covers its day, or a half day
-    /// (its title says half, AM or PM) covers its hours.</summary>
-    private static bool OnDayOff(List<JsonObject> offs, DateTime start, DateTime end)
-    {
-        var day = DateOnly.FromDateTime(start);
-        var onDay = offs.Where(o => SpanDays(o).Contains(day)).ToList();
-        return onDay.Any(o => !HalfDay(o.StrOr("subject")))
-               || onDay.Any(o => HalfDay(o.StrOr("subject")) && Times(o).Start < end && Times(o).End > start);
-    }
-
-    private static List<JsonObject> DayOffEntries(Settings settings, List<JsonObject> events)
-    {
-        var categories = BankHolidayCategories(settings);
-        var pattern = PyRegex.Get(settings.Invites!.LeavePattern, true);
-        return events.Where(e => IsBankHoliday(settings, e, categories)
-                                 || (Organiser(e).Address == settings.Email && !e.Truthy("isCancelled") && pattern.MatchStart(e.StrOr("subject")) is not null))
-            .ToList();
-    }
-
     /// <summary>What you organise on your days off (1.14.0), from now to months_ahead, each occurrence once (done):
     /// a meeting with one other person cancelled (cancel_days_off; your reports' 1:1s are [one_to_ones]'), your own
     /// blocks deleted (remove_blocks_days_off), a meeting with more people queued for you (raise_group_days_off).
@@ -688,9 +638,9 @@ public static class InviteTriage
         List<JsonObject> events, JsonObject done, JsonObject raised, Action<string> log, DateTime at, bool dryRun = false)
     {
         var invites = settings.Invites!;
-        var offs = DayOffEntries(settings, events);
-        var offIds = offs.Select(o => o.Req("id")).ToHashSet(StringComparer.Ordinal);
-        var (_, bankOnly) = DaysOff(settings, events);
+        var view = Leave.View(settings, events);
+        var offIds = view.EntryIds;
+        var bankOnly = view.BankOnly;
         var reports = (settings.OneToOnes?.Reports ?? []).Select(r => r.Email.ToLowerInvariant()).ToHashSet();
         var myNote = settings.OneToOnes?.MyNote ?? "Cancelling as I'm on leave";
         var bankNote = settings.OneToOnes?.BankHolidayNote ?? "Cancelling for the bank holiday";
@@ -703,7 +653,7 @@ public static class InviteTriage
             if (!m.Truthy("isOrganizer") || m.Truthy("isCancelled") || m.Truthy("isAllDay") || m.Str("showAs") == "free" || offIds.Contains(m.Req("id")))
                 continue;
             var (start, end) = Times(m);
-            if (start <= at || !OnDayOff(offs, start, end))
+            if (start <= at || view.OffAt(start, end) != true)
                 continue;
             var others = People(m).Select(Address).Where(a => a.Length > 0 && a != settings.Email).Distinct().ToList();
             var key = $"own:{m.Req("id")}@{Start16(m)}";
@@ -775,7 +725,7 @@ public static class InviteTriage
     public static List<Clash> DoubleBooked(Settings settings, List<JsonObject> events, DateTime at)
     {
         var held = Commitments(settings, events).Where(h => h.Start > at).OrderBy(h => h.Start).ToList();
-        var (away, _) = DaysOff(settings, events);
+        var view = Leave.View(settings, events);
         string[] meetings = ["accepted", "tentative", "your meeting", "protected"];
         string[] blocks = ["fixed block", "travel mid-day"];
         var output = new List<Clash>();
@@ -786,7 +736,7 @@ public static class InviteTriage
                 var (a, b) = (held[i], held[j]);
                 if (!(meetings.Contains(a.Kind) || meetings.Contains(b.Kind)) || !(meetings.Concat(blocks).Contains(a.Kind) && meetings.Concat(blocks).Contains(b.Kind)))
                     continue;
-                if (away.Contains(DateOnly.FromDateTime(a.Start)) || away.Contains(DateOnly.FromDateTime(b.Start)))
+                if (view.OffAt(a.Start, a.End) != false || view.OffAt(b.Start, b.End) != false)
                     continue;
                 var pair = string.CompareOrdinal(a.Id, b.Id) < 0 ? a.Id + "|" + b.Id : b.Id + "|" + a.Id;
                 output.Add(new Clash(a, b, $"double:{pair}@{PyTime.Iso(b.Start, "minutes")}", b.Start > a.Start ? b.Start : a.Start));
@@ -817,9 +767,10 @@ public static class InviteTriage
     public static List<JsonObject> LeaveSweep(Settings settings, ICalendar calendar, DateOnly start, long days)
     {
         var events = calendar.Events(start, days);
-        var (away, bankOnly) = DaysOff(settings, events);
+        var view = Leave.View(settings, events);
+        var (away, bankOnly) = (view.AnyLeave, view.BankOnly);
         var found = events.Where(e => !e.Truthy("isOrganizer") && !e.Truthy("isCancelled") && !e.Truthy("isAllDay")
-                                      && away.Contains(DateOnly.FromDateTime(Times(e).Start))
+                                      && view.OffAt(Times(e).Start, Times(e).End) != false
                                       && e.Get("responseStatus").Str("response") != "declined").ToList();
         foreach (var e in found)
             e["note"] = OffNote(settings, DateOnly.FromDateTime(Times(e).Start), away, bankOnly);

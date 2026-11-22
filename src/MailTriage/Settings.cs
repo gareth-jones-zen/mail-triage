@@ -5,6 +5,7 @@ using PyCompat;
 using Tomlyn;
 using Tomlyn.Model;
 using WinBackground;
+using LeaveSettings = CalendarDays.LeaveSettings;
 
 namespace MailTriage;
 
@@ -296,6 +297,14 @@ public sealed class Settings
     public Invites? Invites { get; set; }
     public OneToOnes? OneToOnes { get; set; }
 
+    /// <summary>[leave] (1.17.0): what counts as your leave and your bank holidays, background-tools-lib's shared rules
+    /// (CalendarDays.LeaveSettings), the same ones calendar-out-of-office, calendar-work-location and meeting-preps read.</summary>
+    public LeaveSettings Leave { get; set; } = new();
+
+    /// <summary>The old settings [leave] was read from (leave_pattern and bank_holiday_categories under [invites] and
+    /// [one_to_ones]), if it was; the watcher says so once.</summary>
+    public List<string> LeaveOldKeys { get; set; } = [];
+
     /// <summary>[groups] (1.13.0): named lists of addresses (lower case), for rules to name.</summary>
     public Dictionary<string, List<string>> Groups { get; } = new(StringComparer.Ordinal);
 
@@ -322,7 +331,7 @@ public sealed class Settings
         "login_hint", "tenant", "msal_cache", "email", "queue_file", "state_file", "deleted_file", "accepted_file", "days_off_file", "handled_file", "forwarded_file",
         "double_bookings_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
-        "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule",
+        "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule", "leave",
         "calendar_months_ahead",
     ];
 
@@ -718,11 +727,71 @@ public sealed class Settings
                 BankHolidayNote = section.Get("bank_holiday_note") is { } bn ? Toml.Str(bn) : "Cancelling for the bank holiday",
             };
         }
+        ReadLeave(raw, full, settings);
         ReadGroups(raw, full, settings);
         ReadDoubleBookings(raw, full, settings);
         if (settings.Folders.Count == 0 && settings.Invites is null)
             throw new SettingsException($"{full} names no [[folder]] to triage, and no [invites].");
         return settings;
+    }
+
+    /// <summary>[leave] (1.17.0): the shared leave rules (CalendarDays.LeaveSettings). The old settings still read, as
+    /// aliases feeding the same rules: [invites] leave_pattern (your leave's subjects) and bank_holiday_categories under
+    /// [invites] and [one_to_ones]. Both forms at once is an error, and so are the two old category lists disagreeing.
+    /// [one_to_ones] leave_pattern isn't one of these: it's how your reports' leave entries are named.</summary>
+    private static void ReadLeave(TomlTable raw, string full, Settings settings)
+    {
+        var invites = raw.Get("invites") as TomlTable;
+        var one = raw.Get("one_to_ones") as TomlTable;
+        var old = new List<string>();
+        if (invites?.ContainsKey("leave_pattern") == true)
+            old.Add("[invites] leave_pattern");
+        if (invites?.ContainsKey("bank_holiday_categories") == true)
+            old.Add("[invites] bank_holiday_categories");
+        if (one?.ContainsKey("bank_holiday_categories") == true)
+            old.Add("[one_to_ones] bank_holiday_categories");
+        if (raw.Get("leave") is { } leaveValue)
+        {
+            var table = leaveValue as TomlTable ?? throw new SettingsException($"[leave] in {full} should be a table.");
+            if (old.Count > 0)
+                throw new SettingsException($"{full} has both [leave] and the old {string.Join(", ", old)}: keep [leave] and delete the old.");
+            settings.Leave = ParseLeave(table, full);
+            return;
+        }
+        if (old.Count == 0)
+        {
+            // Neither form: mail-triage's own defaults until 1.17.0 (its leave_pattern, and the "Holiday" category), under
+            // the shared rules. A file with [leave] (even empty, filled from a base) takes the shared defaults instead.
+            settings.Leave = ParseLeave(new Dictionary<string, object>
+            {
+                ["subjects"] = Invites.DefaultLeavePattern, ["bank_holiday_categories"] = new List<object> { "Holiday" },
+            }, full);
+            return;
+        }
+        var fromInvites = settings.Invites?.BankHolidayCategories;
+        var fromOne = one?.ContainsKey("bank_holiday_categories") == true ? settings.OneToOnes?.BankHolidayCategories : null;
+        if (fromInvites is not null && fromOne is not null
+            && !fromInvites.Select(c => c.ToLowerInvariant()).Order().SequenceEqual(fromOne.Select(c => c.ToLowerInvariant()).Order()))
+            throw new SettingsException($"bank_holiday_categories in [invites] and [one_to_ones] in {full} differ: move one list to [leave].");
+        var aliases = new Dictionary<string, object>(StringComparer.Ordinal);
+        if (invites?.ContainsKey("leave_pattern") == true)
+            aliases["subjects"] = settings.Invites!.LeavePattern;
+        if ((fromInvites ?? fromOne) is { } categories)
+            aliases["bank_holiday_categories"] = categories.Cast<object>().ToList();
+        settings.Leave = ParseLeave(aliases, full);
+        settings.LeaveOldKeys = old;
+    }
+
+    private static LeaveSettings ParseLeave(IDictionary<string, object> table, string full)
+    {
+        try
+        {
+            return LeaveSettings.Parse(table, full);
+        }
+        catch (FormatException error)
+        {
+            throw new SettingsException(error.Message);
+        }
     }
 
     private static bool IsAddress(object? value) => value is string s && PyRegex.Get(@"^[^@\s]+@[^@\s]+\.[^@\s]+$").FullMatch(s);

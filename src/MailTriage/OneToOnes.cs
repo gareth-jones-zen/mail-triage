@@ -28,17 +28,6 @@ public static class OneToOnePlanner
     public const string Full = "full", Am = "AM", Pm = "PM", Half = "half";   // Half: a half day, but which half isn't known
     public const int Weekdays = 5;
 
-    /// <summary>(each day, first day, last day) halves in a leave entry's subject.</summary>
-    internal static (string? Each, string? First, string? Last) Markers(string text)
-    {
-        var first = PyRegex.Search(@"\bfrom\s+(am|pm)\b", text, true);
-        var last = PyRegex.Search(@"\bto\s+(am|pm)\b", text, true);
-        var rest = PyRegex.Get(@"\b(from|to)\s+(am|pm)\b", true).Sub(" ", text);
-        var each = PyRegex.Search(@"\b(am|pm)\b", rest, true);
-        var eachKind = each is not null ? each.Groups[1].Value.ToUpperInvariant() : PyRegex.IsMatch(@"\bhalf\b", rest, true) ? Half : null;
-        return (eachKind, first?.Groups[1].Value.ToUpperInvariant(), last?.Groups[1].Value.ToUpperInvariant());
-    }
-
     /// <summary>Two entries on one day: the morning and the afternoon make a full day; anything with a full day is one.</summary>
     private static void Merge(Dictionary<DateOnly, string> days, DateOnly day, string kind)
     {
@@ -62,24 +51,22 @@ public static class OneToOnePlanner
 
     private static bool Mine(Settings settings, JsonObject e) => InviteTriage.Organiser(e).Address == settings.Email && !e.Truthy("isCancelled");
 
-    public static HashSet<DateOnly> BankHolidays(Settings settings, List<JsonObject> events)
-    {
-        // InviteTriage's test (1.10.0): a category on any entry of yours, all day or a block, or a "Bank holiday" title.
-        return InviteTriage.BankHolidayDays(settings, events, settings.OneToOnes!.BankHolidayCategories);
-    }
+    /// <summary>Your bank holidays ([leave], the shared rules; 1.17.0).</summary>
+    public static HashSet<DateOnly> BankHolidays(Settings settings, List<JsonObject> events) =>
+        Leave.View(settings, events).Days.Where(kv => kv.Value.Kind == CalendarDays.DayOffKind.BankHoliday).Select(kv => kv.Key).ToHashSet();
 
-    /// <summary>Your leave, {day: full | AM | PM | half}. Only "half" makes a half day.</summary>
+    /// <summary>Your leave, {day: full | AM | PM | half} (1.17.0: [leave], the shared rules): a day of leave is full; a
+    /// half day is the half it covers (its title, or its hours), or "half" when that isn't known. Bank holidays aren't
+    /// here (BankHolidays).</summary>
     public static Dictionary<DateOnly, string> MyLeave(Settings settings, List<JsonObject> events)
     {
-        var pattern = PyRegex.Get(settings.Invites!.LeavePattern, true);
         var days = new Dictionary<DateOnly, string>();
-        foreach (var e in events)
+        foreach (var (day, d) in Leave.View(settings, events).Days)
         {
-            var subject = e.StrOr("subject");
-            if (!Mine(settings, e) || pattern.MatchStart(subject) is null || PyRegex.Get(@"bank holiday\b", true).MatchStart(subject) is not null)
-                continue;
-            var (each, first, last) = PyRegex.IsMatch(@"\bhalf\b", subject, true) ? Markers(subject) : (null, null, null);
-            Spread(days, e, each, first, last);
+            if (d.Kind == CalendarDays.DayOffKind.Leave)
+                days[day] = Full;
+            else if (d.Kind == CalendarDays.DayOffKind.HalfDay)
+                days[day] = d.Half switch { CalendarDays.HalfOfDay.Am => Am, CalendarDays.HalfOfDay.Pm => Pm, _ => Half };
         }
         return days;
     }
@@ -87,17 +74,12 @@ public static class OneToOnePlanner
     /// <summary>A report's leave, from your own entries named "&lt;Full Name&gt; annual leave" / "... on leave".</summary>
     public static Dictionary<DateOnly, string> ReportLeave(Settings settings, OneToOne report, List<JsonObject> events)
     {
-        var pattern = PyRegex.Get(settings.OneToOnes!.LeavePattern.Replace("{name}", PyRegex.Escape(report.Name)), true);
+        // The titles are background-tools-lib's ReportLeaveTitles (1.17.0): the one definition calendar-team-leave-sync writes.
         var days = new Dictionary<DateOnly, string>();
         foreach (var e in events)
         {
-            var subject = e.StrOr("subject");
-            var found = Mine(settings, e) ? pattern.MatchStart(subject) : null;
-            if (found is not null)
-            {
-                var (each, first, last) = Markers(subject[(found.Index + found.Length)..]);
-                Spread(days, e, each, first, last);
-            }
+            if (Mine(settings, e) && CalendarDays.ReportLeaveTitles.Parse(e.StrOr("subject"), report.Name, settings.OneToOnes!.LeavePattern) is { } t)
+                Spread(days, e, t.Each, t.First, t.Last);
         }
         return days;
     }

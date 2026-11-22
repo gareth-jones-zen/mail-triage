@@ -177,7 +177,7 @@ public sealed class Invites : IDisposable
     public void a_bank_holiday_alone_declines_with_its_own_note_whether_all_day_or_a_block()
     {
         // 1.10.0: an all-day entry in the category, a "Bank holiday" block, or a block in the category: each is enough.
-        config.Invites!.BankHolidayCategories = ["Bank holiday"];
+        config.Leave = config.Leave with { BankHolidayCategories = ["Bank holiday"] };   // [leave] (1.17.0)
         var markers = new[]
         {
             Self("bh", "Good Friday", "2026-11-20", "00:00", "00:00", endDay: "2026-11-21", isAllDay: true, showAs: "free", categories: ["Bank holiday"]),

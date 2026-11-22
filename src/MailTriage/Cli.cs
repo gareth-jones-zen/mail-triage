@@ -68,6 +68,8 @@ public static class Cli
             mail-triage move <event id> 2026-11-11T16:00 [16:50]   move one of your own meetings or blocks
             mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
             mail-triage one-to-ones         with [one_to_ones]: what each run would do with your 1:1s and leave (changes nothing)
+            mail-triage days-off [--days N] [--differences]   each weekday ahead: leave, a half day (which half), a bank
+                                            holiday or working, from [leave]; with the old rules' verdict beside it
             mail-triage double-bookings     each upcoming double booking, and what the [[double_booking_rule]]s would do
                                             with it (changes nothing)
 
@@ -80,7 +82,7 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
-         "move", "leave", "one-to-ones", "double-bookings", "autostart", "handle", "forward"];
+         "move", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -109,6 +111,7 @@ public static class Cli
         ["forward"] = ([], ["--rule"]),
         ["leave"] = (["--decline"], ["--days", "--note"]),
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
+        ["days-off"] = (["--differences"], ["--days"]),
     };
 
     internal static Args Parse(string[] argv)
@@ -316,6 +319,8 @@ public static class Cli
                 return OneToOnesCommand(args, settings, graph, host);
             if (args.Command == "double-bookings")
                 return DoubleBookingsCommand(settings, graph, host);
+            if (args.Command == "days-off")
+                return DaysOffCommand(args, settings, graph, host);
             if (args.Command is "invite" or "move" or "leave")
             {
                 if (settings.Invites is null)
@@ -554,6 +559,48 @@ public static class Cli
         Print(host.Out, $"{found.Count} 1:1(s) in the next {days} days; a run {mode}"
                         + (settings.OneToOnes.Act ? $", up to {settings.OneToOnes.MaxActions} changes at a time." : "."));
         return 0;
+    }
+
+    /// <summary>A preview (1.17.0): each weekday from today, what [leave]'s shared rules make of it, and what the old rules
+    /// did (marked ! where they differ). It only reads. The old column goes in 1.18.0.</summary>
+    private static int DaysOffCommand(Args args, Settings settings, IGraph graph, CliHost host)
+    {
+        if (settings.Invites is null)
+        {
+            Print(host.Err, $"{settings.Path} has no [invites] section.");
+            return 2;
+        }
+        var today = DateOnly.FromDateTime(Clock.Now);
+        var days = args.Value("--days") is { } d ? long.Parse(d, System.Globalization.CultureInfo.InvariantCulture) : settings.Invites.Days(Clock.Now);
+        var events = new Calendar(graph, WriteDoor.Refusing().Calendar).Events(today, days);
+        var lines = DaysOffLines(settings, events, today, days);
+        var shown = args.Flag("--differences") ? lines.Where(l => l.Differs).ToList() : lines;
+        foreach (var l in shown)
+            Print(host.Out, l.Text);
+        var differ = lines.Count(l => l.Differs);
+        Print(host.Out, $"{lines.Count} weekday(s) from {PyTime.Strftime(today, "%d/%m")}: {lines.Count(l => l.New != "working")} off in some way; "
+                        + (differ == 0 ? "the old rules agree on every one." : $"{differ} where the old rules differ (!)."));
+        return 0;
+    }
+
+    /// <summary>One line per weekday: (text, new verdict, whether it differs from the old in kind).</summary>
+    internal static List<(string Text, string New, bool Differs)> DaysOffLines(Settings settings, List<JsonObject> events, DateOnly today, long days)
+    {
+        static string Kind(string v) => v.StartsWith("half", StringComparison.Ordinal) ? "half" : v;
+        var view = Leave.View(settings, events);
+        var output = new List<(string, string, bool)>();
+        for (var day = today; day < today.AddDays((int)days); day = day.AddDays(1))
+        {
+            if (PyTime.Weekday(day) >= 5)
+                continue;
+            var d = view.Days.GetValueOrDefault(day);
+            var now = Leave.Verdict(d);
+            var (old, oldEntry) = Leave.LegacyVerdict(settings, events, day);
+            var differs = Kind(now) != Kind(old);
+            var entry = d?.Entry?.Subject ?? oldEntry;
+            output.Add(($"{(differs ? "!" : " ")} {PyTime.Strftime(day, "%a %d %b")}  {now,-13} (old: {old}){(entry is null ? "" : $"  {entry}")}", now, differs));
+        }
+        return output;
     }
 
     /// <summary>A preview (1.13.0): it only reads (your calendar, and attendees' free/busy). Writes are refused outright.</summary>

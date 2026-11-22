@@ -37,6 +37,8 @@ public static class Watcher
         log($"watching {settings.Folders.Count} folder(s) {settings.ScheduleText("min")}, and once now");
         if (settings.ScheduleFromOldKeys)
             log("settings: every_minutes, hours and weekdays at the top level are the old form; move them to [schedule] (README, Settings)");
+        if (settings.LeaveOldKeys.Count > 0)
+            log($"settings: {string.Join(", ", settings.LeaveOldKeys)} are the old form; move them to [leave] (README, Settings)");
         var nextRun = DateTime.MinValue;
         var beat = clock();
         string? failing = null;
