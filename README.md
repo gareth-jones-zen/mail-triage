@@ -59,11 +59,16 @@ tool's settings with `base = "base-config.toml"` (relative to the settings file)
 - **the base's `[paths]` are variables for this tool's paths**: `ROOT = "%LOCALAPPDATA%/tools"` there lets this file
   say `log_file = "%ROOT%/mail-triage.log"`. They're looked up before the environment;
 - **its other settings that this tool knows and doesn't set itself are used**: typically `login_hint`, `tenant` and
-  `msal_cache`. This file's own value always wins;
+  `msal_cache`, and `calendar_months_ahead` (below). This file's own value always wins;
 - **a table, such as `[invites]`, applies only if this file has that section too**, and its keys fill in the ones this
   file leaves out.
 
 The loader is background-tools-lib's `PyCompat.BaseSettings`. A missing or unreadable base is a settings error.
+
+**`calendar_months_ahead`** (1.15.0) is a top-level setting, usually kept in the base so the calendar tools look
+equally far ahead: how far `[invites]` looks, in months, when `[invites]` gives neither `months_ahead` nor
+`days_ahead`. The order is `[invites] months_ahead`, then `[invites] days_ahead`, then `calendar_months_ahead`, then
+42 days.
 
 ## Settings
 
@@ -295,7 +300,7 @@ action = "skip"                  # or "review": always raise
 Each is off unless switched on in `[invites]`:
 
 ```toml
-months_ahead = 3                 # how far ahead all of this looks (overrides days_ahead)
+months_ahead = 3                 # how far ahead all of this looks (overrides days_ahead; leave both out to use calendar_months_ahead)
 auto_accept = true               # accept an invite with no clash, and markers that hold no time
 # auto_accept_outside = false    # ...from an outside organiser too
 # auto_accept_optional = false   # ...where you're optional, or invited through a group, too

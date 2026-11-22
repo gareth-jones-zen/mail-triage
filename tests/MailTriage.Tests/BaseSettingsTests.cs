@@ -59,6 +59,37 @@ public sealed class BaseSettingsTests : IDisposable
     }
 
     [Fact]
+    public void the_shared_calendar_months_ahead_is_used_when_invites_gives_no_window_of_its_own()
+    {
+        dir.Write("shared.toml", "login_hint = \"me@example.com\"\ncalendar_months_ahead = 3\n");
+        var now = new DateTime(2026, 11, 22, 9, 0, 0);
+        var settings = dir.Settings("base = \"shared.toml\"\n\n[invites]\nleave_note = \"Away\"\n", "shared-user.toml");
+        Assert.Equal(3, settings.Invites!.Months);
+        Assert.Equal(92, settings.Invites.Days(now));   // 22 Nov to 22 Feb
+    }
+
+    [Fact]
+    public void the_invites_own_window_wins_over_the_shared_one()
+    {
+        dir.Write("shared.toml", "login_hint = \"me@example.com\"\ncalendar_months_ahead = 3\n");
+        var now = new DateTime(2026, 11, 22, 9, 0, 0);
+        var months = dir.Settings("base = \"shared.toml\"\n\n[invites]\nmonths_ahead = 1\n", "own-months.toml");
+        Assert.Equal(1, months.Invites!.Months);
+        Assert.Equal(30, months.Invites.Days(now));   // 22 Nov to 22 Dec
+        var days = dir.Settings("base = \"shared.toml\"\n\n[invites]\ndays_ahead = 10\n", "own-days.toml");
+        Assert.Null(days.Invites!.Months);
+        Assert.Equal(10, days.Invites.Days(now));
+    }
+
+    [Fact]
+    public void with_no_window_anywhere_invites_look_42_days_ahead()
+    {
+        var settings = dir.Settings("email = \"me@example.com\"\n\n[invites]\nleave_note = \"Away\"\n", "no-window.toml");
+        Assert.Null(settings.Invites!.Months);
+        Assert.Equal(42, settings.Invites.Days(new DateTime(2026, 11, 22, 9, 0, 0)));
+    }
+
+    [Fact]
     public void the_table_guard_still_refuses_a_split_kind_with_a_base()
     {
         var split = "base = \"base-config.toml\"\n" + Folder + "\n[invites]\n" + Folder;

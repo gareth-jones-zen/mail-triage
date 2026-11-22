@@ -61,11 +61,24 @@ public sealed record MovableBlock(string Subject, string? Within = null, string?
 public sealed class Invites
 {
     public const string DefaultLeavePattern = @"^(\w+ )?(holidays?|annual leave|leave|bank holiday)\b";
+    /// <summary>days_ahead: how far ahead to look, in days, when no months are given (default 42).</summary>
     public long DaysAhead { get; set; } = 42;
+
+    /// <summary>Whether [invites] gives days_ahead itself: a tool's own setting wins over the shared
+    /// calendar_months_ahead.</summary>
+    public bool DaysAheadSet { get; set; }
 
     /// <summary>months_ahead (1.11.0): how far ahead invites, days off and double bookings are looked at, in months;
     /// overrides days_ahead.</summary>
     public int? MonthsAhead { get; set; }
+
+    /// <summary>calendar_months_ahead (1.15.0): the shared look-ahead, in months, usually from the base settings file
+    /// (base-config.toml). Used when [invites] gives neither months_ahead nor days_ahead.</summary>
+    public int? CalendarMonthsAhead { get; set; }
+
+    /// <summary>The window in months, if it's given in months: [invites] months_ahead, else (unless [invites] gives
+    /// days_ahead) the shared calendar_months_ahead.</summary>
+    public int? Months => MonthsAhead ?? (DaysAheadSet ? null : CalendarMonthsAhead);
 
     /// <summary>auto_accept (1.11.0): answer an invite with no clash without asking (markers that hold no time too).</summary>
     public bool AutoAccept { get; set; }
@@ -105,7 +118,7 @@ public sealed class Invites
     public bool DoubleBookings { get; set; }
 
     /// <summary>How many days ahead to look, from a moment.</summary>
-    public long Days(DateTime at) => MonthsAhead is { } m
+    public long Days(DateTime at) => Months is { } m
         ? DateOnly.FromDateTime(at).AddMonths(m).DayNumber - DateOnly.FromDateTime(at).DayNumber
         : DaysAhead;
     public List<string> FixedBlocks { get; set; } = [];
@@ -282,6 +295,7 @@ public sealed class Settings
         "double_bookings_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule",
+        "calendar_months_ahead",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -559,6 +573,8 @@ public sealed class Settings
             var invites = new Invites
             {
                 DaysAhead = Toml.Int(section.Get("days_ahead") ?? 42L),
+                DaysAheadSet = section.Get("days_ahead") is not null,
+                CalendarMonthsAhead = raw.Get("calendar_months_ahead") is { } cma ? (int)Toml.Int(cma) : null,
                 MonthsAhead = section.Get("months_ahead") is { } ma ? (int)Toml.Int(ma) : null,
                 AutoAccept = Toml.Truthy(section.Get("auto_accept") ?? false),
                 AutoAcceptOutside = Toml.Truthy(section.Get("auto_accept_outside") ?? false),
@@ -772,7 +788,7 @@ public sealed class Settings
         {
             o["invites"] = new JsonObject
             {
-                ["days_ahead"] = i.DaysAhead, ["months_ahead"] = i.MonthsAhead, ["auto_accept"] = i.AutoAccept,
+                ["days_ahead"] = i.DaysAhead, ["months_ahead"] = i.MonthsAhead, ["calendar_months_ahead"] = i.CalendarMonthsAhead, ["auto_accept"] = i.AutoAccept,
                 ["auto_accept_outside"] = i.AutoAcceptOutside, ["auto_accept_optional"] = i.AutoAcceptOptional, ["auto_move_blocks"] = i.AutoMoveBlocks,
                 ["decline_days_off"] = i.DeclineDaysOff, ["cancel_days_off"] = i.CancelDaysOff,
                 ["remove_blocks_days_off"] = i.RemoveBlocksDaysOff, ["raise_group_days_off"] = i.RaiseGroupDaysOff, ["max_declines"] = i.MaxDeclines, ["double_bookings"] = i.DoubleBookings,

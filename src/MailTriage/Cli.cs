@@ -542,7 +542,7 @@ public static class Cli
         }
         long? daysArg = args.Value("--days") is { } d ? long.Parse(d, System.Globalization.CultureInfo.InvariantCulture) : null;
         var found = OneToOnePlanner.Plan(settings, new Calendar(graph, WriteDoor.Refusing().Calendar), daysAhead: daysArg);
-        var days = daysArg is { } x and not 0 ? x : settings.OneToOnes.DaysAhead is { } y and not 0 ? y : settings.Invites!.DaysAhead;
+        var days = daysArg is { } x and not 0 ? x : settings.OneToOnes.DaysAhead is { } y and not 0 ? y : settings.Invites!.Days(Clock.Now);
         if (found.Count == 0)
         {
             Print(host.Out, $"Nobody's off for any of your 1:1s in the next {days} days.");
