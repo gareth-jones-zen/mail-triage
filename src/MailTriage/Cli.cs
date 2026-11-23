@@ -72,6 +72,9 @@ public static class Cli
                                             meeting, whose join details can't be removed afterwards
             mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
             mail-triage one-to-ones         with [one_to_ones]: what each run would do with your 1:1s and leave (changes nothing)
+            mail-triage sent [--yes]        with [sent]: what it would delete or file in Sent Items (meeting messages you
+                                            sent, rule forwards' copies), and with --yes, do it; the first --yes reads all of
+                                            Sent Items, then each run reads only what's new
             mail-triage days-off [--days N]   each weekday ahead: leave, a half day (which half), a bank holiday or
                                             working, from [leave]
             mail-triage double-bookings     each upcoming double booking, and what the [[double_booking_rule]]s would do
@@ -86,7 +89,7 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
-         "move", "hold", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
+         "move", "hold", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -117,6 +120,7 @@ public static class Cli
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
         ["days-off"] = ([], ["--days"]),
         ["hold"] = (["--yes", "--online"], ["--body", "--body-file", "--location"]),
+        ["sent"] = (["--yes"], []),
     };
 
     internal static Args Parse(string[] argv)
@@ -331,6 +335,8 @@ public static class Cli
                 return DoubleBookingsCommand(settings, graph, host);
             if (args.Command == "days-off")
                 return DaysOffCommand(args, settings, graph, host);
+            if (args.Command == "sent")
+                return SentCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command == "hold")
                 return HoldCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command is "invite" or "move" or "leave")
@@ -405,9 +411,24 @@ public static class Cli
     }
 
     /// <summary>Handlers run only when the run may write: a handler writes outside the write door.</summary>
-    private static RunReport RunWith(Settings settings, IGraph graph, WriteDoor door, bool dryRun, Action<string> log) =>
-        Triage.Run(settings, new Mailbox(graph, door.Mail, dryRun), settings.Invites is null ? null : new Calendar(graph, door.Calendar), dryRun, log,
+    private static RunReport RunWith(Settings settings, IGraph graph, WriteDoor door, bool dryRun, Action<string> log)
+    {
+        var mailbox = new Mailbox(graph, door.Mail, dryRun);
+        var report = Triage.Run(settings, mailbox, settings.Invites is null ? null : new Calendar(graph, door.Calendar), dryRun, log,
             door.Mode == WriteMode.Live && !dryRun ? new Handlers(settings) : null);
+        if (settings.Sent is not null)
+        {
+            try
+            {
+                SentItems.RunScheduled(settings, mailbox, dryRun, log);   // 1.19.0: nothing until the first `sent --yes`
+            }
+            catch (Exception error) when (error is not SignInNeededException)
+            {
+                log($"sent: failed: {error.GetType().Name}: {error.Message}");   // Sent Items never stops the triage run
+            }
+        }
+        return report;
+    }
 
     private static RunReport RunOnce(Settings settings, IGraph graph, Args args, Action<string> log, bool dryRun) =>
         RunWith(settings, graph, Door(args, graph, args.Writes, settings), dryRun, log);
@@ -655,6 +676,35 @@ public static class Cli
         Triage.RecordHeld(settings, subject, start, end, id);
         log($"held  {subject}: {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, no attendees");
         return 0;
+    }
+
+    /// <summary>`mail-triage sent` (1.19.0): what [sent] would do in Sent Items; with --yes, do it. Under the run lock.</summary>
+    private static int SentCommand(Args args, Settings settings, IGraph graph, WriteDoor door, Action<string> log, CliHost host)
+    {
+        if (settings.Sent is null)
+        {
+            Print(host.Err, $"{settings.Path} has no [sent] section, so nothing in Sent Items is touched.");
+            return 2;
+        }
+        using (Locks.Exclusive(Watcher.RunLock(settings), 600, "triage run"))
+        {
+            var mailbox = new Mailbox(graph, door.Mail, !args.Flag("--yes"));
+            var state = StateFiles.LoadObject(settings.SentFile, () => []);
+            var (findings, first, read) = SentItems.Plan(settings, mailbox, state, Clock.Now);
+            if (!args.Flag("--yes"))
+            {
+                foreach (var line in SentItems.Describe(findings, first, read, false))
+                    Print(host.Out, line);
+                Print(host.Out, "Nothing changed. `mail-triage sent --yes` does it" + (first ? ", and from then on each run tidies what's new." : "."));
+                return 0;
+            }
+            SentItems.Apply(settings, mailbox, state, findings, first, log);
+            foreach (var line in SentItems.Describe(findings, first, read, true))
+                Print(host.Out, line);
+            if (door.Mode != WriteMode.Live)
+                Print(host.Out, "(Journalled, not sent: Sent Items is unchanged, and the next run starts from the same place.)");
+            return 0;
+        }
     }
 
     /// <summary>A preview: each weekday from today, what [leave]'s shared rules make of it. It only reads.</summary>

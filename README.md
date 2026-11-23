@@ -271,6 +271,7 @@ mail-triage invite decline 5 --note "Clashes, sorry"   # the instance; --series 
 mail-triage invite accept 6 --move                     # accept, and move the travel to 19:00
 mail-triage move <event id> 2026-11-11T16:00           # move one of your own meetings or blocks by hand
 mail-triage hold 2026-11-25T16:15 17:00 "Hold: ITS"     # a hold in your calendar, no attendees (--yes to create)
+mail-triage sent                                       # with [sent]: what it would tidy in Sent Items (--yes to do it)
 mail-triage leave                                      # meetings in your leave you haven't declined
 mail-triage leave --decline                            # decline them, each with the leave note
 ```
@@ -452,6 +453,46 @@ mail-triage double-bookings      # each upcoming double booking, and what the ru
 - **Keep all the `[[double_booking_rule]]` tables together** (as for every kind of `[[...]]` table): one split by
   another table is refused, rather than silently losing the rules before the break. Settings are checked strictly: an
   unknown key, an unknown group, an `action` other than move or decline, or a `note` on a move is an error.
+
+## Sent Items: tidied by kind, never real mail
+
+With a `[sent]` section (1.19.0), mail-triage tidies **Sent Items** too. It works by Graph's message type, never by
+subject, so only these are ever touched:
+
+| Kind | What it is (Graph's `meetingMessageType`) |
+|---|---|
+| `invites` | meeting requests and updates you sent (`meetingRequest`) |
+| `cancellations` | cancellations you sent (`meetingCancelled`) |
+| `responses` | your accepts, tentatives and declines (`meetingAccepted`, `meetingTenativelyAccepted`, `meetingDeclined`) |
+| forwards | the Sent Items copy of a forward a `forward` rule made, when that rule has `file_sent` |
+
+```toml
+[sent]
+invites = "immediately"        # "off" (the default), "immediately", "after_meeting" or "after_sending"
+cancellations = "immediately"
+responses = "after_sending"
+responses_days = 7             # with after_meeting or after_sending: that many days after the meeting ends, or after you sent it
+# sent_file = "%EA_LOCAL%/mail-triage-sent.json"   (top level: how far it has read, and what waits for its time)
+
+[[rule]]                       # a forward rule: its Sent Items copies are moved (never deleted) beside the originals
+action = "forward"
+to = 'Suppliers/Notices'
+file_sent = 'Suppliers/Notices'
+```
+
+- **A kind left out is off**, so a new `[sent]` does nothing until you choose. Forwards are filed whenever there's a
+  `[sent]` and the rule has `file_sent`.
+- **Never touched:** anything else (real correspondence, other meeting messages), Drafts and the Outbox. **A message
+  with attachments is never deleted**, whatever its kind: it's skipped and listed. Forwards are only ever moved.
+- **Deletes go to Deleted Items** (recoverable). Each delete and move is listed by `mail-triage deleted`, under
+  "Sent Items: <kind>".
+- **`mail-triage sent` previews:** per kind, how many, the oldest and newest, what would be deleted, moved, left waiting
+  or skipped (and why). **`mail-triage sent --yes` does it.** The first `--yes` reads the whole of Sent Items; from
+  then on each run (and the watcher) reads only what was sent since, plus what was waiting for its time. Until that
+  first `--yes`, a run leaves Sent Items alone.
+- `after_meeting` uses the meeting's end time as the message gives it (for a series, its first occurrence).
+- A Sent Items problem is logged and never stops the triage run.
+
 
 ## Holds: a time kept for a meeting you'll send yourself
 

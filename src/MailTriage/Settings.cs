@@ -38,6 +38,10 @@ public sealed class Rule
     public string? Comment { get; init; }
     public bool MarkRead { get; init; }
 
+    /// <summary>forward (1.19.0): where the Sent Items copy of each forward is moved (never deleted), when [sent] is on; usually
+    /// the folder the original is filed to (`to`), so the two sit together.</summary>
+    public string? FileSent { get; init; }
+
     public bool Matches(string sender, string text) =>
         PyRegex.IsMatch(Sender, sender, true) && (Match is null || PyRegex.IsMatch(Match, text, true));
 }
@@ -261,6 +265,13 @@ public sealed class Settings
     /// <summary>Each email a forward rule has sent on, by internet message ID: "sending" before the POST, "sent" once
     /// it's answered, so a forward whose answer was lost is never sent twice (1.9.0).</summary>
     public string ForwardedFile { get; init; } = System.IO.Path.Combine(Local, "forwarded.json");
+
+    /// <summary>[sent]'s progress through Sent Items (1.19.0): how far it has read, what it has seen lately, and what waits for
+    /// its time (a kind set to after_meeting or after_sending).</summary>
+    public string SentFile { get; init; } = System.IO.Path.Combine(Local, "sent.json");
+
+    /// <summary>[sent] (1.19.0): what's tidied from Sent Items; null when there's no [sent], and nothing is touched there.</summary>
+    public SentSettings? Sent { get; set; }
     public string LogFile { get; init; } = System.IO.Path.Combine(Local, "mail-triage.log");
     public string Notify { get; init; } = "new";
     /// <summary>When the watcher triages: [schedule] (background-tools-lib's shared scheduling settings, 1.16.0), a
@@ -332,7 +343,7 @@ public sealed class Settings
         "double_bookings_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule", "leave",
-        "calendar_months_ahead",
+        "calendar_months_ahead", "sent", "sent_file",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -478,6 +489,7 @@ public sealed class Settings
             HandledFile = PathOr("handled_file", System.IO.Path.Combine(Local, "handled.json")),
             DoubleBookingsFile = PathOr("double_bookings_file", System.IO.Path.Combine(Local, "double-bookings.json")),
             ForwardedFile = PathOr("forwarded_file", System.IO.Path.Combine(Local, "forwarded.json")),
+            SentFile = PathOr("sent_file", System.IO.Path.Combine(Local, "sent.json")),
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
             Schedule = schedule,
@@ -556,7 +568,11 @@ public sealed class Settings
                     throw new SettingsException($"Rule {Py.ReprString(name)} in {full} has action forward but no `comment` (the covering message).");
                 if (item.Get("mark_read") is { } mr && mr is not bool)
                     throw new SettingsException($"Rule {Py.ReprString(name)} in {full}: mark_read should be true or false.");
+                if (item.Get("file_sent") is { } fs && !(fs is string folderPath && PyStr.Strip(folderPath).Length > 0))
+                    throw new SettingsException($"Rule {Py.ReprString(name)} in {full}: file_sent should be a folder path, such as 'Inbox/Suppliers'.");
             }
+            if (action != "forward" && item.Get("file_sent") is not null)
+                throw new SettingsException($"Rule {Py.ReprString(name)} in {full}: file_sent is only for action forward (where the Sent Items copy of each forward goes).");
             if (action == "check" && !(item.Get("check") is string c && Checks.All.ContainsKey(c)))
                 throw new SettingsException($"Rule {Py.ReprString(name)} in {full} needs check = one of {string.Join(", ", Checks.All.Keys.Order(PyStr.Order))}.");
             if (action == "handle" && !(item.Get("handler") is string hn && settings.Handlers.ContainsKey(hn)))
@@ -579,6 +595,7 @@ public sealed class Settings
                 ForwardTo = action == "forward" ? Toml.Strings(item.Get("forward_to")) : null,
                 Comment = action == "forward" ? Toml.Str(item.Get("comment")) : null,
                 MarkRead = action == "forward" && (item.Get("mark_read") is not bool read || read),
+                FileSent = action == "forward" && item.Get("file_sent") is string fsPath ? fsPath : null,
             });
         }
 
@@ -596,6 +613,8 @@ public sealed class Settings
 
         var email = Toml.Truthy(raw.Get("email")) ? Toml.Str(raw.Get("email")) : Toml.Truthy(raw.Get("login_hint")) ? Toml.Str(raw.Get("login_hint")) : "";
         settings.Email = email.Length > 0 ? email.ToLowerInvariant() : null;
+        if (raw.Get("sent") is { } sentValue)
+            settings.Sent = SentSettings.Parse(sentValue, full);
         if (raw.Get("invites") is { } invitesValue)
         {
             var section = invitesValue as TomlTable ?? throw new SettingsException($"[invites] in {full} should be a table.");

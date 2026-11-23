@@ -73,6 +73,24 @@ public sealed class Mailbox
         return Graph.Pages($"/me/mailFolders/{folderId}/messages?{Url.Encode(query)}", ReadScopes).ToList();
     }
 
+    /// <summary>What's read of each Sent Items message (1.19.0); Graph adds @odata.type for meeting messages.</summary>
+    public const string SentFields = "id,subject,sentDateTime,hasAttachments,toRecipients,bodyPreview,isRead";
+
+    /// <summary>Sent Items, newest first: all of it, or (since: a UTC time, yyyy-mm-ddTHH:MM:SSZ) what was sent since.</summary>
+    public List<JsonObject> SentMessages(string? since)
+    {
+        var query = new List<(string, string)>();
+        if (since is not null)
+            query.Add(("$filter", $"sentDateTime ge {since}"));
+        query.Add(("$select", SentFields));
+        query.Add(("$orderby", "sentDateTime desc"));
+        query.Add(("$top", "50"));
+        return Graph.Pages($"/me/mailFolders/sentitems/messages?{Url.Encode(query)}", ReadScopes).ToList();
+    }
+
+    /// <summary>One message in full (a meeting message's meetingMessageType, startDateTime and endDateTime included).</summary>
+    public JsonObject Message(string messageId) => Graph.Request($"/me/messages/{messageId}", scopes: ReadScopes);
+
     public string Body(string messageId) =>
         Graph.Request($"/me/messages/{messageId}?$select=body", scopes: ReadScopes).Get("body").Req("content");
 
