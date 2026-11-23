@@ -154,6 +154,9 @@ public sealed class OneToOne(string name, string email, string subject)
     public string Name { get; } = name;
     public string Email { get; set; } = email;
     public string Subject { get; } = subject;
+
+    /// <summary>cancel_if_within_working_days on this [[one_to_one]] (1.27.0); null: [one_to_ones]'.</summary>
+    public long? CancelIfWithinWorkingDays { get; init; }
 }
 
 public sealed class OneToOnes
@@ -180,12 +183,19 @@ public sealed class OneToOnes
     /// <summary>The double-booking settings (1.26.0), off ("ignore") unless set.</summary>
     public DoubleBookedSettings DoubleBooked { get; set; } = new();
 
+    /// <summary>cancel_if_within_working_days (1.27.0): 0, off.</summary>
+    public long CancelIfWithinWorkingDays { get; set; }
+
     /// <summary>The 1:1s' handling, as one group.</summary>
     public LeaveHandling Handling => new()
     {
         Act = Act, CancelDays = CancelDays, WhenShorter = WhenShorter, TheirNote = ReportNote, MyNote = MyNote, BankHolidayNote = BankHolidayNote,
-        DoubleBooked = DoubleBooked,
+        DoubleBooked = DoubleBooked, CancelIfWithinWorkingDays = CancelIfWithinWorkingDays,
     };
+
+    /// <summary>One report's handling: the group's, with its [[one_to_one]]'s cancel_if_within_working_days if it sets one.</summary>
+    public LeaveHandling HandlingFor(OneToOne report) =>
+        report.CancelIfWithinWorkingDays is { } own ? Handling with { CancelIfWithinWorkingDays = own } : Handling;
 }
 
 /// <summary>When the other person is double-booked at a 1:1 or catch-up you organise (1.26.0): something busy or out of
@@ -199,6 +209,12 @@ public sealed record DoubleBookedSettings
     public string Note { get; init; } = "";
     public long Days { get; init; } = 7;
     public long MaxMoves { get; init; } = 2;
+
+    /// <summary>double_booked_cancel_note (1.27.0): the note when a clash move is cancelled instead, as it would land too
+    /// soon after the occurrence before it (cancel_if_within_working_days).</summary>
+    public string CancelNote { get; init; } = DefaultCancelNote;
+
+    public const string DefaultCancelNote = "Cancelling this week as you've got a clash - we'll pick up next week";
 }
 
 /// <summary>A [[catch_up_skip]] (1.26.0): a recurring meeting that would be a catch-up but is left alone. Subject (a
@@ -223,6 +239,13 @@ public sealed record LeaveHandling
     public string MyNote { get; init; } = "Cancelling as I'm on leave";
     public string BankHolidayNote { get; init; } = "Cancelling for the bank holiday";
     public DoubleBookedSettings DoubleBooked { get; init; } = new();
+
+    /// <summary>cancel_if_within_working_days (1.27.0): a move (for leave or a clash) whose new date would be this many
+    /// working days or fewer after the series' occurrence before it cancels the occurrence instead. 0: off.</summary>
+    public long CancelIfWithinWorkingDays { get; init; }
+
+    /// <summary>The most cancel_if_within_working_days can be: two working weeks (and so how far back a plan reads).</summary>
+    public const long MaxWithinWorkingDays = 10;
 }
 
 /// <summary>A [[catch_up]] (1.26.0): one catch-up configured on its own, matched by subject (a pattern, case ignored,
@@ -234,6 +257,7 @@ public sealed class CatchUpEntry
     [
         "subject", "email", "why", "act", "cancel_days", "when_shorter", "note", "my_note", "bank_holiday_note",
         "when_double_booked", "double_booked_note", "double_booked_days", "max_moves_per_occurrence",
+        "cancel_if_within_working_days", "double_booked_cancel_note",
     ];
     public string? Subject { get; init; }
     public string? Email { get; init; }
@@ -251,6 +275,7 @@ public sealed class CatchUps
     [
         "act", "max_actions", "cancel_days", "when_shorter", "days_ahead", "note", "my_note", "bank_holiday_note",
         "when_double_booked", "double_booked_note", "double_booked_days", "max_moves_per_occurrence",
+        "cancel_if_within_working_days", "double_booked_cancel_note",
     ];
     public bool Act { get; set; }
     public long MaxActions { get; set; } = 20;
@@ -263,6 +288,9 @@ public sealed class CatchUps
     public string MyNote { get; set; } = "Cancelling as I'm on leave";
     public string BankHolidayNote { get; set; } = "Cancelling for the bank holiday";
     public DoubleBookedSettings DoubleBooked { get; set; } = new();
+
+    /// <summary>cancel_if_within_working_days (1.27.0): 0, off.</summary>
+    public long CancelIfWithinWorkingDays { get; set; }
     public List<CatchUpSkip> Skip { get; set; } = [];
 
     /// <summary>The [[catch_up]] entries, in order.</summary>
@@ -272,7 +300,7 @@ public sealed class CatchUps
     public LeaveHandling Handling => new()
     {
         Act = Act, CancelDays = CancelDays, WhenShorter = WhenShorter, TheirNote = Note, MyNote = MyNote, BankHolidayNote = BankHolidayNote,
-        DoubleBooked = DoubleBooked,
+        DoubleBooked = DoubleBooked, CancelIfWithinWorkingDays = CancelIfWithinWorkingDays,
     };
 }
 
@@ -879,7 +907,10 @@ public sealed class Settings
                 var name = Toml.Str(item.Get("name"));
                 var subject = Toml.Truthy(item.Get("subject")) ? Toml.Str(item.Get("subject"))
                     : PyFormat.Named(form, new Dictionary<string, string> { ["first"] = PyStr.Split(name)[0], ["name"] = name });
-                reports.Add(new OneToOne(name, Toml.Str(item.Get("email")).ToLowerInvariant(), subject));
+                reports.Add(new OneToOne(name, Toml.Str(item.Get("email")).ToLowerInvariant(), subject)
+                {
+                    CancelIfWithinWorkingDays = ReadWithin(item, $"the [[one_to_one]] for {name}", full),
+                });
             }
             var pattern = section.Get("leave_pattern") is { } lp ? Toml.Str(lp) : OneToOnes.DefaultLeavePattern;
             if (!pattern.Contains("{name}"))
@@ -902,6 +933,7 @@ public sealed class Settings
                 BankHolidayNote = section.Get("bank_holiday_note") is { } bn ? Toml.Str(bn) : "Cancelling for the bank holiday",
                 WhenShorter = WhenShorter(section, "one_to_ones", full),
                 DoubleBooked = ReadDoubleBooked(section, "[one_to_ones]", full, new DoubleBookedSettings()),
+                CancelIfWithinWorkingDays = ReadWithin(section, "[one_to_ones]", full) ?? 0,
             };
         }
         ReadCatchUps(raw, full, settings);
@@ -1012,6 +1044,9 @@ public sealed class Settings
         var note = fallback.Note;
         if (section.Get("double_booked_note") is { } n)
             note = n as string ?? throw new SettingsException($"double_booked_note in {where} in {full} should be text.");
+        var cancelNote = fallback.CancelNote;
+        if (section.Get("double_booked_cancel_note") is { } cn)
+            cancelNote = cn as string ?? throw new SettingsException($"double_booked_cancel_note in {where} in {full} should be text.");
         long Whole(string key, long current, long least)
         {
             if (section.Get(key) is not { } v)
@@ -1021,7 +1056,20 @@ public sealed class Settings
         return new DoubleBookedSettings
         {
             When = when, Note = note, Days = Whole("double_booked_days", fallback.Days, 0), MaxMoves = Whole("max_moves_per_occurrence", fallback.MaxMoves, 0),
+            CancelNote = cancelNote,
         };
+    }
+
+    /// <summary>cancel_if_within_working_days (1.27.0): a whole number from 0 (off) to LeaveHandling.MaxWithinWorkingDays;
+    /// null when not set.</summary>
+    private static long? ReadWithin(TomlTable section, string where, string full)
+    {
+        if (section.Get("cancel_if_within_working_days") is not { } v)
+            return null;
+        return v is long l and >= 0 and <= LeaveHandling.MaxWithinWorkingDays
+            ? l
+            : throw new SettingsException($"cancel_if_within_working_days in {where} in {full} should be a whole number from 0 (off) to "
+                                          + $"{LeaveHandling.MaxWithinWorkingDays} (it's {Toml.Repr(v)}).");
     }
 
     /// <summary>The handling keys of [catch_ups] or a [[catch_up]], each falling back to <paramref name="fallback"/>.</summary>
@@ -1044,6 +1092,7 @@ public sealed class Settings
             MyNote = Note("my_note", fallback.MyNote),
             BankHolidayNote = Note("bank_holiday_note", fallback.BankHolidayNote),
             DoubleBooked = ReadDoubleBooked(section, where, full, fallback.DoubleBooked),
+            CancelIfWithinWorkingDays = ReadWithin(section, where, full) ?? fallback.CancelIfWithinWorkingDays,
         };
     }
 
@@ -1133,6 +1182,7 @@ public sealed class Settings
             MyNote = group.MyNote,
             BankHolidayNote = group.BankHolidayNote,
             DoubleBooked = group.DoubleBooked,
+            CancelIfWithinWorkingDays = group.CancelIfWithinWorkingDays,
             Skip = skipList,
             Entries = entryList,
         };
@@ -1220,7 +1270,10 @@ public sealed class Settings
     {
         JsonArray Strs(IEnumerable<string>? items) => J.Array(items ?? []);
         JsonNode? Opt(string? s) => s is null ? null : JsonValue.Create(s);
-        JsonObject Dumped(DoubleBookedSettings d) => new() { ["when"] = d.When, ["note"] = d.Note, ["days"] = d.Days, ["max_moves"] = d.MaxMoves };
+        JsonObject Dumped(DoubleBookedSettings d) => new()
+        {
+            ["when"] = d.When, ["note"] = d.Note, ["days"] = d.Days, ["max_moves"] = d.MaxMoves, ["cancel_note"] = d.CancelNote,
+        };
         var o = new JsonObject
         {
             ["path"] = Path,
@@ -1275,11 +1328,14 @@ public sealed class Settings
         {
             o["one_to_ones"] = new JsonObject
             {
-                ["reports"] = new JsonArray(t.Reports.Select(r => (JsonNode)new JsonObject { ["name"] = r.Name, ["email"] = r.Email, ["subject"] = r.Subject }).ToArray()),
+                ["reports"] = new JsonArray(t.Reports.Select(r => (JsonNode)new JsonObject
+                {
+                    ["name"] = r.Name, ["email"] = r.Email, ["subject"] = r.Subject, ["cancel_if_within_working_days"] = r.CancelIfWithinWorkingDays,
+                }).ToArray()),
                 ["act"] = t.Act, ["max_actions"] = t.MaxActions, ["cancel_days"] = PyJson.Float(t.CancelDays), ["midday"] = t.Midday,
                 ["days_ahead"] = t.DaysAhead, ["bank_holiday_categories"] = Strs(t.BankHolidayCategories), ["leave_pattern"] = t.LeavePattern,
                 ["report_note"] = t.ReportNote, ["my_note"] = t.MyNote, ["bank_holiday_note"] = t.BankHolidayNote, ["when_shorter"] = t.WhenShorter,
-                ["double_booked"] = Dumped(t.DoubleBooked),
+                ["double_booked"] = Dumped(t.DoubleBooked), ["cancel_if_within_working_days"] = t.CancelIfWithinWorkingDays,
             };
         }
         else
@@ -1291,12 +1347,13 @@ public sealed class Settings
                 ["act"] = c.Act, ["max_actions"] = c.MaxActions, ["cancel_days"] = PyJson.Float(c.CancelDays), ["when_shorter"] = c.WhenShorter,
                 ["days_ahead"] = c.DaysAhead, ["note"] = c.Note, ["my_note"] = c.MyNote, ["bank_holiday_note"] = c.BankHolidayNote,
                 ["skip"] = new JsonArray(c.Skip.Select(s => (JsonNode)new JsonObject { ["subject"] = Opt(s.Subject), ["email"] = Opt(s.Email), ["why"] = s.Why }).ToArray()),
-                ["double_booked"] = Dumped(c.DoubleBooked),
+                ["double_booked"] = Dumped(c.DoubleBooked), ["cancel_if_within_working_days"] = c.CancelIfWithinWorkingDays,
                 ["entries"] = new JsonArray(c.Entries.Select(e => (JsonNode)new JsonObject
                 {
                     ["subject"] = Opt(e.Subject), ["email"] = Opt(e.Email), ["why"] = e.Why, ["act"] = e.Handling.Act,
                     ["cancel_days"] = PyJson.Float(e.Handling.CancelDays), ["when_shorter"] = e.Handling.WhenShorter, ["note"] = e.Handling.TheirNote,
                     ["my_note"] = e.Handling.MyNote, ["bank_holiday_note"] = e.Handling.BankHolidayNote, ["double_booked"] = Dumped(e.Handling.DoubleBooked),
+                    ["cancel_if_within_working_days"] = e.Handling.CancelIfWithinWorkingDays,
                 }).ToArray()),
             };
         }

@@ -661,6 +661,7 @@ mail-triage deleted              # each one cancelled or moved (or, with act = f
 | Nobody's off (a half day counts only if it overlaps the meeting) | Does nothing |
 | Whoever's off is off at least `cancel_days` (3) of that Monday-to-Friday week | Cancels the occurrence, with the note for whoever's off: `report_note`, `my_note`, or `bank_holiday_note` on a bank holiday |
 | Whoever's off is off for less of the week | `when_shorter = "move"` (the default): moves it to the nearest free slot that week: same length, within `working_hours`, on a day neither of you is off, with nothing busy, out of office or tentative in either calendar. **The same time of day on the nearest day** (a Wednesday 11:00 goes to Tuesday or Thursday 11:00); only if that time is free on no day, the slot nearest in time. On a tie, the later. `when_shorter = "ask"` (1.26.0): queues it instead, suggesting that slot |
+| That slot is too soon after the occurrence before it (`cancel_if_within_working_days`, 1.27.0; off unless set) | Cancels it instead, with the same note a cancellation for that leave carries. See [Too soon after the last one](#too-soon-after-the-last-one-1270) |
 | No such slot, or a half day whose half isn't known, or their free/busy can't be read | Queues it, once, with the reason and a suggestion: cancel, or the nearest free slot in the week either side |
 | Nobody's off, but they're double-booked (`when_double_booked`, 1.26.0; off unless set) | See [When they're double-booked](#when-theyre-double-booked-1260) |
 
@@ -693,12 +694,14 @@ act = false                       # true: cancel and move; false: only record wh
 # my_note = "Cancelling as I'm on leave"; bank_holiday_note = "Cancelling for the bank holiday"
 # when_shorter = "move"           # or "ask" (1.26.0)
 # when_double_booked = "ignore"   # or "move", "ask" (1.26.0); with double_booked_note, double_booked_days = 7,
-#                                 # max_moves_per_occurrence = 2
+#                                 # max_moves_per_occurrence = 2, double_booked_cancel_note (1.27.0)
+# cancel_if_within_working_days = 0   # 1.27.0: cancel instead of moving to within this many working days of the last one
 
 [[one_to_one]]
 name = "Sam Jones"                # as in your "Sam Jones annual leave" entries
 email = "sam@example.com"         # must be in the meeting
 # subject = "Weekly 1-2-1 - Sam"  # default: subject_format
+# cancel_if_within_working_days   # 1.27.0: this report's own; default [one_to_ones]'
 ```
 
 ## Your catch-ups, when someone's on leave (1.26.0)
@@ -740,6 +743,8 @@ act = true                        # false: only record what it would do
 # note = "Cancelling as you're on leave - enjoy the time off"   # default: [one_to_ones] report_note
 # my_note, bank_holiday_note      # default: [one_to_ones]'
 # when_double_booked = "ignore"; double_booked_note = ""; double_booked_days = 7; max_moves_per_occurrence = 2
+# double_booked_cancel_note = "Cancelling this week as you've got a clash - we'll pick up next week"   # 1.27.0
+# cancel_if_within_working_days = 0   # 1.27.0; not taken from [one_to_ones]
 
 [[catch_up_skip]]                 # never a catch-up: subject (a pattern) and/or email; both must match if both given
 subject = '^Mentoring'
@@ -756,8 +761,8 @@ double_booked_note = "Moved as you've got a clash"
 A `[[catch_up]]` matches a catch-up by `subject` (a pattern, case ignored, anywhere in the subject) and/or `email` (the
 other person's address); with both, both must match, and the first entry that matches wins. **It takes every setting
 `[catch_ups]` does except `max_actions` and `days_ahead`** (which are per run): `act`, `cancel_days`, `when_shorter`,
-`note`, `my_note`, `bank_holiday_note`, `when_double_booked`, `double_booked_note`, `double_booked_days` and
-`max_moves_per_occurrence`.
+`note`, `my_note`, `bank_holiday_note`, `when_double_booked`, `double_booked_note`, `double_booked_days`,
+`max_moves_per_occurrence`, and (1.27.0) `cancel_if_within_working_days` and `double_booked_cancel_note`.
 
 **Precedence: the entry's own value, then `[catch_ups]`', then (for the notes only) `[one_to_ones]`', then the
 default.** So an entry that sets everything is configured completely separately: changing `[catch_ups]` or
@@ -779,6 +784,31 @@ table above decides.
   suggestion.
 - **At most `max_moves_per_occurrence`** (2) moves of one occurrence for clashes (if its new time clashes too); after
   that it's queued instead.
+- **Too soon after the last one** (`cancel_if_within_working_days`, below): cancelled instead of moved, with
+  `double_booked_cancel_note`.
+
+### Too soon after the last one (1.27.0)
+
+A weekly meeting moved to a day or two after the one before it isn't worth having. With
+`cancel_if_within_working_days = N` (on `[one_to_ones]`, a `[[one_to_one]]`, `[catch_ups]` or a `[[catch_up]]`; 0, off,
+unless set), **any move of an occurrence** (for the other person's leave, your own, or a clash) whose new date would be
+**N working days or fewer after the occurrence before it** cancels the occurrence instead.
+
+- **The occurrence before it** is the latest earlier occurrence of the same series (by Graph's `seriesMasterId`) that
+  isn't cancelled, **where it actually is**: if it was itself moved, its new date. Nothing before it found (the first of
+  the series, a one-off, or nothing in the four weeks before the plan's window): moved as usual.
+- **Working days** are counted after that occurrence's date up to and including the new date: Monday to Friday, less
+  your bank holidays (the `[leave]` rules' bank holidays in your own calendar, as everywhere else). With N = 3, the one
+  before on a Friday: a move to the next Wednesday (3) is cancelled; to the Thursday (4) is moved.
+- **The note** is the one for the reason: `note` (`report_note` for the 1:1s) for their leave, `my_note` for yours,
+  `bank_holiday_note` on a bank holiday, and `double_booked_cancel_note` for a clash (default "Cancelling this week as
+  you've got a clash - we'll pick up next week").
+- **It says why**, in the preview, the log and `mail-triage deleted`: `...; moving it to Thu 19 Nov 10:00 would be
+  2 working days after the last one (Tue 17 Nov), so cancelled instead (cancel_if_within_working_days = 3)`.
+- **Precedence**: a `[[one_to_one]]`'s own value, then `[one_to_ones]`'; a `[[catch_up]]`'s own, then `[catch_ups]`'
+  (`[catch_ups]` doesn't take `[one_to_ones]`'). At most 10. It's the cancellation a run already makes: one write,
+  never resent if its answer is lost. Queued cases (`when_shorter = "ask"`, `when_double_booked = "ask"`, no free slot)
+  aren't affected.
 
 ## The queue file
 

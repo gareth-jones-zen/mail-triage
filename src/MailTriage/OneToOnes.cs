@@ -39,7 +39,9 @@ public sealed class Decision
 /// anything protected. act = false only records what it would do. At most max_actions changes a run.
 /// 1.26.0: when_shorter = "ask" queues the shorter cases instead of moving them; and catch-ups ([catch_ups]: recurring
 /// meetings you organise with one other person in your organisation) are planned the same way, their leave read from
-/// their own calendar (CatchUpRules), with their own settings.</summary>
+/// their own calendar (CatchUpRules), with their own settings.
+/// 1.27.0: cancel_if_within_working_days cancels, rather than moves, an occurrence whose new date would land within that
+/// many working days after the occurrence before it.</summary>
 public static class OneToOnePlanner
 {
     public const string Full = "full", Am = "AM", Pm = "PM", Half = "half";   // Half: a half day, but which half isn't known
@@ -192,7 +194,64 @@ public static class OneToOnePlanner
         Enumerable.Range(0, Weekdays).Select(monday.AddDays).Where(d => !bank.Contains(d) && !mine.ContainsKey(d) && !theirs.ContainsKey(d)).ToList();
 
     private sealed record Context(Settings Settings, OneToOne Report, Dictionary<DateOnly, string> Mine, Dictionary<DateOnly, string> Theirs,
-        HashSet<DateOnly> Bank, List<JsonObject> Events, Schedules Schedules, DateTime Now, CatchUpRules.Diaries Diaries);
+        HashSet<DateOnly> Bank, List<JsonObject> Events, Schedules Schedules, DateTime Now, CatchUpRules.Diaries Diaries, History History);
+
+    /// <summary>A series' earlier occurrences, for cancel_if_within_working_days (1.27.0): the plan's own events and,
+    /// read once and only when first needed, the LookbackDays before them; and your bank holidays across both.</summary>
+    internal sealed class History(Settings settings, ICalendar calendar, List<JsonObject> events, DateOnly first)
+    {
+        /// <summary>Far enough back for the most working days the setting allows, with a Christmas to spare.</summary>
+        public const int LookbackDays = 28;
+
+        private List<JsonObject>? all;
+        private HashSet<DateOnly>? bank;
+
+        private List<JsonObject> All => all ??= calendar.Events(first.AddDays(-LookbackDays), LookbackDays).Concat(events)
+            .DistinctBy(e => e.Str("id") ?? "").ToList();
+
+        public HashSet<DateOnly> Bank => bank ??= BankHolidays(settings, All);
+
+        /// <summary>When the occurrence before this one actually is: the latest of the same series (seriesMasterId),
+        /// not cancelled, starting before this one does, wherever it was moved to. Null: none found (or not a series).</summary>
+        public DateTime? Previous(JsonObject meeting)
+        {
+            if (meeting.Str("seriesMasterId") is not { Length: > 0 } series)
+                return null;
+            var (start, _) = InviteTriage.Times(meeting);
+            var earlier = All.Where(e => e.Str("seriesMasterId") == series && e.Str("id") != meeting.Str("id") && !e.Truthy("isCancelled"))
+                .Select(e => InviteTriage.Times(e).Start).Where(t => t < start).ToList();
+            return earlier.Count > 0 ? earlier.Max() : null;
+        }
+    }
+
+    /// <summary>The working days after one day up to and including another: Monday to Friday, not a bank holiday (your
+    /// [leave] bank holidays). 0 when the second isn't after the first.</summary>
+    public static int WorkingDaysAfter(DateOnly from, DateOnly to, IReadOnlySet<DateOnly> bank)
+    {
+        var count = 0;
+        for (var d = from.AddDays(1); d <= to; d = d.AddDays(1))
+            if (d.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday) && !bank.Contains(d))
+                count++;
+        return count;
+    }
+
+    /// <summary>cancel_if_within_working_days (1.27.0): why a move to <paramref name="to"/> should be a cancellation
+    /// instead, as it would land within that many working days after the occurrence before it; null to move it (off, no
+    /// occurrence before it found, or far enough after it).</summary>
+    private static string? TooSoon(Context x, LeaveHandling g, JsonObject meeting, DateTime to)
+    {
+        if (g.CancelIfWithinWorkingDays <= 0 || x.History.Previous(meeting) is not { } previous)
+            return null;
+        var (from, day) = (DateOnly.FromDateTime(previous), DateOnly.FromDateTime(to));
+        var count = WorkingDaysAfter(from, day, x.History.Bank);
+        if (count > g.CancelIfWithinWorkingDays)
+            return null;
+        var gap = day < from ? "before the last one"
+            : day == from ? "on the same day as the last one"
+            : $"{count} working day{(count == 1 ? "" : "s")} after the last one";
+        return $"moving it to {InviteTriage.Day(to)} would be {gap} ({PyTime.Strftime(from, "%a %d %b")}), so cancelled instead "
+               + $"(cancel_if_within_working_days = {g.CancelIfWithinWorkingDays})";
+    }
 
     /// <summary>The free slot that week for both of you; <paramref name="alsoBusy"/> is time of theirs known to be taken
     /// (a clash), whatever free/busy's week view makes of it.</summary>
@@ -234,12 +293,13 @@ public static class OneToOnePlanner
         var midday = PyTime.TimeFromIso(config.Midday);
         var schedules = new Schedules(calendar);
         var diaries = new CatchUpRules.Diaries(calendar, first, last);
-        var handling = config.Handling;
+        var history = new History(settings, calendar, events, first);
         var output = new List<Decision>();
         foreach (var report in config.Reports)
         {
             var theirs = ReportLeave(settings, report, events);
-            var x = new Context(settings, report, mine, theirs, bank, events, schedules, at, diaries);
+            var x = new Context(settings, report, mine, theirs, bank, events, schedules, at, diaries, history);
+            var handling = config.HandlingFor(report);
             foreach (var meeting in events)
             {
                 var (start, _) = InviteTriage.Times(meeting);
@@ -282,6 +342,7 @@ public static class OneToOnePlanner
         var midday = PyTime.TimeFromIso(settings.OneToOnes?.Midday ?? "13:00");
         var schedules = new Schedules(calendar);
         var diaries = new CatchUpRules.Diaries(calendar, first, last);
+        var history = new History(settings, calendar, events, first);
         var leave = new Dictionary<string, Dictionary<DateOnly, string>?>(StringComparer.Ordinal);
         var unreadable = new List<string>();
         var watched = new List<string>();
@@ -302,7 +363,7 @@ public static class OneToOnePlanner
             if (!watched.Contains(label))
                 watched.Add(label);
             var person = new OneToOne(other.Name, other.Email, meeting.StrOr("subject"));
-            var x = new Context(settings, person, mine, theirs ?? [], bank, events, schedules, at, diaries);
+            var x = new Context(settings, person, mine, theirs ?? [], bank, events, schedules, at, diaries, history);
             if (Decide(x, CatchUpRules.Handling(settings, meeting, other.Email), true, meeting, midday) is { } decision)
                 output.Add(decision);
         }
@@ -347,7 +408,12 @@ public static class OneToOnePlanner
         if (g.WhenShorter == "ask")
             return Make("raise", $"{why}: under {G(g.CancelDays)} days, so yours to decide (when_shorter = \"ask\")",
                 suggest: slot is { } s ? $"move it to {InviteTriage.Day(s.Start)}–{InviteTriage.Hm(s.End)}, or cancel it" : Suggest(x, meeting, monday));
-        return slot is not null ? Make("move", why, to: slot) : Make("raise", $"{why}: {problem}", suggest: Suggest(x, meeting, monday));
+        if (slot is not { } to)
+            return Make("raise", $"{why}: {problem}", suggest: Suggest(x, meeting, monday));
+        // 1.27.0: too soon after the one before it, cancelled instead, with the note for whoever's off
+        if (TooSoon(x, g, meeting, to.Start) is { } soon)
+            return Make("cancel", $"{why}; {soon}", note: bank.Contains(day) ? g.BankHolidayNote : absent.Contains("me") ? g.MyNote : g.TheirNote);
+        return Make("move", why, to: to);
     }
 
     /// <summary>The other person double-booked at the occurrence (when_double_booked, 1.26.0), within double_booked_days of
@@ -365,8 +431,10 @@ public static class OneToOnePlanner
         var monday = Monday(DateOnly.FromDateTime(start));
         var why = $"{x.Report.Name} {clash.Reason}";
         var (slot, problem) = Slot(x, meeting, monday, clash.Busy);
-        if (settings.When == "move" && slot is not null)
-            return make("move", why, settings.Note.Length > 0 ? settings.Note : null, slot, null, true);
+        if (settings.When == "move" && slot is { } to)
+            return TooSoon(x, g, meeting, to.Start) is { } soon
+                ? make("cancel", $"{why}; {soon}", settings.CancelNote, null, null, true)     // 1.27.0
+                : make("move", why, settings.Note.Length > 0 ? settings.Note : null, to, null, true);
         var asked = settings.When == "ask" ? $"{why}: yours to decide (when_double_booked = \"ask\")" : $"{why}: {problem}";
         return make("raise", asked, null, null,
             slot is { } s ? $"move it to {InviteTriage.Day(s.Start)}–{InviteTriage.Hm(s.End)}, or leave it" : Suggest(x, meeting, monday), true);
@@ -517,7 +585,7 @@ public static class OneToOnePlanner
                 });
                 if (unknown is not null)
                     raised[lost] = PyTime.Iso(Clock.Now, "seconds");
-                if (d.DoubleBooked)
+                if (d is { DoubleBooked: true, Action: "move" })
                     raised[movesKey] = moves + 1;
                 rule = $"{mode.Label} {verb}: {cause}";
             }
