@@ -25,6 +25,8 @@ public sealed class CliHost
     public Func<string, ITask> Tasks { get; init; } = Autostart.Create;
     public Action<string, IReadOnlyList<string>> Notify { get; init; } = Toast.Notify;
     public string ProgramDir { get; init; } = AppContext.BaseDirectory;
+    /// <summary>Waits between read-backs (a hold's room answering, 1.23.0); tests pass a no-op.</summary>
+    public Action<TimeSpan> Sleep { get; init; } = Thread.Sleep;
 }
 
 /// <summary>A usage mistake on the command line (argparse's exit 2).</summary>
@@ -66,8 +68,10 @@ public static class Cli
                 --move                          with accept: move each clash you can move to its suggested slot
                 --series                        with decline: the whole series (otherwise only the instances)
             mail-triage move <event id> 2026-11-11T16:00 [16:50]   move one of your own meetings or blocks
-            mail-triage hold 2026-11-25T16:15 17:00 "Hold: ITS in FibreHub" [--body TEXT | --body-file FILE] [--location TEXT]
-                [--online] [--yes]           a hold in your own calendar, never with attendees (you add them and send);
+            mail-triage hold 2026-11-25T16:15 17:00 "Hold: ITS in FibreHub" [--body TEXT | --body-file FILE]
+                [--location TEXT | --room ROOM]
+                [--online] [--yes]           a hold in your own calendar, never inviting people (you add them and send);
+                                            --room books a room from [hold] rooms (its address or name);
                                             without --yes, shows what it would create; --online makes it a Teams
                                             meeting, whose join details can't be removed afterwards
             mail-triage respond <event id> accept|tentative|decline [--note TEXT] [--series] [--yes]
@@ -127,7 +131,7 @@ public static class Cli
         ["leave"] = (["--decline"], ["--days", "--note"]),
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
         ["days-off"] = ([], ["--days"]),
-        ["hold"] = (["--yes", "--online"], ["--body", "--body-file", "--location"]),
+        ["hold"] = (["--yes", "--online"], ["--body", "--body-file", "--location", "--room"]),
         ["respond"] = (["--yes", "--series"], ["--note"]),
         ["cancel"] = (["--yes", "--series"], ["--note"]),
         ["sent"] = (["--yes"], []),
@@ -239,6 +243,8 @@ public static class Cli
                 Count(3, 3, "start, end, subject");
                 if (a.Value("--body") is not null && a.Value("--body-file") is not null)
                     throw new UsageException("argument --body-file: not allowed with argument --body");
+                if (a.Value("--location") is not null && a.Value("--room") is not null)
+                    throw new UsageException("argument --room: not allowed with argument --location (the room is the location)");
                 break;
             case "autostart":
                 Count(1, 1, "action");
@@ -615,8 +621,9 @@ public static class Cli
         return 0;
     }
 
-    /// <summary>A hold in your own calendar (1.18.0), for the find-a-slot skill: never with attendees (there's no way to
-    /// add one), so it notifies nobody; you open it, add the people and send. Without --yes it only shows what it would
+    /// <summary>A hold in your own calendar (1.18.0), for the find-a-slot skill: never inviting people (there's no way to
+    /// add one), so it notifies nobody; you open it, add the people and send. --room (1.23.0) books one room from [hold]
+    /// rooms as a resource attendee, and reports the room's answer. Without --yes it only shows what it would
     /// create. A create that may have reached Microsoft is never retried: it says to check the calendar.</summary>
     private static int HoldCommand(Args args, Settings settings, IGraph graph, WriteDoor door, Action<string> log, CliHost host)
     {
@@ -650,8 +657,23 @@ public static class Cli
         var body = args.Value("--body") ?? (args.Value("--body-file") is { } file ? PyStr.ReadText(file) : "");
         var location = args.Value("--location");
         var online = args.Flag("--online");
-        var what = $"\"{subject}\", {PyTime.Strftime(start, "%a %d %b %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, busy, no attendees"
-                   + (location is { Length: > 0 } ? $", at {location}" : "") + (online ? ", a Teams meeting" : "");
+        HoldRoom? room = null;
+        if (args.Value("--room") is { } wanted)
+        {
+            room = settings.HoldRooms.FirstOrDefault(r => string.Equals(r.Address, wanted.Trim(), StringComparison.OrdinalIgnoreCase)
+                                                          || string.Equals(r.Name, wanted.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (room is null)
+            {
+                Print(host.Err, settings.HoldRooms.Count == 0
+                    ? $"{wanted} isn't a room this hold can book: there's no [hold] rooms in the settings, so a hold books no room."
+                    : $"{wanted} isn't one of [hold] rooms ({string.Join(", ", settings.HoldRooms.Select(r => r.Name))}): a hold books only a "
+                      + "listed room, never a person. Nothing written.");
+                return 2;
+            }
+        }
+        var what = $"\"{subject}\", {PyTime.Strftime(start, "%a %d %b %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, busy, "
+                   + (room is null ? "no attendees" : $"books {room.Name}; no people invited")
+                   + (room is null && location is { Length: > 0 } ? $", at {location}" : "") + (online ? ", a Teams meeting" : "");
         if (!args.Flag("--yes"))
         {
             Print(host.Out, $"Would create in your calendar: {what}.");
@@ -664,7 +686,7 @@ public static class Cli
         JsonObject? created;
         try
         {
-            created = calendar.Hold(subject, start, end, body, location, online);
+            created = calendar.Hold(subject, start, end, body, location, online, room, settings.HoldRooms.Select(r => r.Address).ToList());
         }
         catch (M365Graph.GraphRequestException error) when ((int)error.Status is >= 400 and < 500)
         {
@@ -684,20 +706,49 @@ public static class Cli
             return 0;
         }
         var id = created?.Str("id");
+        string? answer = null;
         if (id is not null)
         {
-            var back = calendar.Event(id);
             Print(host.Out, $"Held: {what}.");
             Print(host.Out, $"  id   {id}");
-            if (back.Str("webLink") is { } link)
-                Print(host.Out, $"  open {link}");
+            try
+            {
+                // The room's mailbox answers on its own, usually within seconds: read back a few times for its answer.
+                // Only reads: the create is never repeated, whatever the room says.
+                var back = calendar.Event(id);
+                for (var read = 1; room is not null && (answer = Holds.RoomAnswer(back, room.Address)) is null && read < RoomReads; read++)
+                {
+                    host.Sleep(RoomWait);
+                    back = calendar.Event(id);
+                }
+                if (back.Str("webLink") is { } link)
+                    Print(host.Out, $"  open {link}");
+            }
+            catch (Exception error) when (error is not WriteRefusedException)
+            {
+                Print(host.Out, $"  (couldn't read it back: {PyStr.Head(error.Message, 120)}; it was created)");
+            }
+            if (room is not null)
+                Print(host.Out, answer switch
+                {
+                    "accepted" => $"  room {room.Name} accepted: it's booked.",
+                    "tentativelyAccepted" => $"  room {room.Name} tentatively accepted: check the hold in Outlook.",
+                    "declined" => $"  room {room.Name} DECLINED (probably already booked at that time): the hold stands, without the room. "
+                                  + "Not retried: pick another room in Outlook, or hold again with another --room after deleting this one.",
+                    _ => $"  room {room.Name} hasn't answered yet: check the hold in Outlook before relying on the room.",
+                });
         }
         else
             Print(host.Out, $"Held: {what} (Microsoft returned no id: check your calendar).");
-        Triage.RecordHeld(settings, subject, start, end, id);
-        log($"held  {subject}: {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, no attendees");
+        Triage.RecordHeld(settings, subject, start, end, id, room?.Name, answer);
+        log($"held  {subject}: {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, "
+            + (room is null ? "no attendees" : $"room {room.Name} ({answer ?? "no answer yet"}), no people invited"));
         return 0;
     }
+
+    /// <summary>How many times a hold with a room is read back for the room's answer, and the wait between reads.</summary>
+    private const int RoomReads = 4;
+    private static readonly TimeSpan RoomWait = TimeSpan.FromSeconds(5);
 
     /// <summary>`mail-triage sent` (1.19.0): what [sent] would do in Sent Items; with --yes, do it. Under the run lock.</summary>
     private static int SentCommand(Args args, Settings settings, IGraph graph, WriteDoor door, Action<string> log, CliHost host)

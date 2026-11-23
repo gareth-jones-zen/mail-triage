@@ -725,8 +725,9 @@ public static class Triage
     }
 
     /// <summary>A hold made by hand (1.18.0), recorded beside what the rules deleted, moved and declined, so the next review
-    /// sees it: `mail-triage deleted` lists it under "Holds".</summary>
-    public static void RecordHeld(Settings settings, string subject, DateTime start, DateTime end, string? eventId)
+    /// sees it: `mail-triage deleted` lists it under "Holds", with its room and the room's answer (1.23.0).</summary>
+    public static void RecordHeld(Settings settings, string subject, DateTime start, DateTime end, string? eventId,
+        string? room = null, string? roomAnswer = null)
     {
         var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
         var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
@@ -734,7 +735,8 @@ public static class Triage
         {
             ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = PyTime.Iso(start), ["from"] = settings.Email,
             ["subject"] = subject, ["rule"] = "Holds",
-            ["did"] = $"held {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, no attendees"
+            ["did"] = $"held {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, "
+                      + (room is null ? "no attendees" : $"room {room} ({roomAnswer ?? "no answer yet"}), no people invited")
                       + (eventId is null ? "" : $" ({eventId})"),
         });
         StateFiles.Save(settings.DeletedFile, record);

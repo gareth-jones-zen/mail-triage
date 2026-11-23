@@ -69,9 +69,11 @@ public sealed class Calendar : ICalendar
 
     public void Remove(string eventId) => writer.Remove(eventId);
 
-    /// <summary>Create a hold (no attendees: Holds.Body), in this calendar's zone. The created event, or null if journalled.</summary>
-    public JsonObject? Hold(string subject, DateTime start, DateTime end, string body = "", string? location = null, bool online = false) =>
-        writer.Hold(Holds.Body(subject, start, end, Timezone, body, location, online));
+    /// <summary>Create a hold (no people: Holds.Body; a room only if it's one of `allowedRooms`), in this calendar's zone. The
+    /// created event, or null if journalled.</summary>
+    public JsonObject? Hold(string subject, DateTime start, DateTime end, string body = "", string? location = null, bool online = false,
+        HoldRoom? room = null, IReadOnlyCollection<string>? allowedRooms = null) =>
+        writer.Hold(Holds.Body(subject, start, end, Timezone, body, location, online, room), allowedRooms);
 
     public List<(DateTime Start, DateTime End, string? Status)>? Schedule(string address, DateTime start, DateTime end)
     {

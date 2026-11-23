@@ -272,6 +272,10 @@ public sealed class Settings
 
     /// <summary>[sent] (1.19.0): what's tidied from Sent Items; null when there's no [sent], and nothing is touched there.</summary>
     public SentSettings? Sent { get; set; }
+
+    /// <summary>[hold] rooms (1.23.0): the meeting rooms `hold --room` may book, the allow-list that is the only way a room
+    /// gets onto a hold. Empty when there's no [hold]: then a hold books no room.</summary>
+    public List<HoldRoom> HoldRooms { get; } = [];
     public string LogFile { get; init; } = System.IO.Path.Combine(Local, "mail-triage.log");
     public string Notify { get; init; } = "new";
     /// <summary>When the watcher triages: [schedule] (background-tools-lib's shared scheduling settings, 1.16.0), a
@@ -343,7 +347,7 @@ public sealed class Settings
         "double_bookings_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule", "leave",
-        "calendar_months_ahead", "sent", "sent_file",
+        "calendar_months_ahead", "sent", "sent_file", "hold",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -422,6 +426,43 @@ public sealed class Settings
                 throw new SettingsException($"{full} has {group.Count()} [[{group.Key}]] tables, but only {read} were read: keep each kind "
                                             + $"together, with no other [[...]] or [...] table between two [[{group.Key}]]s.");
         }
+    }
+
+    /// <summary>[hold] (1.23.0): `rooms`, the meeting rooms `hold --room` may book. Each is `{ name = "MTG Room 3.A.1",
+    /// address = "MTGRoom3.A.1@example.com" }` (the name is what Outlook shows, and the hold's location), or just the
+    /// address (then the name is the address).</summary>
+    private static List<HoldRoom> ParseHoldRooms(object value, string full)
+    {
+        if (value is not TomlTable table)
+            throw new SettingsException($"hold in {full} should be a [hold] table.");
+        foreach (var key in table.Keys)
+            if (key != "rooms")
+                throw new SettingsException($"[hold] in {full}: {Py.ReprString(key)} isn't a setting (it takes rooms).");
+        if (!table.TryGetValue("rooms", out var list))
+            return [];
+        IEnumerable<object?> items = list switch
+        {
+            TomlTableArray tables => tables,
+            TomlArray array => array,
+            _ => throw new SettingsException($"[hold] rooms in {full} should be a list of rooms."),
+        };
+        var rooms = new List<HoldRoom>();
+        foreach (var item in items)
+        {
+            var room = item switch
+            {
+                string address when IsAddress(address) => new HoldRoom(address, address),
+                TomlTable t when t.Keys.All(k => k is "name" or "address") && IsAddress(t.Get("address"))
+                                 && (t.Get("name") is null || t.Get("name") is string { Length: > 0 }) =>
+                    new HoldRoom(t.Get("name") as string ?? (string)t.Get("address")!, (string)t.Get("address")!),
+                _ => throw new SettingsException($"[hold] rooms in {full}: each room is an address, or {{ name = \"...\", address = \"...\" }} "
+                                                 + $"(got {Py.ReprString(item?.ToString() ?? "nothing")})."),
+            };
+            if (rooms.Any(r => string.Equals(r.Address, room.Address, StringComparison.OrdinalIgnoreCase)))
+                throw new SettingsException($"[hold] rooms in {full}: {room.Address} is listed twice.");
+            rooms.Add(room);
+        }
+        return rooms;
     }
 
     private static readonly string[] OldScheduleKeys = ["every_minutes", "hours", "weekdays"];
@@ -615,6 +656,8 @@ public sealed class Settings
         settings.Email = email.Length > 0 ? email.ToLowerInvariant() : null;
         if (raw.Get("sent") is { } sentValue)
             settings.Sent = SentSettings.Parse(sentValue, full);
+        if (raw.Get("hold") is { } holdValue)
+            settings.HoldRooms.AddRange(ParseHoldRooms(holdValue, full));
         if (raw.Get("invites") is { } invitesValue)
         {
             var section = invitesValue as TomlTable ?? throw new SettingsException($"[invites] in {full} should be a table.");

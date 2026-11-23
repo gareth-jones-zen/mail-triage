@@ -35,10 +35,10 @@ public interface ICalendarWriter
     /// one write here that notifies nobody, as you aren't the organiser (callers check).</summary>
     void Remove(string eventId);
 
-    /// <summary>Create a hold in your own calendar (1.18.0): an event with no attendees, so it notifies nobody. The body is
-    /// Holds.Body's, which never has attendees; the writer refuses one that does. Returns the created event (Live), or null
+    /// <summary>Create a hold in your own calendar (1.18.0): an event that invites no people, so it notifies nobody. The body is
+    /// Holds.Body's; the writer refuses any attendee that isn't a resource in `rooms` (1.23.0). Returns the created event (Live), or null
     /// when the write was only journalled.</summary>
-    JsonObject? Hold(JsonObject body);
+    JsonObject? Hold(JsonObject body, IReadOnlyCollection<string>? rooms = null);
 }
 
 /// <summary>How a run may write: Live sends; Journal records what it would send and sends nothing; Refuse throws.
@@ -174,9 +174,9 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
 
     public void Remove(string eventId) => send(new WriteCall("DELETE", $"/me/events/{eventId}", null), CalendarScopes);
 
-    public JsonObject? Hold(JsonObject body)
+    public JsonObject? Hold(JsonObject body, IReadOnlyCollection<string>? rooms = null)
     {
-        Holds.CheckNoAttendees(body);
+        Holds.CheckOnlyRooms(body, rooms);
         return send(new WriteCall("POST", "/me/events", body), CalendarScopes);
     }
 }
