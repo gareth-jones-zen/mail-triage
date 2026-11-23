@@ -16,7 +16,7 @@ mail-triage list
 mail-triage delete 1     # mark read, move to Deleted Items
 mail-triage keep 2       # off the queue, left in the folder
 mail-triage file 2 --to Inbox/Projects   # move it to a folder, left unread
-mail-triage forward 2    # apply the forward rule it matches: forward, mark read, file (1.9.0)
+mail-triage forward 2    # what the forward rule it matches would do; --yes to forward, mark read, file (1.9.0)
 mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule
 mail-triage summary      # one line for a session briefing: what's queued and deleted (--json: the counts)
 ```
@@ -207,7 +207,7 @@ background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync 
 - **File** moves it to the folder in `to` (a path such as `Inbox/Projects`), left unread: for mail you keep but needn't decide on. `deleted` lists what was filed too.
 - **Forward (1.9.0)** sends the email on to `forward_to` with `comment` above it (Outlook's Forward), then marks it read (`mark_read`, on by default) and files it to `to` if given. `deleted` lists each one ("forwarded to …"). It needs **Mail.Send** as well as Mail.ReadWrite.
   - **An email is never forwarded twice.** Its internet message ID is written to `forwarded_file` as "sending" before the forward goes, and as "sent" once Graph answers. If the answer is lost (a 5xx, a timeout or a dropped connection, after which the forward may well have gone), the email is queued saying so, to check Sent Items: it's never resent. If the forward went but marking or filing failed, the next run does only those.
-  - **`mail-triage forward <n>`** applies the rule to emails already in the queue, by number or Graph id (`--rule NAME` to name one): for mail queued before its rule existed. It's recorded and taken off the queue the same way.
+  - **`mail-triage forward <n> [--rule NAME] [--yes]`** applies the rule to emails already in the queue, by number or Graph id (`--rule NAME` to name one): for mail queued before its rule existed. It's recorded and taken off the queue the same way. **Without `--yes` it only shows what it would do** (1.28.0): each email (date, sender, subject), the rule, where it would go and the comment, and **any recipient outside your own domain** (the one in `email`; a subdomain counts as outside), flagged `OUTSIDE`. One whose earlier forward may already have gone is shown as not going again. Nothing is sent and the queue is unchanged. A rule's forward in a run (the watcher) doesn't ask: only this command by hand does.
   - A dry run says what it would do ("would forward to … and file to …"); `--writes journal` records the forward and sends nothing, and doesn't count it as sent.
 - **Check** runs a test on the email and deletes it only if there's nothing to do; otherwise it's queued with what the test found.
   - **And again on every run while it waits (1.9.0).** A check can be asked too soon: a failed build checked while its fixing run was still going sat in the queue saying "still failing" for two days. So each run checks every queued email its `check` rule raised (once a run, by the rule's name). If it passes now, it's deleted and recorded just as a first-time pass would be ("it has passed since: …") and taken off the queue; if not, its reason is brought up to date. A check that errors leaves the email as it was: an error never removes anything.
@@ -271,9 +271,9 @@ mail-triage list
   6. 2026-11-26T17:00  Sam Jones
      Team social: Thu 26 Nov 17:00–19:00
      [invite] ACCEPT AND MOVE: clashes only with things you can move: Travel (travel, Thu 26 Nov 17:00–18:00 -> Thu 26 Nov 19:00–20:00)
-mail-triage invite decline 5 --note "Clashes, sorry"   # the instance; --series for the whole series
-mail-triage invite accept 6 --move                     # accept, and move the travel to 19:00
-mail-triage move <event id> 2026-11-11T16:00           # move one of your own meetings or blocks by hand
+mail-triage invite decline 5 --note "Clashes, sorry"   # the instance; --series for the whole series (--yes to send)
+mail-triage invite accept 6 --move --yes               # accept, and move the travel to 19:00
+mail-triage move <event id> 2026-11-11T16:00 --yes     # move one of your own meetings or blocks by hand (without --yes, a preview)
 mail-triage hold 2026-11-25T16:15 17:00 "Hold: ITS" --room "MTG Room 3.A.2"   # a hold in your calendar, no people; optionally a listed room (--yes to create)
 mail-triage send-invite 2026-12-01T10:00 10:30 "ITS planning" --to sam@example.com,pat@example.com --body-file invite.txt   # send an invitation you've approved (--yes to send)
 mail-triage respond <event id> tentative --note "I'll join after 14:00"   # answer a meeting you already accepted (--yes to send)
@@ -292,7 +292,7 @@ mail-triage leave --decline                            # decline them, each with
 | All-day, or shown as free (a deadline marker, a notice) | Accept: it holds no time, so nothing clashes |
 | No clash | Accept, noting a recurring series, being optional or invited through a group, over 50 people, or an outside organiser |
 
-- **Almost nothing answers on its own.** The recommendation is advice; `invite accept|tentative|decline <n>` answers. Rules that act come one class of invite at a time, once the advice has proved itself. The first:
+- **Almost nothing answers on its own.** The recommendation is advice; `invite accept|tentative|decline <n> --yes` answers (without `--yes`, it shows what it would send: 1.28.0). Rules that act come one class of invite at a time, once the advice has proved itself. The first:
 - **`accept_shortened = true`: a meeting you'd accepted that has only been shortened is accepted without asking.** Changing a meeting's time resets your response, so the update arrives as an unanswered invite. To know you'd accepted it, each run remembers the meetings you've accepted and their times (`accepted_file`, default `%LOCALAPPDATA%\mail-triage\accepted.json`); the first run only remembers. Every remembered occurrence must now sit inside its old slot, with at least one shorter. New occurrences after the last remembered one (a series extended) are fine; anything moved or lengthened, or a new occurrence among the old ones, is raised as usual. Each one accepted is listed by `deleted`, under "Accepted: already accepted, only shortened", so it can be reviewed.
 - **`accept_proposals = true`, with `proposals_folders = ["Inbox"]`: a new time someone proposes for your meeting is accepted if you're free.** When someone declines (or tentatively accepts) one of your meetings and proposes another time, that occurrence moves to it (they get the update) and the proposal is deleted, but only when it's your meeting, they're the only other person in it, the new time is in the future and within `working_hours`, and nothing that holds time (busy, out of office, tentative) is there. Anything else is queued, once, saying why (a clash, others who would move too, outside hours), with the move it would make. Without `accept_proposals`, every proposal is queued with that advice. Each one moved is listed by `deleted`, under "Accepted: new time proposed, and free".
 - **A decline is for the instance, never the series**, unless you add `--series`: declining a series removes every future occurrence. Declining a queued series declines the occurrences the recommendation names (leave or a fixed clash), or else the first one. A series is accepted as a whole; if its recommendation also declines some occurrences, it stays queued until you decline them.
@@ -308,6 +308,19 @@ mail-triage leave --decline                            # decline them, each with
   in a `bank_holiday_categories` category (`[invites]`' own, else `[one_to_ones]`', else "Holiday"), or titled
   "Bank holiday...". Before 1.10.0 invites saw only that title, so an all-day bank holiday entry alone was missed.
 - **`delete` refuses an invite**; answer it instead. **`move` refuses someone else's meeting.**
+- **`invite` and `move` only show what they would do without `--yes`** (1.28.0), like `respond`, `cancel`, `hold` and
+  `send-invite`; nothing is sent, whatever `--writes` says, and the queue is unchanged:
+  - **`mail-triage invite accept|tentative|decline <n...> [--note TEXT] [--silent] [--series] [--move] [--yes]`**: for
+    each invite, the response, which occurrences (declining the instances lists their dates; **`--series` shows as
+    THE WHOLE SERIES**), the note, and whether the organiser gets a response (not with `--silent`, nor where they
+    didn't ask for one). With `--move`, each of your own it would move, old time -> new, and who gets an update. The
+    preview takes no lock, so it never waits for a run; `--yes` answers under the run lock, as before.
+  - **`mail-triage move <event id> START [END] [--yes]`**: the meeting, old time -> new, whether it's one occurrence,
+    and each attendee who gets an update (or that no one else is invited). **A clash at the new time is a warning, not
+    a refusal**: anything in your calendar that holds time (busy, out of office, tentative; your leave too) and you
+    haven't declined. With `--yes` it moves once and, like the rest, never resends a move that may have gone.
+  - What a run does by itself (auto-accepts, moves of your blocks, 1:1s, catch-ups, double bookings, rules that
+    forward) is unchanged: `--yes` is the brake on commands typed by hand.
 - It needs `Calendars.ReadWrite`.
 
 ```toml
@@ -625,9 +638,10 @@ refused with nothing sent. If the send fails, or Microsoft returns no id, the ho
 
 ## Answering and cancelling by hand: `respond` and `cancel` (1.22.0)
 
-Two more calendar writes, so that nothing needs a connector or a one-off script to change the calendar: each works
-like `move` and `hold`. **Without `--yes` they only show what they would do**; with `--yes` they write once, read the
-event back, log it, and list it in `mail-triage deleted` ("Answered by hand", "Cancelled by hand", "Deleted by hand").
+Two more calendar writes, so that nothing needs a connector or a one-off script to change the calendar. **Without
+`--yes` they only show what they would do**, like `hold` and `send-invite` (and, since 1.28.0, `move`, `invite` and
+`forward`); with `--yes` they write once, read the event back, log it, and list it in `mail-triage deleted` ("Answered
+by hand", "Cancelled by hand", "Deleted by hand").
 **A write that may have reached Microsoft is never retried**: if the call fails after it was sent, it says so and asks
 you to check the calendar. **One occurrence by default; `--series` for the whole series** (decline the instance, never
 the series, unless you mean it); a series id without `--series` is refused.

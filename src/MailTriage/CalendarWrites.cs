@@ -20,6 +20,18 @@ public static class CalendarWrites
         _ => "not answered yet",
     };
 
+    /// <summary>An attendee as a preview lists them: "Name &lt;address&gt;", or the address alone.</summary>
+    internal static string Who(JsonObject a) =>
+        a.Get("emailAddress").Str("name") is { Length: > 0 } n ? $"{n} <{InviteTriage.Address(a)}>" : InviteTriage.Address(a);
+
+    /// <summary>"this occurrence only", "the whole series" or "this meeting", for a preview of a write to this event.</summary>
+    internal static string Scope(JsonObject e) => (e.Str("type") ?? "singleInstance") switch
+    {
+        "occurrence" or "exception" => "this occurrence only",
+        "seriesMaster" => "the whole series",
+        _ => "this meeting",
+    };
+
     private static string Verb(string action) => action switch
     {
         "accept" => "accept",
@@ -121,8 +133,6 @@ public static class CalendarWrites
         }
         var owner = (settings.Email ?? "").ToLowerInvariant();
         var others = InviteTriage.People(e).Where(a => InviteTriage.Address(a) != owner).ToList();
-        string Who(JsonObject a) =>
-            a.Get("emailAddress").Str("name") is { Length: > 0 } n ? $"{n} <{InviteTriage.Address(a)}>" : InviteTriage.Address(a);
         var isMeeting = others.Count > 0;
         if (!yes)
         {

@@ -592,24 +592,7 @@ public static class Triage
     /// forward, and taken off the queue. Returns 0, or 1 if any was left queued because an earlier forward's answer was lost.</summary>
     public static int Forward(Settings settings, Mailbox mailbox, IReadOnlyList<string> refs, string? ruleName, Action<string> log)
     {
-        var chosen = Pick(settings, refs);
-        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking" or "own-meeting"))
-            throw new LookupException("A meeting can't be forwarded.");
-        Rule? named = null;
-        if (ruleName is not null)
-            named = settings.Rules.FirstOrDefault(r => r.Name == ruleName)
-                    ?? throw new LookupException($"No rule called {Py.ReprString(ruleName)} in {settings.Path}.");
-        if (named is not null && named.Action != "forward")
-            throw new LookupException($"Rule {Py.ReprString(named.Name)} doesn't forward (its action is {named.Action}).");
-        var plan = new List<(JsonObject Item, JsonObject Message, Rule Rule)>();
-        foreach (var item in chosen)
-        {
-            var message = mailbox.Graph.Request($"/me/messages/{item.Req("id")}?$select={Mailbox.Fields}", scopes: mailbox.ReadScopes);
-            var rule = named ?? settings.RuleFor(Sender(message), $"{message.Fmt("subject")}\n{message.Fmt("bodyPreview")}");
-            if (rule is not { Action: "forward" })
-                throw new LookupException($"No forward rule matches {Py.ReprString(message.Fmt("subject"))}: name one with --rule.");
-            plan.Add((item, message, rule));
-        }
+        var plan = PlanForward(settings, mailbox, refs, ruleName);
         var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
         var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
         var raised = StateFiles.LoadObject(settings.StateFile, () => []);
@@ -645,6 +628,65 @@ public static class Triage
         return notes.Count > 0 ? 1 : 0;
     }
 
+    /// <summary>`forward` without --yes (1.28.0): each email (sender, subject, date), the rule, and who it would go to, with
+    /// any recipient outside your own domain flagged. It only reads (the emails, and the forwarded file); the queue is
+    /// untouched. Refuses what `forward --yes` would refuse, the same way.</summary>
+    public static int PreviewForward(Settings settings, Mailbox mailbox, IReadOnlyList<string> refs, string? ruleName, Action<string> output)
+    {
+        var plan = PlanForward(settings, mailbox, refs, ruleName);
+        var state = StateFiles.LoadObject(settings.ForwardedFile, () => []);
+        var domain = Forwarding.Domain(settings);
+        output($"Would forward {plan.Count} email{(plan.Count == 1 ? "" : "s")}:");
+        var sends = 0;
+        foreach (var (item, message, rule) in plan)
+        {
+            output($"  {(item.Has("n") ? Py.Str(item.Get("n")) : "?")}. {PyStr.Head(message.Fmt("receivedDateTime", "None"), 10)}  {Sender(message)}: "
+                   + message.Fmt("subject"));
+            output($"     rule \"{rule.Name}\": {Forwarding.Describe(rule)}, with the comment \"{rule.Comment}\"");
+            if (state.Get(Key(message)) is JsonObject prior)
+            {
+                output(prior.Str("state") == "sent"
+                    ? $"     Already forwarded ({prior.Fmt("when")}): it wouldn't go again, only be marked read and filed."
+                    : $"     Wouldn't be forwarded: a forward to {string.Join(", ", prior.Get("to").Strings())} may already have gone (started "
+                      + $"{prior.Fmt("when")}, its answer was lost). Check Sent Items. Never forwarded twice.");
+                continue;
+            }
+            sends++;
+            var outside = Forwarding.Outside(rule.ForwardTo ?? [], domain);
+            if (domain is null)
+                output("     (No email in the settings, so recipients outside your domain can't be flagged.)");
+            else if (outside.Count > 0)
+                output($"     OUTSIDE {domain}: {string.Join(", ", outside)}");
+        }
+        output(sends > 0 ? $"Nothing sent. Run again with --yes to forward {(plan.Count == 1 ? "it" : "them")}." : "Nothing sent.");
+        return 0;
+    }
+
+    /// <summary>The emails `forward` would forward, each with its message and rule; throws LookupException for what it
+    /// refuses (a meeting, a rule that isn't a forward, an email no forward rule matches), before anything is sent.</summary>
+    private static List<(JsonObject Item, JsonObject Message, Rule Rule)> PlanForward(Settings settings, Mailbox mailbox, IReadOnlyList<string> refs, string? ruleName)
+    {
+        var chosen = Pick(settings, refs);
+        if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking" or "own-meeting"))
+            throw new LookupException("A meeting can't be forwarded.");
+        Rule? named = null;
+        if (ruleName is not null)
+            named = settings.Rules.FirstOrDefault(r => r.Name == ruleName)
+                    ?? throw new LookupException($"No rule called {Py.ReprString(ruleName)} in {settings.Path}.");
+        if (named is not null && named.Action != "forward")
+            throw new LookupException($"Rule {Py.ReprString(named.Name)} doesn't forward (its action is {named.Action}).");
+        var plan = new List<(JsonObject Item, JsonObject Message, Rule Rule)>();
+        foreach (var item in chosen)
+        {
+            var message = mailbox.Graph.Request($"/me/messages/{item.Req("id")}?$select={Mailbox.Fields}", scopes: mailbox.ReadScopes);
+            var rule = named ?? settings.RuleFor(Sender(message), $"{message.Fmt("subject")}\n{message.Fmt("bodyPreview")}");
+            if (rule is not { Action: "forward" })
+                throw new LookupException($"No forward rule matches {Py.ReprString(message.Fmt("subject"))}: name one with --rule.");
+            plan.Add((item, message, rule));
+        }
+        return plan;
+    }
+
     /// <summary>Answer queued invites (by number): accept, tentative or decline. Accepting a series accepts it whole,
     /// with each unanswered occurrence changed on its own; declining declines instances, never the series, unless
     /// series is true. No response is sent where the organiser didn't ask for one.</summary>
@@ -652,13 +694,50 @@ public static class Triage
         bool send = true, Action<string>? log = null, bool series = false, bool move = false)
     {
         log ??= _ => { };
+        var plan = PlanAnswer(settings, refs, action, note, send, series, move);
+        var keep = new List<string>();
+        foreach (var p in plan)
+        {
+            var item = p.Item;
+            foreach (var target in p.Targets)
+                calendar.Respond(target, action, p.Text, p.Respond);
+            var done = action switch { "accept" => "accepted", "tentative" => "accepted tentatively", "decline" => "declined", _ => throw new KeyNotFoundException(action) };
+            log($"invite {done} ({p.What}){(p.Respond ? "" : " (no response sent)")}  "
+                + $"{item.Fmt("from")}: {item.Fmt("subject")}" + (p.Text.Length > 0 && p.Respond ? $" | note: {p.Text}" : ""));
+            foreach (var c in p.Moves)
+            {
+                var start = PyTime.FromIso(c.Req("to"));
+                var end = PyTime.FromIso(c.Req("to_end"));
+                calendar.Move(c.Req("id"), start, end);
+                var was = c.Req("start");
+                log($"moved  {c.Fmt("subject")}: {was[5..Math.Min(16, was.Length)]} -> {PyTime.Strftime(start, "%a %d %b %H:%M")}–{PyTime.Strftime(end, "%H:%M")}");
+            }
+            if (p.Keep)
+            {
+                keep.Add(item.Req("id"));
+                log($"  still queued: decline {item.Get("decline").Strings().Count} occurrence(s) with `mail-triage invite decline {item.Fmt("n", "None")}`");
+            }
+        }
+        var gone = plan.Select(p => p.Item.Req("id")).Except(keep).ToHashSet(StringComparer.Ordinal);
+        SaveQueue(settings, Queue(settings).Where(i => !gone.Contains(i.Req("id"))).ToList());
+        return plan.Count;
+    }
+
+    /// <summary>What answering one queued invite does: the responses (Targets, each with Text, a response sent to the
+    /// organiser only if Respond), the moves of your own (with --move on an accept), and whether it stays queued.</summary>
+    internal sealed record AnswerPlan(JsonObject Item, bool Respond, List<string> Targets, string Text, string What, List<JsonObject> Moves, bool Keep);
+
+    /// <summary>The writes `invite` makes, worked out once for both the answer and its preview (1.28.0), so the preview
+    /// shows exactly what --yes would do. Throws LookupException for what it refuses, before anything is sent.</summary>
+    internal static List<AnswerPlan> PlanAnswer(Settings settings, IReadOnlyList<string> refs, string action, string note, bool send, bool series, bool move)
+    {
         var chosen = Pick(settings, refs);
         var wrong = chosen.Where(i => TypeOf(i) != "invite").Select(i => i.Fmt("subject")).ToList();
         if (wrong.Count > 0)
             throw new LookupException($"{wrong[0]} isn't an invite.");
         if (series && chosen.Any(i => !i.Truthy("series")))
             throw new LookupException("--series is for a recurring meeting; that one isn't.");
-        var keep = new List<string>();
+        var plan = new List<AnswerPlan>();
         foreach (var item in chosen)
         {
             var respond = send && (!item.Has("responseRequested") || Py.Truthy(item.Get("responseRequested")));
@@ -675,35 +754,85 @@ public static class Triage
                 targets = [item.Truthy("series") ? item.Req("series") : item.Req("occurrence"), .. item.Get("exceptions").Strings()];
                 text = note;
             }
-            foreach (var target in targets)
-                calendar.Respond(target, action, text, respond);
-            var done = action switch { "accept" => "accepted", "tentative" => "accepted tentatively", "decline" => "declined", _ => throw new KeyNotFoundException(action) };
             var what = series || (action != "decline" && item.Truthy("series")) ? "the whole series"
                 : $"{targets.Count} occurrence{(targets.Count > 1 ? "s" : "")}";
-            log($"invite {done} ({what}){(respond ? "" : " (no response sent)")}  "
-                + $"{item.Fmt("from")}: {item.Fmt("subject")}" + (text.Length > 0 && respond ? $" | note: {text}" : ""));
-            if (move && action == "accept")
+            var moves = move && action == "accept" ? item.Get("clashes").Objects().Where(c => c.Truthy("to")).ToList() : [];
+            var keep = action != "decline" && item.Truthy("decline") && (item.Str("recommendation") ?? "").StartsWith("accept, and decline", StringComparison.Ordinal);
+            plan.Add(new AnswerPlan(item, respond, targets, text, what, moves, keep));
+        }
+        return plan;
+    }
+
+    /// <summary>`invite` without --yes (1.28.0): for each invite, the response, which occurrences (a whole-series decline
+    /// stands out), the note, whether the organiser is told, and with --move each of yours it would move and who gets an
+    /// update. It only reads (the queue, and the events it would move or decline); it takes no lock and changes nothing.</summary>
+    public static int PreviewAnswer(Settings settings, ICalendar calendar, IReadOnlyList<string> refs, string action, string note,
+        bool send, bool series, bool move, Action<string> output)
+    {
+        var plan = PlanAnswer(settings, refs, action, note, send, series, move);
+        var owner = (settings.Email ?? "").ToLowerInvariant();
+        var verb = action == "decline" ? "decline" : "accept";
+        var how = action == "tentative" ? " tentatively" : "";
+        string When(string start, string end) => $"{InviteTriage.Day(PyTime.FromIso(start))}–{InviteTriage.Hm(PyTime.FromIso(end))}";
+        JsonObject? Read(string id)
+        {
+            try
             {
-                foreach (var c in item.Get("clashes").Objects())
-                {
-                    if (!c.Truthy("to"))
-                        continue;
-                    var start = PyTime.FromIso(c.Req("to"));
-                    var end = PyTime.FromIso(c.Req("to_end"));
-                    calendar.Move(c.Req("id"), start, end);
-                    var was = c.Req("start");
-                    log($"moved  {c.Fmt("subject")}: {was[5..Math.Min(16, was.Length)]} -> {PyTime.Strftime(start, "%a %d %b %H:%M")}–{PyTime.Strftime(end, "%H:%M")}");
-                }
+                return calendar.Event(id);
             }
-            if (action != "decline" && item.Truthy("decline") && (item.Str("recommendation") ?? "").StartsWith("accept, and decline", StringComparison.Ordinal))
+            catch (Exception error) when (error is not M365Graph.SignInNeededException)
             {
-                keep.Add(item.Req("id"));
-                log($"  still queued: decline {item.Get("decline").Strings().Count} occurrence(s) with `mail-triage invite decline {item.Fmt("n", "None")}`");
+                return null;
             }
         }
-        var gone = chosen.Select(i => i.Req("id")).Except(keep).ToHashSet(StringComparer.Ordinal);
-        SaveQueue(settings, Queue(settings).Where(i => !gone.Contains(i.Req("id"))).ToList());
-        return chosen.Count;
+        foreach (var p in plan)
+        {
+            var item = p.Item;
+            var organiser = item.Fmt("from");
+            output($"  {item.Fmt("n", "?")}. \"{item.Fmt("subject")}\", organised by {organiser}");
+            if (action == "decline" && series)
+                output($"     Would decline THE WHOLE SERIES (--series): every occurrence, not only the clashing ones.");
+            else if (action == "decline" && item.Truthy("series"))
+            {
+                var days = p.Targets.Select(t => Read(t) is { } e ? InviteTriage.Day(InviteTriage.Times(e).Start) : $"(couldn't read {t})");
+                output($"     Would decline {p.Targets.Count} occurrence{(p.Targets.Count == 1 ? "" : "s")}, not the series: {string.Join(", ", days)}.");
+            }
+            else if (action == "decline")
+                output("     Would decline it.");
+            else if (item.Truthy("series"))
+            {
+                var changed = p.Targets.Count - 1;
+                output($"     Would {verb} the whole series{how}" + (changed > 0 ? $", and {changed} occurrence{(changed == 1 ? "" : "s")} changed on {(changed == 1 ? "its" : "their")} own." : "."));
+            }
+            else
+                output($"     Would {verb} it{how}.");
+            if (p.Respond)
+                output($"     {organiser} gets a response" + (p.Text.Length > 0 ? $", with the note \"{p.Text}\"." : ", with no note."));
+            else
+                output((send ? "     No response is sent (the organiser didn't ask for one)" : "     No response is sent (--silent)")
+                       + $": {organiser} isn't told" + (p.Text.Length > 0 ? ", and the note isn't sent." : "."));
+            if (move && action != "accept")
+                output("     --move is only for accept: nothing would move.");
+            else if (move && p.Moves.Count == 0)
+                output("     --move: nothing of yours to move.");
+            else if (p.Moves.Count > 0)
+            {
+                output($"     Would move {p.Moves.Count} of your own:");
+                foreach (var c in p.Moves)
+                {
+                    var e = Read(c.Req("id"));
+                    var others = e is null ? null : InviteTriage.People(e).Where(a => InviteTriage.Address(a) != owner).ToList();
+                    output($"       \"{c.Fmt("subject")}\" {When(c.Req("start"), c.Req("end"))} -> {When(c.Req("to"), c.Req("to_end"))}: "
+                           + (others is null ? "couldn't read who's invited."
+                               : others.Count == 0 ? "no one else is invited, so no one is told."
+                               : $"{(others.Count == 1 ? "1 person gets" : $"{others.Count} people get")} an update: {string.Join(", ", others.Select(CalendarWrites.Who))}."));
+                }
+            }
+            if (p.Keep)
+                output($"     It stays queued, to decline {item.Get("decline").Strings().Count} occurrence(s) with `mail-triage invite decline {item.Fmt("n", "None")}`.");
+        }
+        output("Nothing sent. Run again with --yes to send it.");
+        return 0;
     }
 
     /// <summary>Answer an invite without asking (1.11.0): accept (the series, and any occurrence changed on its own) or

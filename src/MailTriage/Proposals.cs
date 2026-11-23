@@ -20,6 +20,14 @@ public static class Proposals
         return tz.ToUpperInvariant() is "UTC" or "Z" ? new DateTimeOffset(t, TimeSpan.Zero) : PyTime.At(zone, t);
     }
 
+    /// <summary>What in your calendar would clash with a meeting at a new time: anything that holds time (busy, out of
+    /// office, tentative) and you haven't declined, other than the meeting itself. All-day entries count only when asked
+    /// (`move`'s preview, 1.28.0, shows leave; a proposal never has).</summary>
+    internal static List<JsonObject> Clashes(IEnumerable<JsonObject> events, string meetingId, DateTime start, DateTime end, bool allDay = false) =>
+        events.Where(x => x.Str("id") != meetingId && (allDay || !x.Truthy("isAllDay")) && !x.Truthy("isCancelled")
+            && x.Str("showAs") is { } showAs && HoldsTime.Contains(showAs) && x.Get("responseStatus").Str("response") != "declined"
+            && InviteTriage.Times(x).Start < end && InviteTriage.Times(x).End > start).ToList();
+
     /// <summary>(accept?, why, the move) for someone's proposed new time for one of your meetings. Accepted only when
     /// it's your meeting, the proposer is the only other person in it, the new time is in the future and in working
     /// hours, and you're free then.</summary>
@@ -60,9 +68,7 @@ public static class Proposals
         if (start.TimeOfDay < first || (end.TimeOfDay > last && end.Date == start.Date) || end.Date != start.Date)
             return (false, $"{asked}: outside working hours", null);
         var meetingId = meeting.Req("id");
-        var clashes = calendar.Between(newTime.Item1, newTime.Item2).Where(x => x.Str("id") != meetingId && !x.Truthy("isAllDay") && !x.Truthy("isCancelled")
-            && x.Str("showAs") is { } showAs && HoldsTime.Contains(showAs) && x.Get("responseStatus").Str("response") != "declined"
-            && InviteTriage.Times(x).Start < end && InviteTriage.Times(x).End > start).ToList();
+        var clashes = Clashes(calendar.Between(newTime.Item1, newTime.Item2), meetingId, start, end);
         if (clashes.Count > 0)
             return (false, $"{asked}: clashes with {string.Join(", ", clashes.Select(x => x.StrOr("subject") is { Length: > 0 } s ? s : "(no subject)"))}", null);
         return (true, $"{asked}, and you're free", (meetingId, start, end));

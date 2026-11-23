@@ -19,6 +19,15 @@ public static class Forwarding
                + (rule.MarkRead ? " (marked read)" : "");
     }
 
+    /// <summary>Your own domain, from `email` (lower case), or null when the settings have no email.</summary>
+    internal static string? Domain(Settings settings) =>
+        settings.Email is { } email && email.LastIndexOf('@') is var at and >= 0 && at < email.Length - 1 ? email[(at + 1)..].ToLowerInvariant() : null;
+
+    /// <summary>The addresses outside that domain (1.28.0), for the `forward` preview to flag. A subdomain counts as
+    /// outside: only an exact match is yours.</summary>
+    internal static List<string> Outside(IEnumerable<string> addresses, string? domain) =>
+        domain is null ? [] : addresses.Where(a => !a.Trim().EndsWith("@" + domain, StringComparison.OrdinalIgnoreCase)).ToList();
+
     /// <summary>Forward, then mark read, then file (marking goes first because a move gives the email a new id).
     /// Returns null when done, or why it wasn't (an earlier forward's answer was lost), for the queue.</summary>
     public static string? Apply(Settings settings, Mailbox mailbox, string key, string messageId, Rule rule)

@@ -58,16 +58,21 @@ public static class Cli
             mail-triage which <sender> [subject]   which rule an email would meet
             mail-triage handle 3 [--handler NAME]  give a queued email (or any, by Graph id) to its rule's handler, then
                                             do what the handler's `then` says (rules with action = "handle" do this in a run)
-            mail-triage forward 2 3 [--rule NAME]  apply the forward rule they match (or the one named) to queued emails:
-                                            forward, mark read, file, and off the queue (never forwards one twice)
+            mail-triage forward 2 3 [--rule NAME] [--yes]  apply the forward rule they match (or the one named) to queued
+                                            emails: forward, mark read, file, and off the queue (never forwards one twice);
+                                            without --yes, shows each email, its rule and who it would go to
+                                            (recipients outside your domain flagged)
 
             With [invites] in the settings, unanswered meeting invites are queued too, each with a recommendation:
             mail-triage file 4 --to Inbox/Projects   move queued emails to a folder, left unread
-            mail-triage invite accept 3     answer a queued invite: accept, tentative or decline
+            mail-triage invite accept 3 [--yes]   answer a queued invite: accept, tentative or decline; without --yes,
+                                            shows what it would send, to whom, for which occurrences
                 --note "..."                    a note to the organiser; --silent answers without telling them
                 --move                          with accept: move each clash you can move to its suggested slot
                 --series                        with decline: the whole series (otherwise only the instances)
-            mail-triage move <event id> 2026-11-11T16:00 [16:50]   move one of your own meetings or blocks
+            mail-triage move <event id> 2026-11-11T16:00 [16:50] [--yes]
+                                            move one of your own meetings or blocks; without --yes, shows the move,
+                                            who gets an update and anything it would clash with
             mail-triage hold 2026-11-25T16:15 17:00 "Hold: ITS in FibreHub" [--body TEXT | --body-file FILE]
                 [--location TEXT | --room ROOM]
                 [--online] [--yes]           a hold in your own calendar, never inviting people (you add them and send);
@@ -132,10 +137,11 @@ public static class Cli
         ["list"] = (["--json"], []),
         ["deleted"] = (["--all"], []),
         ["summary"] = (["--json"], []),
-        ["invite"] = (["--silent", "--series", "--move"], ["--note"]),
+        ["invite"] = (["--silent", "--series", "--move", "--yes"], ["--note"]),
+        ["move"] = (["--yes"], []),
         ["file"] = ([], ["--to"]),
         ["handle"] = ([], ["--handler"]),
-        ["forward"] = ([], ["--rule"]),
+        ["forward"] = (["--yes"], ["--rule"]),
         ["leave"] = (["--decline"], ["--days", "--note"]),
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
         ["days-off"] = ([], ["--days"]),
@@ -393,8 +399,14 @@ public static class Cli
                     Print(host.Err, $"{settings.Path} has no [invites] section.");
                     return 2;
                 }
-                return CalendarCommand(args, settings, graph, Door(args, graph, args.Writes, settings), log, host);
+                // 1.28.0: invite and move write only with --yes, whatever --writes says; without it they preview through a
+                // door that refuses every write.
+                var preview = args.Command is "invite" or "move" && !args.Flag("--yes");
+                return CalendarCommand(args, settings, graph, preview ? WriteDoor.Refusing() : Door(args, graph, args.Writes, settings), log, host);
             }
+            if (args.Command == "forward" && !args.Flag("--yes"))
+                return Triage.PreviewForward(settings, new Mailbox(graph, WriteDoor.Refusing().Mail), args.Positional, args.Value("--rule"),
+                    line => Print(host.Out, line));   // 1.28.0: reads only, without the run lock
             RunReport report;
             using (Locks.Exclusive(Watcher.RunLock(settings), 600, "triage run"))
             {
@@ -570,6 +582,11 @@ public static class Cli
         var calendar = new Calendar(graph, door.Calendar);
         if (args.Command == "invite")
         {
+            // 1.28.0: without --yes, a preview: it reads the queue (and the events it names) and takes no lock, so it
+            // neither waits for a run nor holds one up.
+            if (!args.Flag("--yes"))
+                return Triage.PreviewAnswer(settings, calendar, args.Positional[1..], args.Positional[0], args.Value("--note") ?? "", !args.Flag("--silent"),
+                    args.Flag("--series"), args.Flag("--move"), line => Print(host.Out, line));
             using (Locks.Exclusive(Watcher.RunLock(settings), 600, "triage run"))
                 Triage.Answer(settings, calendar, args.Positional[1..], args.Positional[0], args.Value("--note") ?? "", !args.Flag("--silent"), log,
                     series: args.Flag("--series"), move: args.Flag("--move"));
@@ -578,21 +595,84 @@ public static class Cli
         if (args.Command == "move")
         {
             var eventId = args.Positional[0];
-            var e = calendar.Event(eventId);
+            JsonObject e;
+            try
+            {
+                e = calendar.Event(eventId);
+            }
+            catch (M365Graph.GraphRequestException error) when ((int)error.Status is 404 or 400)
+            {
+                Print(host.Err, $"No event with that id in your calendar ({(int)error.Status}).");
+                return 2;
+            }
             if (!e.Truthy("isOrganizer"))
             {
                 Print(host.Err, "That's someone else's meeting: it can't be moved, only declined with a proposed time.");
                 return 2;
             }
             var (oldStart, oldEnd) = InviteTriage.Times(e);
-            var start = PyTime.FromIso(args.Positional[1]);
-            var end = args.Positional.Count > 2 ? start.Date + PyTime.TimeFromIso(args.Positional[2]) : start + (oldEnd - oldStart);
+            DateTime start, end;
+            try
+            {
+                start = PyTime.FromIso(args.Positional[1]);
+                end = args.Positional.Count > 2 ? start.Date + PyTime.TimeFromIso(args.Positional[2]) : start + (oldEnd - oldStart);
+            }
+            catch (FormatException)
+            {
+                Print(host.Err, "Start is YYYY-MM-DDTHH:MM and end is HH:MM, in local time.");
+                return 2;
+            }
+            var subject = e.StrOr("subject");
+            var owner = (settings.Email ?? "").ToLowerInvariant();
+            var others = InviteTriage.People(e).Where(a => InviteTriage.Address(a) != owner).ToList();
+            var moving = $"\"{subject}\" ({CalendarWrites.Scope(e)}): {InviteTriage.Day(oldStart)}–{InviteTriage.Hm(oldEnd)} -> "
+                         + $"{InviteTriage.Day(start)}–{InviteTriage.Hm(end)}";
+            if (!args.Flag("--yes"))
+            {
+                Print(host.Out, $"Would move your {(others.Count > 0 ? "meeting" : "block")} {moving}.");
+                if (others.Count > 0)
+                {
+                    Print(host.Out, others.Count == 1 ? "  This person gets an update:" : $"  Each of these {others.Count} people gets an update:");
+                    foreach (var a in others)
+                        Print(host.Out, $"    {CalendarWrites.Who(a)}");
+                }
+                else
+                    Print(host.Out, "  No one else is invited, so no one is told.");
+                try
+                {
+                    var zone = calendar.Zone();
+                    var clashes = Proposals.Clashes(calendar.Between(PyTime.At(zone, start), PyTime.At(zone, end)), eventId, start, end, allDay: true);
+                    if (clashes.Count == 0)
+                        Print(host.Out, "  Nothing else in your calendar then.");
+                    else
+                    {
+                        Print(host.Out, $"  Warning: it would clash with {clashes.Count} thing{(clashes.Count == 1 ? "" : "s")} in your calendar:");
+                        foreach (var c in clashes)
+                        {
+                            var (cs, ce) = InviteTriage.Times(c);
+                            var at = c.Truthy("isAllDay") ? PyTime.Strftime(cs, "%a %d %b") + ", all day" : $"{InviteTriage.Day(cs)}–{InviteTriage.Hm(ce)}";
+                            Print(host.Out, $"    \"{c.StrOr("subject")}\", {at} ({c.Str("showAs")}, {(c.Truthy("isOrganizer") ? "yours" : CalendarWrites.Current(c))})");
+                        }
+                    }
+                }
+                catch (Exception error) when (error is not SignInNeededException)
+                {
+                    Print(host.Out, $"  (Couldn't read your calendar at the new time, so clashes aren't checked: {PyStr.Head(error.Message, 120)})");
+                }
+                Print(host.Out, (others.Count > 0 ? "Nothing sent." : "Nothing changed.") + " Run again with --yes to move it.");
+                return 0;
+            }
             if (Unconfirmed.Try(() => calendar.Move(eventId, start, end)) is { } lost)
             {
                 log($"move may have gone, not resent: {Py.Str(e.Get("subject"))}: {lost}");
                 Print(host.Err, $"Microsoft didn't confirm the move of \"{Py.Str(e.Get("subject"))}\", so it may have gone: check Outlook "
                                 + "before moving it again. It wasn't sent twice.");
                 return 1;
+            }
+            if (door.Mode != WriteMode.Live)
+            {
+                Print(host.Out, $"Journalled, not sent: move {moving}.");
+                return 0;
             }
             log($"moved  {Py.Str(e.Get("subject"))}: {InviteTriage.Day(oldStart)} -> {InviteTriage.Day(start)}–{InviteTriage.Hm(end)}"
                 + (InviteTriage.People(e).Count <= 1 ? "" : " (attendees get an update)"));

@@ -204,12 +204,14 @@ public sealed class ForwardTests : IDisposable
         Assert.Equal(2, code);                                                  // Boss doesn't forward
         Assert.Contains("doesn't forward", output);
         Assert.Equal(2, Cli(graph, "forward", "2").Code);                       // no forward rule matches the boss
+        Assert.Equal(2, Cli(graph, "forward", "2", "--yes").Code);              // refused the same way with --yes
         Assert.Empty(Writes(fake));
 
-        (code, output) = Cli(graph, "forward", "1");
+        (code, output) = Cli(graph, "forward", "1", "--yes");
         Assert.Equal(0, code);
         Assert.Contains("forwarded to team@example.com and filed to Inbox/Triage (marked read) by hand", output);
         Assert.Equal(3, Writes(fake).Count);
+        Assert.Single(Writes(fake), w => w.StartsWith("POST /me/messages/graph-1/forward ", StringComparison.Ordinal));   // forwarded once
         Assert.Equal(["Boss"], Triage.Queue(config).Select(i => i.Req("rule")));
         Assert.Contains("Supplier notices (1)", Cli(graph, "deleted").Out);
         Assert.Contains("-> filed to Inbox/Triage  -> forwarded to team@example.com, marked read", Cli(graph, "deleted").Out);
@@ -225,9 +227,14 @@ public sealed class ForwardTests : IDisposable
     {
         var fake = new FakeGraph([Notice(1)]);
         QueueBeforeTheRuleOne(fake);
-        Assert.Equal(1, Cli(new Graph(fake, failOn: "/forward"), "forward", "1").Code);   // the failure is logged, exit 1
+        Assert.Equal(1, Cli(new Graph(fake, failOn: "/forward"), "forward", "1", "--yes").Code);   // the failure is logged, exit 1
         fake.Calls.Clear();
-        var (code, output) = Cli(new Graph(fake), "forward", "1");
+        var (preview, shown) = Cli(new Graph(fake), "forward", "1");             // the preview says so too
+        Assert.Equal(0, preview);
+        Assert.Contains("Wouldn't be forwarded: a forward to team@example.com may already have gone", shown);
+        Assert.Contains("Nothing sent.", shown);
+        Assert.DoesNotContain("--yes", shown);
+        var (code, output) = Cli(new Graph(fake), "forward", "1", "--yes");
         Assert.Equal(1, code);
         Assert.Contains("may already have gone", output);
         Assert.Empty(Writes(fake));
@@ -239,5 +246,71 @@ public sealed class ForwardTests : IDisposable
         var before = dir.Settings("forwarded_file = \"forwarded.json\"\n" + TriageBase.SettingsText, "before.toml");
         Triage.Run(before, new Mailbox(fake, WriteDoor.Live(fake).Mail), null, false, _ => { });
         fake.Calls.Clear();
+    }
+
+    // ---- 1.28.0: forward previews without --yes -----------------------------------------------------------------
+
+    [Fact]
+    public void forward_without_yes_previews_each_email_and_writes_nothing_even_with_writes_live()
+    {
+        var fake = new FakeGraph([Notice(1), TriageBase.Message(2, "boss@example.com")]);
+        QueueBeforeTheRule(fake);
+        var queued = File.ReadAllText(config.QueueFile);
+        var deleted = File.ReadAllText(config.DeletedFile);
+        var raised = File.ReadAllText(config.StateFile);
+        var (code, output) = Cli(new Graph(fake), "--writes", "live", "forward", "1");
+        Assert.Equal(0, code);
+        Assert.Contains("Would forward 1 email:", output);
+        Assert.Contains("1. 2026-11-10  maintenance@supplier.example: Emergency maintenance", output);
+        Assert.Contains("rule \"Supplier notices\": forward to team@example.com and file to Inbox/Triage (marked read), with the comment \"FYI - for the team.\"", output);
+        Assert.Contains("No email in the settings", output);                   // can't tell who's outside
+        Assert.Contains("Nothing sent. Run again with --yes to forward it.", output);
+        Assert.Empty(Writes(fake));
+        Assert.Equal((queued, deleted, raised), (File.ReadAllText(config.QueueFile), File.ReadAllText(config.DeletedFile), File.ReadAllText(config.StateFile)));   // unchanged
+        Assert.False(File.Exists(config.ForwardedFile));
+    }
+
+    [Fact]
+    public void the_forward_preview_flags_recipients_outside_your_domain()
+    {
+        const string rule = """
+
+            [[rule]]
+            name = "Supplier notices"
+            sender = 'maintenance@supplier\.example$'
+            action = "forward"
+            forward_to = ["team@example.com", "partner@vendor.example", "ops@sub.example.com"]
+            comment = "FYI"
+
+            """;
+        dir.Settings("email = \"alex@example.com\"\n" + WithRule(rule));            // config.toml, now with your address
+        var fake = new FakeGraph([Notice(1)]);
+        QueueBeforeTheRuleOne(fake);
+        var (code, output) = Cli(new Graph(fake), "forward", "1");
+        Assert.Equal(0, code);
+        Assert.Contains("forward to team@example.com, partner@vendor.example, ops@sub.example.com", output);
+        Assert.Contains("OUTSIDE example.com: partner@vendor.example, ops@sub.example.com", output);
+        Assert.DoesNotContain("No email in the settings", output);
+        Assert.Empty(Writes(fake));
+    }
+
+    [Fact]
+    public void a_preview_with_everyone_inside_the_domain_flags_no_one()
+    {
+        dir.Settings("email = \"alex@example.com\"\n" + Text);
+        var fake = new FakeGraph([Notice(1)]);
+        QueueBeforeTheRuleOne(fake);
+        var (_, output) = Cli(new Graph(fake), "forward", "1");
+        Assert.DoesNotContain("OUTSIDE", output);
+    }
+
+    [Fact]
+    public void a_run_still_forwards_by_rule_without_yes()
+    {
+        var fake = new FakeGraph([Notice(1)]);
+        var (code, _) = Cli(new Graph(fake), "run");                              // the watcher's path: unchanged
+        Assert.Equal(0, code);
+        Assert.Single(Writes(fake), w => w.StartsWith("POST /me/messages/graph-1/forward ", StringComparison.Ordinal));
+        Assert.Equal("sent", State().Get("<1@example.com>").Req("state"));
     }
 }
