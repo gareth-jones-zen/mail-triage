@@ -635,7 +635,8 @@ public static class InviteTriage
     }
 
     /// <summary>What you organise on your days off (1.14.0), from now to months_ahead, each occurrence once (done):
-    /// a meeting with one other person cancelled (cancel_days_off; your reports' 1:1s are [one_to_ones]'), your own
+    /// a meeting with one other person cancelled (cancel_days_off; your reports' 1:1s are [one_to_ones]', and with
+    /// [catch_ups] your catch-ups are its), your own
     /// blocks deleted (remove_blocks_days_off), a meeting with more people queued for you (raise_group_days_off).
     /// Your leave and bank holiday entries themselves, all-day and free entries are left alone. Returns (queue items,
     /// what was done, keys still to be seen).</summary>
@@ -660,6 +661,8 @@ public static class InviteTriage
             var (start, end) = Times(m);
             if (start <= at || view.OffAt(start, end) != true)
                 continue;
+            if (CatchUpRules.IsCatchUp(settings, m))
+                continue;   // 1.26.0: a catch-up is [catch_ups]', which cancels or moves it
             var others = People(m).Select(Address).Where(a => a.Length > 0 && a != settings.Email).Distinct().ToList();
             var key = $"own:{m.Req("id")}@{Start16(m)}";
             var bank = bankOnly.Contains(DateOnly.FromDateTime(start));

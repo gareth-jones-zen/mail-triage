@@ -25,8 +25,9 @@ public interface ICalendarWriter
     /// <summary>accept, tentative or decline; a comment only when a response is sent.</summary>
     void Respond(string eventId, string action, string note, bool send);
 
-    /// <summary>A new start and end, as local wall-clock times in the calendar's zone.</summary>
-    void Move(string eventId, DateTime start, DateTime end, string timezone);
+    /// <summary>A new start and end, as local wall-clock times in the calendar's zone; with a body (1.26.0), the occurrence's
+    /// description too, in the same update.</summary>
+    void Move(string eventId, DateTime start, DateTime end, string timezone, JsonObject? body = null);
 
     /// <summary>Cancel one of your meetings (an occurrence's id cancels that one only).</summary>
     void Cancel(string eventId, string comment);
@@ -175,10 +176,13 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
         this.send(new WriteCall("POST", $"/me/events/{eventId}/{verb}", body), CalendarScopes);
     }
 
-    public void Move(string eventId, DateTime start, DateTime end, string timezone)
+    public void Move(string eventId, DateTime start, DateTime end, string timezone, JsonObject? body = null)
     {
         JsonObject When(DateTime t) => new() { ["dateTime"] = PyTime.Strftime(t, "%Y-%m-%dT%H:%M:00"), ["timeZone"] = timezone };
-        send(new WriteCall("PATCH", $"/me/events/{eventId}", new JsonObject { ["start"] = When(start), ["end"] = When(end) }), CalendarScopes);
+        var patch = new JsonObject { ["start"] = When(start), ["end"] = When(end) };
+        if (body is not null)
+            patch["body"] = body;
+        send(new WriteCall("PATCH", $"/me/events/{eventId}", patch), CalendarScopes);
     }
 
     public void Cancel(string eventId, string comment) =>

@@ -90,7 +90,8 @@ public static class Cli
                                             told); a meeting with attendees is cancelled, and each gets a cancellation;
                                             one occurrence unless --series; without --yes, shows what it would do
             mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
-            mail-triage one-to-ones         with [one_to_ones]: what each run would do with your 1:1s and leave (changes nothing)
+            mail-triage one-to-ones         with [one_to_ones] and/or [catch_ups]: what each run would do with your 1:1s and
+                                            catch-ups when someone's on leave (changes nothing); [--days N]
             mail-triage sent [--yes]        with [sent]: what it would delete or file in Sent Items (meeting messages you
                                             sent, rule forwards' copies), and with --yes, do it; the first --yes reads all of
                                             Sent Items, then each run reads only what's new
@@ -630,27 +631,49 @@ public static class Cli
         return 0;
     }
 
-    /// <summary>A preview: it only reads (your calendar, and your reports' free/busy). Writes are refused outright.</summary>
+    /// <summary>A preview: it only reads (your calendar, and the other people's free/busy). Writes are refused outright.
+    /// 1:1s ([one_to_ones]) first, then catch-ups ([catch_ups], 1.26.0), each labelled.</summary>
     private static int OneToOnesCommand(Args args, Settings settings, IGraph graph, CliHost host)
     {
-        if (settings.OneToOnes is null)
+        if (settings.OneToOnes is null && settings.CatchUps is null)
         {
-            Print(host.Err, $"{settings.Path} has no [one_to_ones] section.");
+            Print(host.Err, $"{settings.Path} has no [one_to_ones] or [catch_ups] section.");
             return 2;
         }
         long? daysArg = args.Value("--days") is { } d ? long.Parse(d, System.Globalization.CultureInfo.InvariantCulture) : null;
-        var found = OneToOnePlanner.Plan(settings, new Calendar(graph, WriteDoor.Refusing().Calendar), daysAhead: daysArg);
-        var days = daysArg is { } x and not 0 ? x : settings.OneToOnes.DaysAhead is { } y and not 0 ? y : settings.Invites!.Days(Clock.Now);
-        if (found.Count == 0)
+        var calendar = new Calendar(graph, WriteDoor.Refusing().Calendar);
+        string Mode(bool act, long max) => act ? $"acts on these, up to {max} changes at a time." : "only records these (act = false).";
+        if (settings.OneToOnes is { } one)
         {
-            Print(host.Out, $"Nobody's off for any of your 1:1s in the next {days} days.");
-            return 0;
+            var found = OneToOnePlanner.Plan(settings, calendar, daysAhead: daysArg);
+            var days = daysArg is { } x and not 0 ? x : one.DaysAhead is { } y and not 0 ? y : settings.Invites!.Days(Clock.Now);
+            if (found.Count == 0)
+                Print(host.Out, $"Nobody's off for any of your 1:1s in the next {days} days.");
+            else
+            {
+                foreach (var decision in found)
+                    Print(host.Out, "  " + OneToOnePlanner.Describe(decision));
+                Print(host.Out, $"{found.Count} 1:1(s) in the next {days} days; a run {Mode(one.Act, one.MaxActions)}");
+            }
         }
-        foreach (var decision in found)
-            Print(host.Out, "  " + OneToOnePlanner.Describe(decision));
-        var mode = settings.OneToOnes.Act ? "acts on these" : "only records these (act = false)";
-        Print(host.Out, $"{found.Count} 1:1(s) in the next {days} days; a run {mode}"
-                        + (settings.OneToOnes.Act ? $", up to {settings.OneToOnes.MaxActions} changes at a time." : "."));
+        if (settings.CatchUps is { } catchUps)
+        {
+            var (found, unreadable, watched) = OneToOnePlanner.PlanCatchUps(settings, calendar, daysAhead: daysArg);
+            var days = daysArg is { } x and not 0 ? x : catchUps.DaysAhead is { } y and not 0 ? y
+                : settings.OneToOnes?.DaysAhead is { } z and not 0 ? z : settings.Invites!.Days(Clock.Now);
+            Print(host.Out, watched.Count == 0 ? $"No catch-ups in the next {days} days."
+                : $"Catch-ups in the next {days} days ({watched.Count}): {string.Join("; ", watched)}");
+            foreach (var name in unreadable)
+                Print(host.Err, $"Couldn't read {name}'s calendar (free/busy): their leave isn't known, so only yours counts for those catch-ups.");
+            if (found.Count == 0)
+                Print(host.Out, $"Nobody's off for any of your catch-ups in the next {days} days.");
+            else
+            {
+                foreach (var decision in found)
+                    Print(host.Out, "  " + OneToOnePlanner.Describe(decision));
+                Print(host.Out, $"{found.Count} catch-up(s) in the next {days} days; a run {Mode(catchUps.Act, catchUps.MaxActions)}");
+            }
+        }
         return 0;
     }
 

@@ -4,11 +4,16 @@ using PyCompat;
 
 namespace MailTriage;
 
-/// <summary>One decision about one 1:1 occurrence (one_to_ones.plan): cancel, move or raise.</summary>
+/// <summary>One decision about one 1:1 or catch-up occurrence (one_to_ones.plan): cancel, move or raise.</summary>
 public sealed class Decision
 {
     public required JsonObject Meeting { get; init; }
+
+    /// <summary>The other person: the report, or (a catch-up) whoever the meeting is with.</summary>
     public required OneToOne Report { get; init; }
+
+    /// <summary>A catch-up ([catch_ups], 1.26.0) rather than a 1:1.</summary>
+    public bool CatchUp { get; init; }
     public required DateTime Start { get; init; }
     public required DateTime End { get; init; }
     public required string Action { get; init; }
@@ -16,13 +21,25 @@ public sealed class Decision
     public string? Note { get; init; }
     public (DateTime Start, DateTime End)? To { get; init; }
     public string? Suggest { get; init; }
+
+    /// <summary>Whether a run acts on it (its group's act, or its [[catch_up]]'s), or only records it.</summary>
+    public bool Act { get; init; }
+
+    /// <summary>For a clash (when_double_booked, 1.26.0), not leave.</summary>
+    public bool DoubleBooked { get; init; }
+
+    /// <summary>max_moves_per_occurrence for a clash move.</summary>
+    public long MaxMoves { get; init; } = 2;
 }
 
 /// <summary>Your weekly 1:1s with your reports, cancelled or moved when either of you is on leave (one_to_ones.py).
 /// Nobody off at the meeting's time: nothing (a half day counts only if it overlaps). Someone off for at least
 /// cancel_days of the week: cancelled, with a note. Otherwise moved, unasked, to the same time on the nearest day
 /// you're both free, or the nearest slot in time. No slot: queued once with a suggestion. Never the series, never
-/// anything protected. act = false only records what it would do. At most max_actions changes a run.</summary>
+/// anything protected. act = false only records what it would do. At most max_actions changes a run.
+/// 1.26.0: when_shorter = "ask" queues the shorter cases instead of moving them; and catch-ups ([catch_ups]: recurring
+/// meetings you organise with one other person in your organisation) are planned the same way, their leave read from
+/// their own calendar (CatchUpRules), with their own settings.</summary>
 public static class OneToOnePlanner
 {
     public const string Full = "full", Am = "AM", Pm = "PM", Half = "half";   // Half: a half day, but which half isn't known
@@ -175,9 +192,12 @@ public static class OneToOnePlanner
         Enumerable.Range(0, Weekdays).Select(monday.AddDays).Where(d => !bank.Contains(d) && !mine.ContainsKey(d) && !theirs.ContainsKey(d)).ToList();
 
     private sealed record Context(Settings Settings, OneToOne Report, Dictionary<DateOnly, string> Mine, Dictionary<DateOnly, string> Theirs,
-        HashSet<DateOnly> Bank, List<JsonObject> Events, Schedules Schedules, DateTime Now);
+        HashSet<DateOnly> Bank, List<JsonObject> Events, Schedules Schedules, DateTime Now, CatchUpRules.Diaries Diaries);
 
-    private static ((DateTime Start, DateTime End)? Slot, string? Problem) Slot(Context x, JsonObject meeting, DateOnly monday)
+    /// <summary>The free slot that week for both of you; <paramref name="alsoBusy"/> is time of theirs known to be taken
+    /// (a clash), whatever free/busy's week view makes of it.</summary>
+    private static ((DateTime Start, DateTime End)? Slot, string? Problem) Slot(Context x, JsonObject meeting, DateOnly monday,
+        List<(DateTime Start, DateTime End)>? alsoBusy = null)
     {
         var (start, end) = InviteTriage.Times(meeting);
         var days = FreeDays(monday, x.Mine, x.Theirs, x.Bank);
@@ -186,85 +206,195 @@ public static class OneToOnePlanner
         var theirBusy = x.Schedules.Week(x.Report.Email, monday, (start, end));
         if (theirBusy is null)
             return (null, $"couldn't read {x.Report.Name}'s calendar");
-        var slot = Nearest(x.Settings, start, end - start, days, [.. Busy(x.Events, meeting), .. theirBusy], x.Now);
+        var slot = Nearest(x.Settings, start, end - start, days, [.. Busy(x.Events, meeting), .. theirBusy, .. alsoBusy ?? []], x.Now);
         return (slot, slot is not null ? null : "no time that week when you're both free");
     }
 
     private static string G(double x) => Py.G(x);
 
-    /// <summary>What to do with each 1:1 occurrence someone is off for. Reads only; changes nothing.</summary>
+    /// <summary>The window a plan reads: from this week's Monday to a week past the last day ahead (to suggest).</summary>
+    private static (DateOnly Today, DateOnly First, DateOnly Last) Window(DateTime at, long ahead)
+    {
+        var today = DateOnly.FromDateTime(at);
+        return (today, Monday(today), Monday(today.AddDays((int)ahead)).AddDays(14));
+    }
+
+    /// <summary>What to do with each 1:1 occurrence someone is off for (or, with when_double_booked, double-booked at).
+    /// Reads only; changes nothing.</summary>
     public static List<Decision> Plan(Settings settings, ICalendar calendar, DateTime? now = null, long? daysAhead = null)
     {
         var at = now ?? Clock.Now;
         var config = settings.OneToOnes!;
         // 1.14.0: with no days_ahead of its own, the invites' window (months_ahead, when set), not their days_ahead
         var ahead = daysAhead is { } d and not 0 ? d : config.DaysAhead is { } c and not 0 ? c : settings.Invites!.Days(at);
-        var today = DateOnly.FromDateTime(at);
-        var first = Monday(today);
-        var last = Monday(today.AddDays((int)ahead)).AddDays(14);   // a week either side, to suggest
+        var (today, first, last) = Window(at, ahead);
         var events = calendar.Events(first, last.DayNumber - first.DayNumber);
         var bank = BankHolidays(settings, events);
         var mine = MyLeave(settings, events);
         var midday = PyTime.TimeFromIso(config.Midday);
         var schedules = new Schedules(calendar);
+        var diaries = new CatchUpRules.Diaries(calendar, first, last);
+        var handling = config.Handling;
         var output = new List<Decision>();
         foreach (var report in config.Reports)
         {
             var theirs = ReportLeave(settings, report, events);
-            var x = new Context(settings, report, mine, theirs, bank, events, schedules, at);
+            var x = new Context(settings, report, mine, theirs, bank, events, schedules, at, diaries);
             foreach (var meeting in events)
             {
-                var (start, end) = InviteTriage.Times(meeting);
-                var subject = meeting.StrOr("subject");
-                if (!meeting.Truthy("isOrganizer") || meeting.Truthy("isCancelled") || meeting.Truthy("isAllDay")
-                    || !PyRegex.Get(PyRegex.Escape(report.Subject), true).FullMatch(PyStr.Strip(subject))
-                    || settings.Invites!.Protected.Any(p => PyRegex.IsMatch(p, subject, true))
-                    || !InviteTriage.People(meeting).Select(InviteTriage.Address).Contains(report.Email)
-                    || start <= at || DateOnly.FromDateTime(start) >= today.AddDays((int)ahead))
+                var (start, _) = InviteTriage.Times(meeting);
+                if (!IsOneToOne(settings, report, meeting) || start <= at || DateOnly.FromDateTime(start) >= today.AddDays((int)ahead))
                     continue;
-                var day = DateOnly.FromDateTime(start);
-                var monday = Monday(day);
-                var meHit = Hits(Off(mine, bank, day), start, end, midday);
-                var themHit = Hits(Off(theirs, bank, day), start, end, midday);
-                if (meHit != true && themHit != true)
-                {
-                    if (meHit is null || themHit is null)
-                    {
-                        var who = meHit is null ? "you have" : $"{report.Name} has";
-                        output.Add(new Decision
-                        {
-                            Meeting = meeting, Report = report, Start = start, End = end, Action = "raise",
-                            Why = $"{who} a half day {PyTime.Strftime(day, "%a %d %b")} and which half isn't known",
-                            Suggest = Suggest(x, meeting, monday),
-                        });
-                    }
-                    continue;
-                }
-                var counts = new Dictionary<string, double> { ["me"] = DaysOff(mine, bank, monday), ["them"] = DaysOff(theirs, bank, monday) };
-                var absent = new[] { ("me", meHit), ("them", themHit) }.Where(p => p.Item2 == true).Select(p => p.Item1).ToList();
-                var reason = bank.Contains(day) ? "the bank holiday"
-                    : string.Join("; ", absent.Select(p => p == "me" ? "you're on leave" : $"{report.Name} is on leave"));
-                var week = string.Join(", ", absent.Select(p => $"{(p == "me" ? "you" : PyStr.Split(report.Name)[0])} off {G(counts[p])} of {Weekdays} days that week"));
-                var why = $"{reason} {PyTime.Strftime(day, "%a %d %b")} ({week})";
-                var heavy = absent.Where(p => counts[p] >= config.CancelDays).ToList();
-                if (heavy.Count > 0)
-                {
-                    var note = bank.Contains(day) ? config.BankHolidayNote : heavy.Contains("me") ? config.MyNote : config.ReportNote;
-                    output.Add(new Decision { Meeting = meeting, Report = report, Start = start, End = end, Action = "cancel", Why = why, Note = note });
-                    continue;
-                }
-                var (slot, problem) = Slot(x, meeting, monday);
-                if (slot is not null)
-                    output.Add(new Decision { Meeting = meeting, Report = report, Start = start, End = end, Action = "move", Why = why, To = slot });
-                else
-                    output.Add(new Decision
-                    {
-                        Meeting = meeting, Report = report, Start = start, End = end, Action = "raise", Why = $"{why}: {problem}",
-                        Suggest = Suggest(x, meeting, monday),
-                    });
+                if (Decide(x, handling, false, meeting, midday) is { } decision)
+                    output.Add(decision);
             }
         }
         return output.OrderBy(d => d.Start).ToList();
+    }
+
+    /// <summary>Whether a meeting is your 1:1 with this report: yours, timed, not cancelled, its exact subject, with them in
+    /// it, and not protected.</summary>
+    internal static bool IsOneToOne(Settings settings, OneToOne report, JsonObject meeting)
+    {
+        var subject = meeting.StrOr("subject");
+        return meeting.Truthy("isOrganizer") && !meeting.Truthy("isCancelled") && !meeting.Truthy("isAllDay")
+               && PyRegex.Get(PyRegex.Escape(report.Subject), true).FullMatch(PyStr.Strip(subject))
+               && !settings.Invites!.Protected.Any(p => PyRegex.IsMatch(p, subject, true))
+               && InviteTriage.People(meeting).Select(InviteTriage.Address).Contains(report.Email);
+    }
+
+    /// <summary>What to do with each catch-up occurrence ([catch_ups], 1.26.0) someone is off for or double-booked at, whose
+    /// calendars couldn't be read (their leave isn't known), and the catch-ups found ("subject (name)"). Reads only;
+    /// changes nothing.</summary>
+    public static (List<Decision> Decisions, List<string> Unreadable, List<string> Watched) PlanCatchUps(Settings settings, ICalendar calendar,
+        DateTime? now = null, long? daysAhead = null)
+    {
+        var at = now ?? Clock.Now;
+        var config = settings.CatchUps!;
+        var ahead = daysAhead is { } d and not 0 ? d
+            : config.DaysAhead is { } c and not 0 ? c
+            : settings.OneToOnes?.DaysAhead is { } o and not 0 ? o
+            : settings.Invites!.Days(at);
+        var (today, first, last) = Window(at, ahead);
+        var events = calendar.Events(first, last.DayNumber - first.DayNumber);
+        var bank = BankHolidays(settings, events);
+        var mine = MyLeave(settings, events);
+        var midday = PyTime.TimeFromIso(settings.OneToOnes?.Midday ?? "13:00");
+        var schedules = new Schedules(calendar);
+        var diaries = new CatchUpRules.Diaries(calendar, first, last);
+        var leave = new Dictionary<string, Dictionary<DateOnly, string>?>(StringComparer.Ordinal);
+        var unreadable = new List<string>();
+        var watched = new List<string>();
+        var output = new List<Decision>();
+        foreach (var meeting in events)
+        {
+            var (start, _) = InviteTriage.Times(meeting);
+            if (start <= at || DateOnly.FromDateTime(start) >= today.AddDays((int)ahead) || CatchUpRules.Other(settings, meeting) is not { } other)
+                continue;
+            if (!leave.TryGetValue(other.Email, out var theirs))
+            {
+                theirs = CatchUpRules.TheirLeave(settings, diaries, other.Email, first, last, Leave.Midday(settings));
+                leave[other.Email] = theirs;
+                if (theirs is null)
+                    unreadable.Add(other.Name);
+            }
+            var label = $"{meeting.StrOr("subject")} ({other.Name})";
+            if (!watched.Contains(label))
+                watched.Add(label);
+            var person = new OneToOne(other.Name, other.Email, meeting.StrOr("subject"));
+            var x = new Context(settings, person, mine, theirs ?? [], bank, events, schedules, at, diaries);
+            if (Decide(x, CatchUpRules.Handling(settings, meeting, other.Email), true, meeting, midday) is { } decision)
+                output.Add(decision);
+        }
+        return (output.OrderBy(x => x.Start).ToList(), unreadable, watched);
+    }
+
+    /// <summary>One occurrence: when someone's off at its time, cancel, move or raise; when nobody is, and the other person
+    /// is double-booked (when_double_booked), move or raise; otherwise nothing (null).</summary>
+    private static Decision? Decide(Context x, LeaveHandling g, bool catchUp, JsonObject meeting, TimeSpan midday)
+    {
+        var (start, end) = InviteTriage.Times(meeting);
+        var report = x.Report;
+        var (mine, theirs, bank) = (x.Mine, x.Theirs, x.Bank);
+        var day = DateOnly.FromDateTime(start);
+        var monday = Monday(day);
+        Decision Make(string action, string why, string? note = null, (DateTime, DateTime)? to = null, string? suggest = null, bool clash = false) => new()
+        {
+            Meeting = meeting, Report = report, CatchUp = catchUp, Act = g.Act, Start = start, End = end, Action = action, Why = why, Note = note,
+            To = to, Suggest = suggest, DoubleBooked = clash, MaxMoves = g.DoubleBooked.MaxMoves,
+        };
+        var meHit = Hits(Off(mine, bank, day), start, end, midday);
+        var themHit = Hits(Off(theirs, bank, day), start, end, midday);
+        if (meHit != true && themHit != true)
+        {
+            if (meHit is null || themHit is null)
+            {
+                var who = meHit is null ? "you have" : $"{report.Name} has";
+                return Make("raise", $"{who} a half day {PyTime.Strftime(day, "%a %d %b")} and which half isn't known", suggest: Suggest(x, meeting, monday));
+            }
+            return DoubleBooked(x, g, meeting, Make);
+        }
+        var counts = new Dictionary<string, double> { ["me"] = DaysOff(mine, bank, monday), ["them"] = DaysOff(theirs, bank, monday) };
+        var absent = new[] { ("me", meHit), ("them", themHit) }.Where(p => p.Item2 == true).Select(p => p.Item1).ToList();
+        var reason = bank.Contains(day) ? "the bank holiday"
+            : string.Join("; ", absent.Select(p => p == "me" ? "you're on leave" : $"{report.Name} is on leave"));
+        var week = string.Join(", ", absent.Select(p => $"{(p == "me" ? "you" : PyStr.Split(report.Name)[0])} off {G(counts[p])} of {Weekdays} days that week"));
+        var why = $"{reason} {PyTime.Strftime(day, "%a %d %b")} ({week})";
+        var heavy = absent.Where(p => counts[p] >= g.CancelDays).ToList();
+        if (heavy.Count > 0)
+            return Make("cancel", why, note: bank.Contains(day) ? g.BankHolidayNote : heavy.Contains("me") ? g.MyNote : g.TheirNote);
+        var (slot, problem) = Slot(x, meeting, monday);
+        if (g.WhenShorter == "ask")
+            return Make("raise", $"{why}: under {G(g.CancelDays)} days, so yours to decide (when_shorter = \"ask\")",
+                suggest: slot is { } s ? $"move it to {InviteTriage.Day(s.Start)}–{InviteTriage.Hm(s.End)}, or cancel it" : Suggest(x, meeting, monday));
+        return slot is not null ? Make("move", why, to: slot) : Make("raise", $"{why}: {problem}", suggest: Suggest(x, meeting, monday));
+    }
+
+    /// <summary>The other person double-booked at the occurrence (when_double_booked, 1.26.0), within double_booked_days of
+    /// it: moved as a leave move is (with double_booked_note), or raised ("ask", or no free slot). Null: no clash, or not
+    /// looked for.</summary>
+    private static Decision? DoubleBooked(Context x, LeaveHandling g, JsonObject meeting,
+        Func<string, string, string?, (DateTime, DateTime)?, string?, bool, Decision> make)
+    {
+        var settings = g.DoubleBooked;
+        var (start, _) = InviteTriage.Times(meeting);
+        if (settings.When == "ignore" || (start - x.Now).TotalDays > settings.Days)
+            return null;
+        if (Clash(x, meeting) is not { } clash)
+            return null;
+        var monday = Monday(DateOnly.FromDateTime(start));
+        var why = $"{x.Report.Name} {clash.Reason}";
+        var (slot, problem) = Slot(x, meeting, monday, clash.Busy);
+        if (settings.When == "move" && slot is not null)
+            return make("move", why, settings.Note.Length > 0 ? settings.Note : null, slot, null, true);
+        var asked = settings.When == "ask" ? $"{why}: yours to decide (when_double_booked = \"ask\")" : $"{why}: {problem}";
+        return make("raise", asked, null, null,
+            slot is { } s ? $"move it to {InviteTriage.Day(s.Start)}–{InviteTriage.Hm(s.End)}, or leave it" : Suggest(x, meeting, monday), true);
+    }
+
+    /// <summary>Whether the other person is double-booked at the meeting: they've declined it (where their answer shows),
+    /// or their calendar has something busy or out of office overlapping it besides the meeting itself (tentative and
+    /// free don't count). The reason, and the clashing times. Null: no clash, or their calendar can't be read.</summary>
+    private static (string Reason, List<(DateTime Start, DateTime End)> Busy)? Clash(Context x, JsonObject meeting)
+    {
+        var (start, end) = InviteTriage.Times(meeting);
+        var attendee = InviteTriage.People(meeting).FirstOrDefault(a => InviteTriage.Address(a) == x.Report.Email);
+        if (attendee?.Get("status").Str("response") == "declined")
+            return ("has declined it", []);
+        if (x.Diaries.Of(x.Report.Email) is not { } items)
+            return null;
+        var subject = meeting.StrOr("subject");
+        var over = items.Where(i => i.Start < end && i.End > start && i.Status is "busy" or "oof").ToList();
+        // The meeting itself, in their calendar: the same times, and the same subject where they can be seen
+        var self = over.FirstOrDefault(i => i.Start == start && i.End == end && (i.Subject.Length == 0 || i.Subject == subject));
+        if (self is not null)
+            over.Remove(self);
+        if (over.Count == 0)
+            return null;
+        var first = over.OrderBy(i => i.Start).First();
+        var what = first.Subject.Length > 0 ? $" \"{first.Subject}\"" : "";
+        return ($"is double-booked ({first.Status}{what} {InviteTriage.Hm(first.Start)}–{InviteTriage.Hm(first.End)})",
+                over.Select(i => (i.Start, i.End)).ToList());
     }
 
     /// <summary>For one that can't be settled within the rules: cancel, or the nearest free slot a week either side.</summary>
@@ -284,80 +414,117 @@ public static class OneToOnePlanner
     public static string Describe(Decision d)
     {
         var when = $"{InviteTriage.Day(d.Start)}–{InviteTriage.Hm(d.End)}";
+        var who = d.CatchUp ? $"{d.Report.Name} (catch-up \"{d.Meeting.StrOr("subject")}\")" : d.Report.Name;
         return d.Action switch
         {
-            "cancel" => $"{when}  {d.Report.Name}: CANCEL ({d.Why}) note: \"{d.Note}\"",
-            "move" => $"{when}  {d.Report.Name}: MOVE to {InviteTriage.Day(d.To!.Value.Start)}–{InviteTriage.Hm(d.To.Value.End)} ({d.Why})",
-            _ => $"{when}  {d.Report.Name}: ASK ({d.Why}). Suggest: {d.Suggest}",
+            "cancel" => $"{when}  {who}: CANCEL ({d.Why}) note: \"{d.Note}\"",
+            "move" => $"{when}  {who}: MOVE to {InviteTriage.Day(d.To!.Value.Start)}–{InviteTriage.Hm(d.To.Value.End)} ({d.Why})"
+                      + (d.Note is { Length: > 0 } n ? $" note: \"{n}\"" : ""),
+            _ => $"{when}  {who}: ASK ({d.Why}). Suggest: {d.Suggest}",
         };
     }
 
     private static string Stamp(DateTime t) => t.ToString("yyyy-MM-dd'T'HH:mm", CultureInfo.InvariantCulture);
+
+    /// <summary>How a run treats one group's decisions: its cap, its keys and its words (whether it acts is each
+    /// decision's own, as a [[catch_up]] may say).</summary>
+    private sealed record Mode(long MaxActions, string Key, string Label, string Section);
 
     /// <summary>Act on Plan() (or, with act = false, record what it would do). (queue items, acted, keys seen).</summary>
     public static (List<JsonObject> Items, List<JsonObject> Acted, HashSet<string> Seen) Run(Settings settings, ICalendar calendar, JsonObject raised,
         Action<string> log, bool dryRun = false, DateTime? now = null)
     {
         var config = settings.OneToOnes!;
+        return Apply(Plan(settings, calendar, now), new Mode(config.MaxActions, "one-to-one", "1:1", "one-to-ones"), calendar, raised, log, dryRun);
+    }
+
+    /// <summary>Act on PlanCatchUps() ([catch_ups], 1.26.0), with its own act and max_actions; as Run.</summary>
+    public static (List<JsonObject> Items, List<JsonObject> Acted, HashSet<string> Seen) RunCatchUps(Settings settings, ICalendar calendar,
+        JsonObject raised, Action<string> log, bool dryRun = false, DateTime? now = null)
+    {
+        var config = settings.CatchUps!;
+        var (decisions, _, _) = PlanCatchUps(settings, calendar, now);
+        return Apply(decisions, new Mode(config.MaxActions, "catch-up", "catch-up", "catch-ups"), calendar, raised, log, dryRun);
+    }
+
+    private static (List<JsonObject> Items, List<JsonObject> Acted, HashSet<string> Seen) Apply(List<Decision> decisions, Mode mode, ICalendar calendar,
+        JsonObject raised, Action<string> log, bool dryRun)
+    {
         var items = new List<JsonObject>();
         var acted = new List<JsonObject>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var changes = 0;
-        foreach (var d in Plan(settings, calendar, now))
+        foreach (var planned in decisions)
         {
+            var d = planned;
             var meeting = d.Meeting;
             var subject = $"{Py.Str(meeting.Get("subject"))}: {InviteTriage.Day(d.Start)}–{InviteTriage.Hm(d.End)}";
+            // A clash move counts against max_moves_per_occurrence; past it, it's asked instead
+            var movesKey = $"{mode.Key}-clash-moves:{meeting.Req("id")}";
+            var moves = raised.Get(movesKey) is JsonValue v && v.TryGetValue<long>(out var count) ? count : 0;
+            if (d is { DoubleBooked: true, Action: "move" } && moves >= d.MaxMoves)
+                d = new Decision
+                {
+                    Meeting = meeting, Report = d.Report, CatchUp = d.CatchUp, Act = d.Act, Start = d.Start, End = d.End, Action = "raise",
+                    Why = $"{d.Why}: moved for a clash {moves} time(s) already (max_moves_per_occurrence)", DoubleBooked = true, MaxMoves = d.MaxMoves,
+                    Suggest = $"move it to {InviteTriage.Day(d.To!.Value.Start)}–{InviteTriage.Hm(d.To.Value.End)}, or leave it",
+                };
             if (d.Action == "raise")
             {
-                var k = $"one-to-one:{meeting.Req("id")}@{Stamp(d.Start)}";
+                var k = $"{mode.Key}:{meeting.Req("id")}@{Stamp(d.Start)}";
                 seen.Add(k);
                 if (!raised.ContainsKey(k))
                 {
+                    // A catch-up's item is a "one-to-one" too: a meeting of yours with one person, changed in Outlook, then kept.
                     items.Add(new JsonObject
                     {
                         ["folder"] = "Calendar", ["type"] = "one-to-one", ["id"] = meeting.Req("id"), ["key"] = k,
                         ["received"] = PyTime.Iso(d.Start, "minutes"), ["from"] = d.Report.Name, ["subject"] = subject, ["preview"] = "",
-                        ["rule"] = "1:1 and leave", ["check"] = $"DECIDE: {d.Why}. Suggest: {d.Suggest}", ["webLink"] = meeting.Get("webLink").Copy(),
+                        ["rule"] = $"{mode.Label} and {(d.DoubleBooked ? "a clash" : "leave")}", ["check"] = $"DECIDE: {d.Why}. Suggest: {d.Suggest}",
+                        ["webLink"] = meeting.Get("webLink").Copy(),
                     });
                     raised[k] = PyTime.Iso(Clock.Now, "seconds");
-                    log($"{(dryRun ? "would queue" : "queued")}  [1:1 and leave] {Describe(d)}");
+                    log($"{(dryRun ? "would queue" : "queued")}  [{mode.Label} and {(d.DoubleBooked ? "a clash" : "leave")}] {Describe(d)}");
                 }
                 continue;
             }
+            var cause = d.DoubleBooked ? "double-booked" : "leave";
             var did = d.Action == "cancel" ? $"{d.Why}; note: \"{d.Note}\""
-                : $"{d.Why}; moved to {InviteTriage.Day(d.To!.Value.Start)}–{InviteTriage.Hm(d.To.Value.End)}";
-            var would = $"one-to-one-would:{meeting.Req("id")}@{Stamp(d.Start)}:{d.Action}" + (d.Action == "move" ? $"@{Stamp(d.To!.Value.Start)}" : "");
-            if (!config.Act && raised.ContainsKey(would))
+                : $"{d.Why}; moved to {InviteTriage.Day(d.To!.Value.Start)}–{InviteTriage.Hm(d.To.Value.End)}" + (d.Note is { Length: > 0 } n ? $"; note: \"{n}\"" : "");
+            var would = $"{mode.Key}-would:{meeting.Req("id")}@{Stamp(d.Start)}:{d.Action}" + (d.Action == "move" ? $"@{Stamp(d.To!.Value.Start)}" : "");
+            if (!d.Act && raised.ContainsKey(would))
                 continue;   // already recorded as a would-do
-            var lost = $"one-to-one-unconfirmed:{meeting.Req("id")}@{Stamp(d.Start)}";
+            var lost = $"{mode.Key}-unconfirmed:{meeting.Req("id")}@{Stamp(d.Start)}";
             if (raised.ContainsKey(lost))
                 continue;   // a change whose answer was lost: it may have gone, so it's never made again
-            if (changes >= config.MaxActions)
+            if (changes >= mode.MaxActions)
             {
-                log($"one-to-ones: max_actions ({config.MaxActions}) reached; the rest wait for the next run");
+                log($"{mode.Section}: max_actions ({mode.MaxActions}) reached; the rest wait for the next run");
                 break;
             }
             changes++;
             var verb = d.Action == "cancel" ? "cancelled" : "moved";
             string rule;
             string? unknown = null;
-            if (config.Act && !dryRun)
+            if (d.Act && !dryRun)
             {
                 unknown = Unconfirmed.Try(() =>
                 {
                     if (d.Action == "cancel")
                         calendar.Cancel(meeting.Req("id"), d.Note!);     // the occurrence: the series is untouched
                     else
-                        calendar.Move(meeting.Req("id"), d.To!.Value.Start, d.To.Value.End);
+                        calendar.Move(meeting.Req("id"), d.To!.Value.Start, d.To.Value.End, d.Note ?? "");
                 });
                 if (unknown is not null)
                     raised[lost] = PyTime.Iso(Clock.Now, "seconds");
-                rule = $"1:1 {verb}: leave";
+                if (d.DoubleBooked)
+                    raised[movesKey] = moves + 1;
+                rule = $"{mode.Label} {verb}: {cause}";
             }
             else
             {
-                rule = !config.Act ? $"1:1 would be {verb}: leave (act = false)" : $"1:1 {verb}: leave";
-                if (!config.Act && !dryRun)
+                rule = !d.Act ? $"{mode.Label} would be {verb}: {cause} (act = false)" : $"{mode.Label} {verb}: {cause}";
+                if (!d.Act && !dryRun)
                     raised[would] = PyTime.Iso(Clock.Now, "seconds");
             }
             var entry = new JsonObject
@@ -367,8 +534,8 @@ public static class OneToOnePlanner
             if (unknown is not null)
                 Unconfirmed.Mark(entry, unknown, rule);
             acted.Add(entry);
-            log(unknown is not null ? $"{verb} may have gone, not resent  [1:1 and leave] {Describe(d)}: {unknown}"
-                : $"{(dryRun || !config.Act ? "would be " + verb : verb)}  [1:1 and leave] {Describe(d)}");
+            log(unknown is not null ? $"{verb} may have gone, not resent  [{mode.Label} and {cause}] {Describe(d)}: {unknown}"
+                : $"{(dryRun || !d.Act ? "would be " + verb : verb)}  [{mode.Label} and {cause}] {Describe(d)}");
         }
         return (items, acted, seen);
     }

@@ -355,9 +355,15 @@ public static class Triage
             seen.UnionWith(pendingKeys);   // an invite answered elsewhere (in Outlook) drops off the queue
             added.AddRange(inviteItems);
             invitesNew = inviteItems.Count;
+            // 1:1s, then (1.26.0) catch-ups: each with its own act and max_actions
+            var leaveRuns = new List<Func<(List<JsonObject>, List<JsonObject>, HashSet<string>)>>();
             if (settings.OneToOnes is not null)
+                leaveRuns.Add(() => OneToOnePlanner.Run(settings, cal, raised, log, dryRun));
+            if (settings.CatchUps is not null)
+                leaveRuns.Add(() => OneToOnePlanner.RunCatchUps(settings, cal, raised, log, dryRun));
+            foreach (var leaveRun in leaveRuns)
             {
-                var (oItems, oActed, oSeen) = OneToOnePlanner.Run(settings, cal, raised, log, dryRun);
+                var (oItems, oActed, oSeen) = leaveRun();
                 added.AddRange(oItems);
                 seen.UnionWith(oSeen);
                 foreach (var a in oActed)

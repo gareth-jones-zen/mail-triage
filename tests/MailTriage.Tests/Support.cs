@@ -97,9 +97,14 @@ public class FakeCalendar(List<JsonObject> items, Dictionary<string, List<(DateT
         MaybeLost(eventId, action);
     }
 
-    public void Move(string eventId, DateTime start, DateTime end)
+    /// <summary>The note each move carried (1.26.0), by event id.</summary>
+    public Dictionary<string, string> MoveNotes { get; } = [];
+
+    public void Move(string eventId, DateTime start, DateTime end, string note = "")
     {
         Moves.Add((eventId, start, end));
+        if (note.Length > 0)
+            MoveNotes[eventId] = note;
         MaybeLost(eventId, "move");
     }
 
@@ -119,6 +124,21 @@ public class FakeCalendar(List<JsonObject> items, Dictionary<string, List<(DateT
         if (address == "unreadable@example.com")
             return null;
         return Busy.GetValueOrDefault(address, []).Where(b => b.Start < end && b.End > start).Select(b => (b.Start, b.End, (string?)b.Status)).ToList();
+    }
+
+    /// <summary>Someone's own entries as their free/busy shows them (1.26.0): subjects where the sharing shows them.</summary>
+    public Dictionary<string, List<ScheduleItem>> Entries { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Each free/busy-with-subjects read: (address, start, end).</summary>
+    public List<(string Address, DateTime Start, DateTime End)> AskedItems { get; } = [];
+
+    public List<ScheduleItem>? ScheduleItems(string address, DateTime start, DateTime end)
+    {
+        AskedItems.Add((address, start, end));
+        if (address == "unreadable@example.com")
+            return null;
+        return [.. Busy.GetValueOrDefault(address, []).Where(b => b.Start < end && b.End > start).Select(b => new ScheduleItem(b.Start, b.End, b.Status, "", false, false)),
+                .. Entries.GetValueOrDefault(address, []).Where(b => b.Start < end && b.End > start)];
     }
 
     public JsonObject Event(string eventId) => Items.First(e => e.Str("id") == eventId);
@@ -144,6 +164,8 @@ public static class Make
         state_file = "raised.json"
         deleted_file = "deleted.json"
         log_file = "log.txt"
+        accepted_file = "accepted.json"
+        days_off_file = "days-off.json"
 
         [invites]
         days_ahead = 30

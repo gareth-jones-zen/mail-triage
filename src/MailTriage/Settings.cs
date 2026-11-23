@@ -170,6 +170,110 @@ public sealed class OneToOnes
     public string ReportNote { get; set; } = "Cancelling as you're on leave - enjoy the time off";
     public string MyNote { get; set; } = "Cancelling as I'm on leave";
     public string BankHolidayNote { get; set; } = "Cancelling for the bank holiday";
+
+    /// <summary>when_shorter (1.26.0): off for less than cancel_days of the week, "move" the occurrence (the default, as
+    /// before) or "ask" (queue it with the reason and a suggestion).</summary>
+    public string WhenShorter { get; set; } = "move";
+
+    public static readonly string[] WhenShorterChoices = ["move", "ask"];
+
+    /// <summary>The double-booking settings (1.26.0), off ("ignore") unless set.</summary>
+    public DoubleBookedSettings DoubleBooked { get; set; } = new();
+
+    /// <summary>The 1:1s' handling, as one group.</summary>
+    public LeaveHandling Handling => new()
+    {
+        Act = Act, CancelDays = CancelDays, WhenShorter = WhenShorter, TheirNote = ReportNote, MyNote = MyNote, BankHolidayNote = BankHolidayNote,
+        DoubleBooked = DoubleBooked,
+    };
+}
+
+/// <summary>When the other person is double-booked at a 1:1 or catch-up you organise (1.26.0): something busy or out of
+/// office of theirs overlapping it (not free, not tentative), or they've declined it, within `double_booked_days` of it.
+/// "move" (as a leave move, with `double_booked_note` added to the meeting's description), "ask" (queue it), or
+/// "ignore" (the default). An occurrence is moved for a clash at most `max_moves_per_occurrence` times, then asked.</summary>
+public sealed record DoubleBookedSettings
+{
+    public static readonly string[] Choices = ["move", "ask", "ignore"];
+    public string When { get; init; } = "ignore";
+    public string Note { get; init; } = "";
+    public long Days { get; init; } = 7;
+    public long MaxMoves { get; init; } = 2;
+}
+
+/// <summary>A [[catch_up_skip]] (1.26.0): a recurring meeting that would be a catch-up but is left alone. Subject (a
+/// pattern, case ignored, matched anywhere in the subject) and email (the other person's address): either, or both,
+/// when both must match.</summary>
+public sealed class CatchUpSkip
+{
+    public static readonly string[] Keys = ["subject", "email", "why"];
+    public string? Subject { get; init; }
+    public string? Email { get; init; }
+    public string Why { get; init; } = "";
+}
+
+/// <summary>How one group of meetings (the 1:1s, the catch-ups, or one [[catch_up]]) is treated when someone's off or
+/// double-booked (1.26.0).</summary>
+public sealed record LeaveHandling
+{
+    public bool Act { get; init; }
+    public double CancelDays { get; init; } = 3;
+    public string WhenShorter { get; init; } = "move";
+    public string TheirNote { get; init; } = "Cancelling as you're on leave - enjoy the time off";
+    public string MyNote { get; init; } = "Cancelling as I'm on leave";
+    public string BankHolidayNote { get; init; } = "Cancelling for the bank holiday";
+    public DoubleBookedSettings DoubleBooked { get; init; } = new();
+}
+
+/// <summary>A [[catch_up]] (1.26.0): one catch-up configured on its own, matched by subject (a pattern, case ignored,
+/// anywhere in the subject) and/or the other person's email (both, when both are given); the first that matches wins.
+/// Each setting it gives wins; each it leaves out comes from [catch_ups].</summary>
+public sealed class CatchUpEntry
+{
+    public static readonly string[] Keys =
+    [
+        "subject", "email", "why", "act", "cancel_days", "when_shorter", "note", "my_note", "bank_holiday_note",
+        "when_double_booked", "double_booked_note", "double_booked_days", "max_moves_per_occurrence",
+    ];
+    public string? Subject { get; init; }
+    public string? Email { get; init; }
+    public string Why { get; init; } = "";
+    public required LeaveHandling Handling { get; init; }
+}
+
+/// <summary>[catch_ups] (1.26.0): recurring meetings you organise with exactly one other person in your organisation
+/// (your address's domain) that aren't a [[one_to_one]], cancelled or moved when either of you is off, as the 1:1s
+/// are. Their leave comes from their own calendar, through free/busy. Absent: off. `protected` doesn't exclude a
+/// meeting here: it only keeps a meeting from being moved or declined to make room for another.</summary>
+public sealed class CatchUps
+{
+    public static readonly string[] Keys =
+    [
+        "act", "max_actions", "cancel_days", "when_shorter", "days_ahead", "note", "my_note", "bank_holiday_note",
+        "when_double_booked", "double_booked_note", "double_booked_days", "max_moves_per_occurrence",
+    ];
+    public bool Act { get; set; }
+    public long MaxActions { get; set; } = 20;
+    public double CancelDays { get; set; } = 3;
+    public string WhenShorter { get; set; } = "move";
+    public long? DaysAhead { get; set; }
+
+    /// <summary>The cancellation note when they're on leave; default [one_to_ones] report_note.</summary>
+    public string Note { get; set; } = "Cancelling as you're on leave - enjoy the time off";
+    public string MyNote { get; set; } = "Cancelling as I'm on leave";
+    public string BankHolidayNote { get; set; } = "Cancelling for the bank holiday";
+    public DoubleBookedSettings DoubleBooked { get; set; } = new();
+    public List<CatchUpSkip> Skip { get; set; } = [];
+
+    /// <summary>The [[catch_up]] entries, in order.</summary>
+    public List<CatchUpEntry> Entries { get; set; } = [];
+
+    /// <summary>The group's own handling (no entry).</summary>
+    public LeaveHandling Handling => new()
+    {
+        Act = Act, CancelDays = CancelDays, WhenShorter = WhenShorter, TheirNote = Note, MyNote = MyNote, BankHolidayNote = BankHolidayNote,
+        DoubleBooked = DoubleBooked,
+    };
 }
 
 /// <summary>A standing answer to one kind of double booking (1.13.0): when one meeting matches Keep and the other
@@ -317,6 +421,9 @@ public sealed class Settings
     public Invites? Invites { get; set; }
     public OneToOnes? OneToOnes { get; set; }
 
+    /// <summary>[catch_ups] and its [[catch_up_skip]]s (1.26.0); null when there's no [catch_ups].</summary>
+    public CatchUps? CatchUps { get; set; }
+
     /// <summary>[leave] (1.17.0): what counts as your leave and your bank holidays, background-tools-lib's shared rules
     /// (CalendarDays.LeaveSettings), the same ones calendar-out-of-office, calendar-work-location and meeting-preps read.</summary>
     public LeaveSettings Leave { get; set; } = new();
@@ -352,7 +459,7 @@ public sealed class Settings
         "double_bookings_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule", "leave",
-        "calendar_months_ahead", "sent", "sent_file", "hold", "sent_invites_file",
+        "calendar_months_ahead", "sent", "sent_file", "hold", "sent_invites_file", "catch_ups", "catch_up_skip", "catch_up",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -793,8 +900,11 @@ public sealed class Settings
                 ReportNote = section.Get("report_note") is { } rn ? Toml.Str(rn) : "Cancelling as you're on leave - enjoy the time off",
                 MyNote = section.Get("my_note") is { } mn ? Toml.Str(mn) : "Cancelling as I'm on leave",
                 BankHolidayNote = section.Get("bank_holiday_note") is { } bn ? Toml.Str(bn) : "Cancelling for the bank holiday",
+                WhenShorter = WhenShorter(section, "one_to_ones", full),
+                DoubleBooked = ReadDoubleBooked(section, "[one_to_ones]", full, new DoubleBookedSettings()),
             };
         }
+        ReadCatchUps(raw, full, settings);
         ReadLeave(raw, full, settings);
         ReadGroups(raw, full, settings);
         ReadDoubleBookings(raw, full, settings);
@@ -876,6 +986,156 @@ public sealed class Settings
                 throw new SettingsException($"Group {Py.ReprString(name)} in [groups] in {full} should be a list of email addresses.");
             settings.Groups[name] = addresses.Cast<string>().Select(a => a.ToLowerInvariant()).ToList();
         }
+    }
+
+    /// <summary>when_shorter: "move" (the default) or "ask".</summary>
+    private static string? ReadWhenShorter(TomlTable section, string where, string full)
+    {
+        if (section.Get("when_shorter") is not { } value)
+            return null;
+        return value is string s && OneToOnes.WhenShorterChoices.Contains(s)
+            ? s
+            : throw new SettingsException($"when_shorter in {where} in {full} should be \"move\" or \"ask\" (it's {Toml.Repr(value)}).");
+    }
+
+    private static string WhenShorter(TomlTable section, string name, string full) => ReadWhenShorter(section, $"[{name}]", full) ?? "move";
+
+    /// <summary>when_double_booked, double_booked_note, double_booked_days and max_moves_per_occurrence (1.26.0), each
+    /// falling back to <paramref name="fallback"/>.</summary>
+    private static DoubleBookedSettings ReadDoubleBooked(TomlTable section, string where, string full, DoubleBookedSettings fallback)
+    {
+        var when = fallback.When;
+        if (section.Get("when_double_booked") is { } w)
+            when = w is string s && DoubleBookedSettings.Choices.Contains(s)
+                ? s
+                : throw new SettingsException($"when_double_booked in {where} in {full} should be \"move\", \"ask\" or \"ignore\" (it's {Toml.Repr(w)}).");
+        var note = fallback.Note;
+        if (section.Get("double_booked_note") is { } n)
+            note = n as string ?? throw new SettingsException($"double_booked_note in {where} in {full} should be text.");
+        long Whole(string key, long current, long least)
+        {
+            if (section.Get(key) is not { } v)
+                return current;
+            return v is long l && l >= least ? l : throw new SettingsException($"{key} in {where} in {full} should be a whole number, at least {least}.");
+        }
+        return new DoubleBookedSettings
+        {
+            When = when, Note = note, Days = Whole("double_booked_days", fallback.Days, 0), MaxMoves = Whole("max_moves_per_occurrence", fallback.MaxMoves, 0),
+        };
+    }
+
+    /// <summary>The handling keys of [catch_ups] or a [[catch_up]], each falling back to <paramref name="fallback"/>.</summary>
+    private static LeaveHandling ReadHandling(TomlTable section, string where, string full, LeaveHandling fallback)
+    {
+        if (section.Get("act") is { } act && act is not bool)
+            throw new SettingsException($"act in {where} in {full} should be true or false.");
+        var cancelDays = section.Get("cancel_days") is { } cd ? Toml.Float(cd) : fallback.CancelDays;
+        if (cancelDays is <= 0 or > 5)
+            throw new SettingsException($"cancel_days in {where} in {full} should be more than 0 and at most 5 (days of a Monday-to-Friday week).");
+        string Note(string key, string current) => section.Get(key) is { } v
+            ? v as string ?? throw new SettingsException($"{key} in {where} in {full} should be text.")
+            : current;
+        return new LeaveHandling
+        {
+            Act = section.Get("act") is bool a ? a : fallback.Act,
+            CancelDays = cancelDays,
+            WhenShorter = ReadWhenShorter(section, where, full) ?? fallback.WhenShorter,
+            TheirNote = Note("note", fallback.TheirNote),
+            MyNote = Note("my_note", fallback.MyNote),
+            BankHolidayNote = Note("bank_holiday_note", fallback.BankHolidayNote),
+            DoubleBooked = ReadDoubleBooked(section, where, full, fallback.DoubleBooked),
+        };
+    }
+
+    /// <summary>A subject pattern and/or an email, as [[catch_up_skip]] and [[catch_up]] match a meeting.</summary>
+    private static (string? Subject, string? Email) ReadMatch(TomlTable item, Func<string, string> problem)
+    {
+        var subject = item.Get("subject");
+        var email = item.Get("email");
+        if (subject is null && email is null)
+            throw new SettingsException(problem("it needs subject (a pattern), email, or both."));
+        if (subject is not null && (subject is not string text || text.Length == 0))
+            throw new SettingsException(problem("subject should be a regular expression."));
+        if (subject is string pattern && PyRegex.Problem(pattern) is { } why)
+            throw new SettingsException(problem($"subject isn't a valid regular expression ({why})."));
+        if (email is not null && !IsAddress(email))
+            throw new SettingsException(problem($"email should be an address (it's {Toml.Repr(email)})."));
+        return (subject as string, (email as string)?.ToLowerInvariant());
+    }
+
+    /// <summary>[catch_ups], [[catch_up_skip]] and [[catch_up]] (1.26.0). Needs [invites] (your email, working_hours); the
+    /// notes default to [one_to_ones]'. A [[catch_up]]'s settings win; what it leaves out comes from [catch_ups].</summary>
+    private static void ReadCatchUps(TomlTable raw, string full, Settings settings)
+    {
+        var sectionValue = raw.Get("catch_ups");
+        var skips = Toml.Tables(raw.Get("catch_up_skip")).ToList();
+        var entries = Toml.Tables(raw.Get("catch_up")).ToList();
+        if (sectionValue is null)
+        {
+            if (skips.Count > 0 || entries.Count > 0)
+                throw new SettingsException($"[[catch_up_skip]] and [[catch_up]] in {full} need a [catch_ups] section.");
+            return;
+        }
+        var section = sectionValue as TomlTable ?? throw new SettingsException($"[catch_ups] in {full} should be a table.");
+        if (settings.Invites is null || settings.Email is null)
+            throw new SettingsException($"[catch_ups] in {full} needs an [invites] section and your email.");
+        foreach (var key in section.Keys)
+            if (!CatchUps.Keys.Contains(key))
+                throw new SettingsException($"[catch_ups] in {full} has {Py.ReprString(key)}: it takes {string.Join(", ", CatchUps.Keys)}.");
+        var max = Toml.Int(section.Get("max_actions") ?? 20L);
+        if (max < 1)
+            throw new SettingsException($"max_actions in [catch_ups] in {full} should be at least 1 (act = false stops it acting).");
+        var one = settings.OneToOnes;
+        var group = ReadHandling(section, "[catch_ups]", full, new LeaveHandling
+        {
+            TheirNote = one?.ReportNote ?? "Cancelling as you're on leave - enjoy the time off",
+            MyNote = one?.MyNote ?? "Cancelling as I'm on leave",
+            BankHolidayNote = one?.BankHolidayNote ?? "Cancelling for the bank holiday",
+        });
+        var skipList = new List<CatchUpSkip>();
+        var i = 0;
+        foreach (var item in skips)
+        {
+            i++;
+            var n = i;
+            string Problem(string what) => $"[[catch_up_skip]] {n} in {full}: {what}";
+            foreach (var key in item.Keys)
+                if (!CatchUpSkip.Keys.Contains(key))
+                    throw new SettingsException(Problem($"{Py.ReprString(key)} isn't a setting (it takes {string.Join(", ", CatchUpSkip.Keys)})."));
+            var (subject, email) = ReadMatch(item, Problem);
+            skipList.Add(new CatchUpSkip { Subject = subject, Email = email, Why = item.Get("why") is { } w ? Toml.Str(w) : "" });
+        }
+        var entryList = new List<CatchUpEntry>();
+        i = 0;
+        foreach (var item in entries)
+        {
+            i++;
+            var n = i;
+            string Problem(string what) => $"[[catch_up]] {n} in {full}: {what}";
+            foreach (var key in item.Keys)
+                if (!CatchUpEntry.Keys.Contains(key))
+                    throw new SettingsException(Problem($"{Py.ReprString(key)} isn't a setting (it takes {string.Join(", ", CatchUpEntry.Keys)})."));
+            var (subject, email) = ReadMatch(item, Problem);
+            entryList.Add(new CatchUpEntry
+            {
+                Subject = subject, Email = email, Why = item.Get("why") is { } w ? Toml.Str(w) : "",
+                Handling = ReadHandling(item, $"[[catch_up]] {n}", full, group),
+            });
+        }
+        settings.CatchUps = new CatchUps
+        {
+            Act = group.Act,
+            MaxActions = max,
+            CancelDays = group.CancelDays,
+            WhenShorter = group.WhenShorter,
+            DaysAhead = Toml.Truthy(section.Get("days_ahead")) ? Toml.Int(section.Get("days_ahead")!) : null,
+            Note = group.TheirNote,
+            MyNote = group.MyNote,
+            BankHolidayNote = group.BankHolidayNote,
+            DoubleBooked = group.DoubleBooked,
+            Skip = skipList,
+            Entries = entryList,
+        };
     }
 
     /// <summary>[double_bookings] and [[double_booking_rule]] (1.13.0). Read strictly, unknown keys included: a misspelt
@@ -960,6 +1220,7 @@ public sealed class Settings
     {
         JsonArray Strs(IEnumerable<string>? items) => J.Array(items ?? []);
         JsonNode? Opt(string? s) => s is null ? null : JsonValue.Create(s);
+        JsonObject Dumped(DoubleBookedSettings d) => new() { ["when"] = d.When, ["note"] = d.Note, ["days"] = d.Days, ["max_moves"] = d.MaxMoves };
         var o = new JsonObject
         {
             ["path"] = Path,
@@ -1017,11 +1278,28 @@ public sealed class Settings
                 ["reports"] = new JsonArray(t.Reports.Select(r => (JsonNode)new JsonObject { ["name"] = r.Name, ["email"] = r.Email, ["subject"] = r.Subject }).ToArray()),
                 ["act"] = t.Act, ["max_actions"] = t.MaxActions, ["cancel_days"] = PyJson.Float(t.CancelDays), ["midday"] = t.Midday,
                 ["days_ahead"] = t.DaysAhead, ["bank_holiday_categories"] = Strs(t.BankHolidayCategories), ["leave_pattern"] = t.LeavePattern,
-                ["report_note"] = t.ReportNote, ["my_note"] = t.MyNote, ["bank_holiday_note"] = t.BankHolidayNote,
+                ["report_note"] = t.ReportNote, ["my_note"] = t.MyNote, ["bank_holiday_note"] = t.BankHolidayNote, ["when_shorter"] = t.WhenShorter,
+                ["double_booked"] = Dumped(t.DoubleBooked),
             };
         }
         else
             o["one_to_ones"] = null;
+        if (CatchUps is { } c)
+        {
+            o["catch_ups"] = new JsonObject
+            {
+                ["act"] = c.Act, ["max_actions"] = c.MaxActions, ["cancel_days"] = PyJson.Float(c.CancelDays), ["when_shorter"] = c.WhenShorter,
+                ["days_ahead"] = c.DaysAhead, ["note"] = c.Note, ["my_note"] = c.MyNote, ["bank_holiday_note"] = c.BankHolidayNote,
+                ["skip"] = new JsonArray(c.Skip.Select(s => (JsonNode)new JsonObject { ["subject"] = Opt(s.Subject), ["email"] = Opt(s.Email), ["why"] = s.Why }).ToArray()),
+                ["double_booked"] = Dumped(c.DoubleBooked),
+                ["entries"] = new JsonArray(c.Entries.Select(e => (JsonNode)new JsonObject
+                {
+                    ["subject"] = Opt(e.Subject), ["email"] = Opt(e.Email), ["why"] = e.Why, ["act"] = e.Handling.Act,
+                    ["cancel_days"] = PyJson.Float(e.Handling.CancelDays), ["when_shorter"] = e.Handling.WhenShorter, ["note"] = e.Handling.TheirNote,
+                    ["my_note"] = e.Handling.MyNote, ["bank_holiday_note"] = e.Handling.BankHolidayNote, ["double_booked"] = Dumped(e.Handling.DoubleBooked),
+                }).ToArray()),
+            };
+        }
         if (Groups.Count > 0)
         {
             var groups = new JsonObject();
