@@ -212,6 +212,83 @@ public sealed class SentTests : IDisposable
         Assert.Equal("invites", SentItems.SettingFor("invites"));
     }
 
+    /// <summary>Forwarded meeting invitations (1.21.0): in Sent Items the from is the organiser and the sender is you.</summary>
+    private (Graph Graph, Settings Settings) ForwardedSetup(string text)
+    {
+        var settings = dir.Settings(text);
+        static JsonObject Who(JsonObject meeting, string from, string sender)
+        {
+            meeting["from"] = new JsonObject { ["emailAddress"] = new JsonObject { ["address"] = from } };
+            meeting["sender"] = new JsonObject { ["emailAddress"] = new JsonObject { ["address"] = sender } };
+            return meeting;
+        }
+        var sent = new List<JsonObject>
+        {
+            Msg("own", "Design review", "2026-11-19T09:00:00Z", "#microsoft.graph.eventMessageRequest"),
+            Msg("fwd-inv", "FW: Leadership weekly", "2026-11-18T09:00:00Z", "#microsoft.graph.eventMessageRequest"),
+            Msg("fwd-inv-att", "FW: Workshop", "2026-11-17T09:00:00Z", "#microsoft.graph.eventMessageRequest", attachments: true),
+            Msg("fw-mail", "FW: the budget", "2026-11-16T09:00:00Z"),
+        };
+        var details = new Dictionary<string, JsonObject>
+        {
+            ["own"] = Who(Meeting("meetingRequest", "2026-11-30T11:00:00"), "alex@example.com", "alex@example.com"),
+            ["fwd-inv"] = Who(Meeting("meetingRequest", "2026-11-30T11:00:00"), "organiser@example.com", "alex@example.com"),
+            ["fwd-inv-att"] = Who(Meeting("meetingRequest"), "organiser@example.com", "alex@example.com"),
+        };
+        return (new Graph(sent, details), settings);
+    }
+
+    [Fact]
+    public void forwarded_invitations_follow_invites_unless_set_themselves()
+    {
+        // Not set: invites governs them (GJ, 23 Nov 2026).
+        var (graph, settings) = ForwardedSetup(AllNow);
+        var findings = Plan(graph, settings).Findings;
+        var actions = Actions(findings);
+        Assert.Equal("invites:delete", actions["own"]);                    // your own invitation stays an invite
+        Assert.Equal("forwarded_invites:delete", actions["fwd-inv"]);
+        Assert.Equal("forwarded_invites:skip", actions["fwd-inv-att"]);    // attachments: never deleted
+        Assert.Equal("other:leave", actions["fw-mail"]);                   // "FW:" alone isn't a forwarded invitation
+        Assert.Contains(SentItems.Describe(findings, true, 4, false, settings.Sent),
+            l => l.Contains("forwarded invitations") && l.Contains("[sent] invites governs them") && l.Contains("would delete 1"));
+
+        // Off by its own setting while invites are deleted.
+        var (offGraph, offSettings) = ForwardedSetup(AllNow + "\nforwarded_invites = \"off\"\n");
+        var off = Plan(offGraph, offSettings).Findings;
+        Assert.Equal("invites:delete", Actions(off)["own"]);
+        Assert.Equal("forwarded_invites:leave", Actions(off)["fwd-inv"]);
+        Assert.Contains("forwarded_invites is off", off.Single(f => f.Id == "fwd-inv").Why);
+        Assert.DoesNotContain(SentItems.Describe(off, true, 4, false, offSettings.Sent), l => l.Contains("governs them"));
+
+        // Its own wait: a day after the meeting (ends 30 Nov).
+        var (waitGraph, waitSettings) = ForwardedSetup(AllNow + "\nforwarded_invites = \"after_meeting\"\nforwarded_invites_days = 1\n");
+        var wait = Plan(waitGraph, waitSettings).Findings.Single(f => f.Id == "fwd-inv");
+        Assert.Equal("forwarded_invites:wait", $"{wait.Kind}:{wait.Action}");
+        Assert.Equal(new DateTime(2026, 12, 1), wait.Due!.Value.Date);
+
+        // With invites off and forwarded_invites unset, forwarded invitations are off too.
+        var (inhGraph, inhSettings) = ForwardedSetup(Base + "\n[sent]\ncancellations = \"immediately\"\n");
+        var inh = Plan(inhGraph, inhSettings).Findings.Single(f => f.Id == "fwd-inv");
+        Assert.Equal("forwarded_invites:leave", $"{inh.Kind}:{inh.Action}");
+        Assert.Contains("invites is off", inh.Why);
+    }
+
+    [Fact]
+    public void forwarded_is_told_by_from_and_sender_not_the_subject()
+    {
+        static JsonObject M(string? from, string? sender)
+        {
+            var m = new JsonObject();
+            if (from is not null) m["from"] = new JsonObject { ["emailAddress"] = new JsonObject { ["address"] = from } };
+            if (sender is not null) m["sender"] = new JsonObject { ["emailAddress"] = new JsonObject { ["address"] = sender } };
+            return m;
+        }
+        Assert.True(SentItems.IsForwarded(M("fahad@example.com", "gj@example.com")));
+        Assert.False(SentItems.IsForwarded(M("gj@example.com", "GJ@example.com")));
+        Assert.False(SentItems.IsForwarded(M(null, "gj@example.com")));
+        Assert.False(SentItems.IsForwarded(M("gj@example.com", null)));
+    }
+
     [Fact]
     public void kinds_left_out_are_off_and_untouched()
     {
@@ -298,6 +375,8 @@ public sealed class SentTests : IDisposable
     [InlineData("[sent]\ninvites = \"now\"\n", "invites should be one of")]
     [InlineData("[sent]\ninvites = \"immediately\"\ninvites_days = 3\n", "only for after_meeting or after_sending")]
     [InlineData("[sent]\nresponses = \"after_sending\"\nresponses_days = -1\n", "0 or more")]
+    [InlineData("[sent]\nforwarded_invites_days = 2\n", "forwarded_invites_days needs forwarded_invites itself")]
+    [InlineData("[sent]\nforwarded_invites = \"soon\"\n", "forwarded_invites should be one of")]
     public void sent_settings_are_read_strictly(string sent, string message)
     {
         var error = Assert.Throws<SettingsException>(() => dir.Settings(Base + "\n" + sent, "bad.toml"));

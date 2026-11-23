@@ -462,6 +462,7 @@ subject, so only these are ever touched:
 | Kind | What it is (Graph's `meetingMessageType`) |
 |---|---|
 | `invites` | meeting requests and updates you sent (`meetingRequest`) |
+| `forwarded_invites` | (1.21.0) meeting requests you **forwarded** for someone else's meeting: a `meetingRequest` whose `from` is the organiser and whose `sender` is you (your own invitations have both as you; never told by the "FW:" subject). **When `forwarded_invites` isn't set, `invites` governs them**, so they go with your invitations; set it (and `forwarded_invites_days`) to treat them differently, e.g. `"off"` to keep them. The preview shows them on their own line |
 | `cancellations` | cancellations you sent (`meetingCancelled`) |
 | `responses` | your accepts, tentatives and declines (`meetingAccepted`, `meetingTenativelyAccepted`, `meetingDeclined`), and (1.20.0) Outlook's **Follow** notifications ("Following: …", sent when you follow a meeting you can't attend). Graph types those as responses but with no meetingMessageType it names, so they're told by their message class, `IPM.Schedule.Meeting.Resp.Tent.Follow`, never by subject; the preview shows them as "follows" |
 | forwards | the Sent Items copy of a forward a `forward` rule made, when that rule has `file_sent` |

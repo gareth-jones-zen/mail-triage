@@ -693,13 +693,13 @@ public static class Cli
             var (findings, first, read) = SentItems.Plan(settings, mailbox, state, Clock.Now);
             if (!args.Flag("--yes"))
             {
-                foreach (var line in SentItems.Describe(findings, first, read, false))
+                foreach (var line in SentItems.Describe(findings, first, read, false, settings.Sent))
                     Print(host.Out, line);
                 Print(host.Out, "Nothing changed. `mail-triage sent --yes` does it" + (first ? ", and from then on each run tidies what's new." : "."));
                 return 0;
             }
             SentItems.Apply(settings, mailbox, state, findings, first, log);
-            foreach (var line in SentItems.Describe(findings, first, read, true))
+            foreach (var line in SentItems.Describe(findings, first, read, true, settings.Sent))
                 Print(host.Out, line);
             if (door.Mode != WriteMode.Live)
                 Print(host.Out, "(Journalled, not sent: Sent Items is unchanged, and the next run starts from the same place.)");

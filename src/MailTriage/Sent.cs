@@ -8,6 +8,8 @@ namespace MailTriage;
 /// "immediately", "after_meeting" (once the meeting it's about has ended, plus its days) or "after_sending" (its days after
 /// you sent it). The kinds are the meeting messages you sent, told apart by Graph's message type, never by subject:
 ///   invites        meeting requests and updates (meetingRequest)
+///   forwarded_invites  meeting requests you forwarded for someone else's meeting (1.21.0: the message's from, the
+///                  organiser, isn't its sender, you); when forwarded_invites isn't set, invites governs them
 ///   cancellations  cancellations (meetingCancelled)
 ///   responses      your accept, tentative and decline replies, and Outlook "Follow" notifications (1.20.0: shown as
 ///                  "follows", told by their message class IPM.Schedule.Meeting.Resp.Tent.Follow, governed by responses)
@@ -15,24 +17,43 @@ namespace MailTriage;
 public sealed class SentSettings
 {
     public static readonly string[] Kinds = ["invites", "cancellations", "responses"];
+    /// <summary>Kinds that follow another kind's setting unless set themselves (1.21.0): forwarded_invites follows invites.</summary>
+    public static readonly Dictionary<string, string> Inherits = new(StringComparer.Ordinal) { ["forwarded_invites"] = "invites" };
     public static readonly string[] Whens = ["off", "immediately", "after_meeting", "after_sending"];
 
     public Dictionary<string, (string When, int Days)> ByKind { get; } = new(StringComparer.Ordinal);
 
     public (string When, int Days) For(string kind) => ByKind.GetValueOrDefault(kind, ("off", 0));
 
+    /// <summary>The setting that governs a kind: follows are responses (GJ, 23 Nov 2026); forwarded_invites are invites
+    /// unless [sent] sets forwarded_invites itself (GJ, 23 Nov 2026).</summary>
+    public string Governing(string kind)
+    {
+        if (kind == "follows")
+            return "responses";
+        if (Inherits.TryGetValue(kind, out var parent) && !ByKind.ContainsKey(kind))
+            return parent;
+        return kind;
+    }
+
     public static SentSettings Parse(object value, string full)
     {
         if (value is not TomlTable table)
             throw new SettingsException($"sent in {full} should be a [sent] table.");
-        var allowed = Kinds.SelectMany(k => new[] { k, k + "_days" }).ToHashSet(StringComparer.Ordinal);
+        var allowed = Kinds.Concat(Inherits.Keys).SelectMany(k => new[] { k, k + "_days" }).ToHashSet(StringComparer.Ordinal);
         foreach (var key in table.Keys)
             if (!allowed.Contains(key))
-                throw new SettingsException($"[sent] in {full}: {Py.ReprString(key)} isn't a setting (it takes {string.Join(", ", Kinds)}, "
+                throw new SettingsException($"[sent] in {full}: {Py.ReprString(key)} isn't a setting (it takes {string.Join(", ", Kinds.Concat(Inherits.Keys))}, "
                                             + $"each with an optional <kind>_days).");
         var sent = new SentSettings();
-        foreach (var kind in Kinds)
+        foreach (var kind in Kinds.Concat(Inherits.Keys))
         {
+            if (Inherits.TryGetValue(kind, out var parent) && !table.ContainsKey(kind))
+            {
+                if (table.ContainsKey(kind + "_days"))
+                    throw new SettingsException($"[sent] in {full}: {kind}_days needs {kind} itself (without it, {parent} governs them).");
+                continue;
+            }
             var when = table.TryGetValue(kind, out var w) ? w as string : "off";
             if (when is null || !Whens.Contains(when))
                 throw new SettingsException($"[sent] in {full}: {kind} should be one of {string.Join(", ", Whens.Select(x => $"\"{x}\""))}.");
@@ -73,6 +94,7 @@ public static class SentItems
     public static string Label(string kind) => kind switch
     {
         "invites" => "invites (meeting requests and updates you sent)",
+        "forwarded_invites" => "forwarded invitations (meeting requests you forwarded)",
         "cancellations" => "cancellations you sent",
         "responses" => "responses (your accepts, tentatives and declines)",
         "follows" => "follows (meetings you followed; [sent] responses governs them)",
@@ -100,6 +122,16 @@ public static class SentItems
 
     /// <summary>The [sent] setting that governs a kind: follows are responses (GJ, 23 Nov 2026).</summary>
     public static string SettingFor(string kind) => kind == "follows" ? "responses" : kind;
+
+    /// <summary>A meeting request you forwarded for someone else's meeting (1.21.0): in Sent Items its from is the
+    /// organiser and its sender is you (read live, 23 Nov 2026: "FW: DD Re-write", from Fahad, sender GJ; your own
+    /// invites have from and sender both you, and the forward-instance flag isn't set). Never by the "FW:" subject.</summary>
+    public static bool IsForwarded(JsonObject message)
+    {
+        var from = message.Get("from").Get("emailAddress").Str("address");
+        var sender = message.Get("sender").Get("emailAddress").Str("address");
+        return from is not null && sender is not null && !from.Equals(sender, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static bool IsEventMessage(JsonObject m) =>
         m.Str("@odata.type") is { } t && t.StartsWith("#microsoft.graph.eventMessage", StringComparison.Ordinal);
@@ -170,15 +202,18 @@ public static class SentItems
             var kind = KindOf(details.Str("meetingMessageType"));
             if (kind is null && KindOfClass(mailbox.MessageClass(id)) is { } byClass)
                 kind = byClass;
+            if (kind == "invites" && IsForwarded(details))
+                kind = "forwarded_invites";
             if (kind is null)
             {
                 findings.Add(new SentFinding("other", "leave", m, "a meeting message of no kind [sent] handles"));
                 continue;
             }
-            var (when, days) = sent.For(SettingFor(kind));
+            var governing = sent.Governing(kind);
+            var (when, days) = sent.For(governing);
             if (when == "off")
             {
-                findings.Add(new SentFinding(kind, "leave", m, $"{SettingFor(kind)} is off in [sent]"));
+                findings.Add(new SentFinding(kind, "leave", m, $"{governing} is off in [sent]"));
                 continue;
             }
             if (m.Truthy("hasAttachments"))
@@ -210,14 +245,14 @@ public static class SentItems
     }
 
     /// <summary>The preview: per kind, how many, the oldest and newest, and what would happen; the skipped listed.</summary>
-    public static List<string> Describe(List<SentFinding> findings, bool first, int read, bool done)
+    public static List<string> Describe(List<SentFinding> findings, bool first, int read, bool done, SentSettings? sent = null)
     {
         static string Day(string iso) => iso.Length >= 10 ? $"{iso[8..10]}/{iso[5..7]}/{iso[..4]}" : "?";
         var lines = new List<string>
         {
             $"Sent Items: {read} message(s) read" + (first ? " (all of Sent Items: the first run)." : " (new since the last run)."),
         };
-        var order = new[] { "invites", "cancellations", "responses", "follows", "forwards", "other" };
+        var order = new[] { "invites", "forwarded_invites", "cancellations", "responses", "follows", "forwards", "other" };
         foreach (var kind in order)
         {
             var group = findings.Where(f => f.Kind == kind).ToList();
@@ -238,6 +273,8 @@ public static class SentItems
             if (Count("leave") > 0)
                 parts.Add(kind == "other" ? $"{Count("leave")} left alone (real correspondence and anything else)" : $"{Count("leave")} left alone ({group.First(f => f.Action == "leave").Why})");
             var label = kind switch { "forwards" => "forwards made by a rule", "other" => "everything else", _ => Label(kind) };
+            if (sent is not null && kind != "follows" && sent.Governing(kind) != kind)
+                label = label.Replace(")", $"; [sent] {sent.Governing(kind)} governs them)");
             lines.Add($"  {label}: {group.Count}{span}: {string.Join("; ", parts)}");
         }
         foreach (var f in findings.Where(f => f.Action == "skip").Take(20))
