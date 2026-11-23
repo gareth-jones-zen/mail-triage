@@ -133,6 +133,29 @@ public sealed class AutoAnswers : IDisposable
     }
 
     [Fact]
+    public void a_decline_whose_answer_was_lost_is_recorded_as_unconfirmed_and_never_sent_again()
+    {
+        var calendar = new FakeCalendar([
+            Self("leave", "Holiday (Architect)", "2026-12-16", "00:00", "23:59", endDay: "2026-12-18", showAs: "oof"),
+            Ev("a1", "Project sync", "2026-12-17", "10:00", "11:00", response: "accepted", attendees: Two),
+            Ev("a2", "Design review", "2026-12-17", "14:00", "15:00", response: "accepted", attendees: Two),
+        ]);
+        calendar.Lost.Add("a1");
+        var done = new JsonObject();
+        var acted = InviteTriage.DeclineDaysOff(config, calendar, calendar.Items, done, Quiet, now);
+        Assert.Equal(2, calendar.Answers.Count);   // the lost one didn't stop the run
+        var lost = acted.Single(a => a.Req("subject").StartsWith("Project sync", StringComparison.Ordinal));
+        Assert.Equal("Couldn't confirm: Declined: on leave", lost.Req("rule"));
+        Assert.Contains("may have gone, check the calendar", lost.Req("why"));
+        Assert.True(Unconfirmed.Is(lost));
+        Assert.Equal("Declined: on leave", acted.Single(a => a != lost).Req("rule"));
+        // Never sent again: it counts as done
+        calendar.Answers.Clear();
+        Assert.Empty(InviteTriage.DeclineDaysOff(config, calendar, calendar.Items, done, Quiet, now));
+        Assert.Empty(calendar.Answers);
+    }
+
+    [Fact]
     public void double_bookings_are_raised_once_and_your_own_blocks_dont_count()
     {
         var calendar = new FakeCalendar([

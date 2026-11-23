@@ -329,6 +329,9 @@ public static class OneToOnePlanner
             var would = $"one-to-one-would:{meeting.Req("id")}@{Stamp(d.Start)}:{d.Action}" + (d.Action == "move" ? $"@{Stamp(d.To!.Value.Start)}" : "");
             if (!config.Act && raised.ContainsKey(would))
                 continue;   // already recorded as a would-do
+            var lost = $"one-to-one-unconfirmed:{meeting.Req("id")}@{Stamp(d.Start)}";
+            if (raised.ContainsKey(lost))
+                continue;   // a change whose answer was lost: it may have gone, so it's never made again
             if (changes >= config.MaxActions)
             {
                 log($"one-to-ones: max_actions ({config.MaxActions}) reached; the rest wait for the next run");
@@ -337,12 +340,18 @@ public static class OneToOnePlanner
             changes++;
             var verb = d.Action == "cancel" ? "cancelled" : "moved";
             string rule;
+            string? unknown = null;
             if (config.Act && !dryRun)
             {
-                if (d.Action == "cancel")
-                    calendar.Cancel(meeting.Req("id"), d.Note!);     // the occurrence: the series is untouched
-                else
-                    calendar.Move(meeting.Req("id"), d.To!.Value.Start, d.To.Value.End);
+                unknown = Unconfirmed.Try(() =>
+                {
+                    if (d.Action == "cancel")
+                        calendar.Cancel(meeting.Req("id"), d.Note!);     // the occurrence: the series is untouched
+                    else
+                        calendar.Move(meeting.Req("id"), d.To!.Value.Start, d.To.Value.End);
+                });
+                if (unknown is not null)
+                    raised[lost] = PyTime.Iso(Clock.Now, "seconds");
                 rule = $"1:1 {verb}: leave";
             }
             else
@@ -351,11 +360,15 @@ public static class OneToOnePlanner
                 if (!config.Act && !dryRun)
                     raised[would] = PyTime.Iso(Clock.Now, "seconds");
             }
-            acted.Add(new JsonObject
+            var entry = new JsonObject
             {
                 ["received"] = PyTime.Iso(d.Start, "minutes"), ["from"] = d.Report.Name, ["subject"] = subject, ["rule"] = rule, ["why"] = did,
-            });
-            log($"{(dryRun || !config.Act ? "would be " + verb : verb)}  [1:1 and leave] {Describe(d)}");
+            };
+            if (unknown is not null)
+                Unconfirmed.Mark(entry, unknown, rule);
+            acted.Add(entry);
+            log(unknown is not null ? $"{verb} may have gone, not resent  [1:1 and leave] {Describe(d)}: {unknown}"
+                : $"{(dryRun || !config.Act ? "would be " + verb : verb)}  [1:1 and leave] {Describe(d)}");
         }
         return (items, acted, seen);
     }

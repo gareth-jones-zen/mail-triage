@@ -82,11 +82,32 @@ public class FakeCalendar(List<JsonObject> items, Dictionary<string, List<(DateT
 
     public List<JsonObject> Events(DateOnly start, long days) => Items;
 
-    public void Respond(string eventId, string action, string note = "", bool send = true) => Answers.Add((eventId, action, note, send));
+    /// <summary>Events whose write is sent but whose answer is lost (as a 5xx or a timeout after sending would be).</summary>
+    public HashSet<string> Lost { get; } = [];
 
-    public void Move(string eventId, DateTime start, DateTime end) => Moves.Add((eventId, start, end));
+    private void MaybeLost(string eventId, string verb)
+    {
+        if (Lost.Contains(eventId))
+            throw new M365Graph.GraphDeliveryUnknownException("POST", $"/me/events/{eventId}/{verb}", System.Net.HttpStatusCode.BadGateway, "lost");
+    }
 
-    public void Cancel(string eventId, string comment = "") => Cancels.Add((eventId, comment));
+    public void Respond(string eventId, string action, string note = "", bool send = true)
+    {
+        Answers.Add((eventId, action, note, send));
+        MaybeLost(eventId, action);
+    }
+
+    public void Move(string eventId, DateTime start, DateTime end)
+    {
+        Moves.Add((eventId, start, end));
+        MaybeLost(eventId, "move");
+    }
+
+    public void Cancel(string eventId, string comment = "")
+    {
+        Cancels.Add((eventId, comment));
+        MaybeLost(eventId, "cancel");
+    }
 
     public List<string> Removed { get; } = [];
 

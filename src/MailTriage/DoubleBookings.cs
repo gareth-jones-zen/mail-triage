@@ -283,18 +283,24 @@ public static class DoubleBookingPlanner
                 ["action"] = r.Action, ["rule"] = r.Rule!.Name, ["subject"] = other.Subject, ["start"] = Stamp(other.Start),
                 ["to"] = r.To is { } to ? Stamp(to.Start) : null, ["at"] = PyTime.Iso(Clock.Now, "seconds"),
             };
+            string? unknown = null;
             if (config.Act)
             {
                 if (!dryRun)
                 {
-                    if (r.Action == "move")
-                        calendar!.Move(other.Id, r.To!.Value.Start, r.To.Value.End);   // the occurrence: the series is untouched
-                    else
+                    unknown = Unconfirmed.Try(() =>
                     {
-                        var send = !r.Meeting!.Has("responseRequested") || Py.Truthy(r.Meeting.Get("responseRequested"));
-                        calendar!.Respond(other.Id, "decline", r.Rule.Note, send);   // the occurrence: the series is untouched
-                    }
-                    done[other.Id] = record;
+                        if (r.Action == "move")
+                            calendar!.Move(other.Id, r.To!.Value.Start, r.To.Value.End);   // the occurrence: the series is untouched
+                        else
+                        {
+                            var send = !r.Meeting!.Has("responseRequested") || Py.Truthy(r.Meeting.Get("responseRequested"));
+                            calendar!.Respond(other.Id, "decline", r.Rule.Note, send);   // the occurrence: the series is untouched
+                        }
+                    });
+                    if (unknown is not null)
+                        record["unconfirmed"] = unknown;
+                    done[other.Id] = record;   // even when the answer was lost: never made twice
                 }
                 raised[c.Key] = PyTime.Iso(Clock.Now, "seconds");   // settled: off the queue, as nothing adds it to seen
             }
@@ -307,7 +313,7 @@ public static class DoubleBookingPlanner
             var (oname, oaddress) = InviteTriage.Organiser(r.Meeting!);
             var label = config.Act ? (r.Action == "move" ? "Double booking: moved" : "Double booking: declined")
                 : (r.Action == "move" ? "Double booking (preview): would move" : "Double booking (preview): would decline");
-            acted.Add(new JsonObject
+            var entry = new JsonObject
             {
                 ["received"] = Stamp(other.Start),
                 ["from"] = r.Action == "move" ? string.Join(", ", Others(settings, r.Meeting!).Select(o => o.Name.Length > 0 ? o.Name : o.Address))
@@ -315,8 +321,12 @@ public static class DoubleBookingPlanner
                 ["subject"] = $"{other.Subject}: {InviteTriage.Day(other.Start)}–{InviteTriage.Hm(other.End)}",
                 ["rule"] = label,
                 ["why"] = $"[{r.Rule.Name}] {Did(r, !config.Act)}, as it clashed with \"{r.Keep!.Subject}\"",
-            });
-            log($"{(dryRun || !config.Act ? "double booking: " + Did(r, true) : "double booking: " + Did(r, false))}  [{r.Rule.Name}]");
+            };
+            if (unknown is not null)
+                Unconfirmed.Mark(entry, unknown, label);
+            acted.Add(entry);
+            log(unknown is not null ? $"double booking: {Did(r, true)} may have gone, not resent  [{r.Rule.Name}]: {unknown}"
+                : $"{(dryRun || !config.Act ? "double booking: " + Did(r, true) : "double booking: " + Did(r, false))}  [{r.Rule.Name}]");
         }
         return (items, acted, seen);
     }

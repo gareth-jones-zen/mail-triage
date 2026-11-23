@@ -13,10 +13,11 @@ public interface IGraph
     /// <summary>Every item across @odata.nextLink pages, the same headers on every page. Lazy, as Python's generator.</summary>
     IEnumerable<JsonObject> Pages(string url, IReadOnlyList<string>? scopes = null, IReadOnlyDictionary<string, string>? headers = null);
 
-    /// <summary>A write that must never be applied twice (1.24.0: sending an invitation): sent once, and never again after a
-    /// 5xx, a timeout or a dropped connection that may have reached Microsoft (only a 429, or a request that never
-    /// connected, is retried). A failed status throws GraphRequestException; an answer lost after sending throws
-    /// GraphDeliveryUnknownException. A fake Graph's Request stands in.</summary>
+    /// <summary>A write that must never be applied twice, whatever its method (sending an invitation): sent once, and never
+    /// again after a 5xx, a timeout or a dropped connection that may have reached Microsoft (only a 429, or a request that
+    /// never connected, is retried). A refusal (4xx) throws GraphRequestException; a 5xx or an answer lost after sending
+    /// throws GraphDeliveryUnknownException. Request sends a POST or PATCH the same way; this says so at the call. A fake
+    /// Graph's Request stands in.</summary>
     JsonObject RequestOnce(string url, string method, JsonNode? body, IReadOnlyList<string>? scopes = null) =>
         Request(url, method, body, scopes);
 }
@@ -49,21 +50,24 @@ public sealed class ReadOnlyGraph(IGraph inner) : IGraph
 }
 
 /// <summary>The real Graph, through background-tools-lib's M365Graph (the shared sign-in, timeouts, retries, IPv4
-/// first). The calls go through a small transport so the mapping is tested without a network.</summary>
+/// first). The calls go through a small transport so the mapping is tested without a network.
+/// <para>Retries follow M365Graph's policy by method: a GET or DELETE is retried after a 5xx or a dropped connection; a
+/// POST or PATCH is sent once, and an answer lost after sending (a 5xx, a timeout, a reset) throws
+/// GraphDeliveryUnknownException, never resent. The one POST that only reads (getSchedule) is retried as a GET is.</para></summary>
 public sealed class M365GraphAdapter : IGraph
 {
-    private readonly Func<string, HttpMethod, JsonNode?, IReadOnlyList<string>?, IReadOnlyDictionary<string, string>?, Task<JsonObject>> request;
+    private readonly Func<string, HttpMethod, JsonNode?, IReadOnlyList<string>?, IReadOnlyDictionary<string, string>?, GraphRetryPolicy?, Task<JsonObject>> request;
     private readonly Func<string, IReadOnlyList<string>?, IReadOnlyDictionary<string, string>?, IAsyncEnumerable<JsonNode?>> pages;
 
     public M365GraphAdapter(GraphClient client)
-        : this((url, method, body, scopes, headers) => client.RequestAsync(url, method, body, scopes, headers),
+        : this((url, method, body, scopes, headers, policy) => client.RequestAsync(url, method, body, scopes, headers, policy: policy),
                (url, scopes, headers) => client.PagesAsync(url, scopes, headers))
     {
         Client = client;
     }
 
     internal M365GraphAdapter(
-        Func<string, HttpMethod, JsonNode?, IReadOnlyList<string>?, IReadOnlyDictionary<string, string>?, Task<JsonObject>> request,
+        Func<string, HttpMethod, JsonNode?, IReadOnlyList<string>?, IReadOnlyDictionary<string, string>?, GraphRetryPolicy?, Task<JsonObject>> request,
         Func<string, IReadOnlyList<string>?, IReadOnlyDictionary<string, string>?, IAsyncEnumerable<JsonNode?>> pages)
     {
         this.request = request;
@@ -72,9 +76,14 @@ public sealed class M365GraphAdapter : IGraph
 
     public GraphClient? Client { get; }
 
+    /// <summary>The policy a call gets: retried as a read for getSchedule (a POST that only reads); otherwise M365Graph's
+    /// default for the method (null).</summary>
+    internal static GraphRetryPolicy? PolicyFor(string url, string method) =>
+        method == "POST" && url == ReadOnlyGraph.SchedulePath ? GraphRetryPolicy.Read : null;
+
     public JsonObject Request(string url, string method = "GET", JsonNode? body = null, IReadOnlyList<string>? scopes = null,
         IReadOnlyDictionary<string, string>? headers = null) =>
-        request(url, new HttpMethod(method), body, scopes, headers).GetAwaiter().GetResult();
+        request(url, new HttpMethod(method), body, scopes, headers, PolicyFor(url, method)).GetAwaiter().GetResult();
 
     public IEnumerable<JsonObject> Pages(string url, IReadOnlyList<string>? scopes = null, IReadOnlyDictionary<string, string>? headers = null)
     {
@@ -83,19 +92,10 @@ public sealed class M365GraphAdapter : IGraph
                 yield return o;
     }
 
-    /// <summary>Through M365Graph's raw call with its Write policy, which never resends a request that may have been
-    /// applied (Request retries a 5xx and a dropped connection, which for an invitation would send it twice).</summary>
-    public JsonObject RequestOnce(string url, string method, JsonNode? body, IReadOnlyList<string>? scopes = null)
-    {
-        if (Client is null)
-            return Request(url, method, body, scopes);
-        var response = Client.SendRawAsync(new HttpMethod(method), url, body is null ? null : System.Text.Encoding.UTF8.GetBytes(body.ToJsonString()),
-            body is null ? null : "application/json", GraphRetryPolicy.Write, scopes).GetAwaiter().GetResult();
-        var text = System.Text.Encoding.UTF8.GetString(response.Body);
-        if (!response.IsSuccess)
-            throw new GraphRequestException(response.Status, method, url, text);
-        return text.Trim().Length == 0 ? new JsonObject() : JsonNode.Parse(text) as JsonObject ?? new JsonObject();
-    }
+    /// <summary>With M365Graph's Write policy whatever the method: only a 429, or a request that never connected, is sent
+    /// again; a 5xx or an answer lost after sending throws GraphDeliveryUnknownException.</summary>
+    public JsonObject RequestOnce(string url, string method, JsonNode? body, IReadOnlyList<string>? scopes = null) =>
+        request(url, new HttpMethod(method), body, scopes, null, GraphRetryPolicy.Write).GetAwaiter().GetResult();
 
     /// <summary>A client as cli.py's client(): the settings' cache, tenant and login hint, never a browser when
     /// interactive is false.</summary>

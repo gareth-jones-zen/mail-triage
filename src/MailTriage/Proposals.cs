@@ -117,16 +117,24 @@ public static class Proposals
                 var (ok, why, plan) = judged;
                 if (ok && settings.Invites.AcceptProposals)
                 {
+                    string? unknown = null;
                     if (!dryRun)
                     {
-                        calendar.Move(plan!.Value.Id, plan.Value.Start, plan.Value.End);
-                        mailbox.Delete(m.Req("id"));
+                        unknown = Unconfirmed.Try(() => calendar.Move(plan!.Value.Id, plan.Value.Start, plan.Value.End));
+                        if (unknown is null)
+                            mailbox.Delete(m.Req("id"));
+                        else
+                            raised[k] = PyTime.Iso(Clock.Now, "seconds");   // the move may have gone: never judged or made again
                     }
-                    acted.Add(new JsonObject
+                    var entry = new JsonObject
                     {
                         ["received"] = m.Get("receivedDateTime").Copy(), ["from"] = FromAddress(m), ["subject"] = m.GetCopy("subject", ""), ["why"] = why,
-                    });
-                    log($"{(dryRun ? "would accept" : "new time accepted")}  [{why}] {Py.Str(m.Get("subject"))}");
+                    };
+                    if (unknown is not null)
+                        Unconfirmed.Mark(entry, unknown, "Accepted: new time proposed, and free");
+                    acted.Add(entry);
+                    log(unknown is not null ? $"new time may have gone, not resent; the proposal is left in its folder  [{why}] {Py.Str(m.Get("subject"))}: {unknown}"
+                        : $"{(dryRun ? "would accept" : "new time accepted")}  [{why}] {Py.Str(m.Get("subject"))}");
                     continue;
                 }
                 seen.Add(k);

@@ -206,7 +206,7 @@ background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync 
 - **Your inbox can take a few rules without being triaged.** A folder with `unmatched = "leave"` gets only the rules that name it in `folders`, and mail no rule names is left alone, never queued: tidy the noise (meeting acceptances) without every email becoming a question. A rule with `folders` acts only there; one without acts in every folder except those.
 - **File** moves it to the folder in `to` (a path such as `Inbox/Projects`), left unread: for mail you keep but needn't decide on. `deleted` lists what was filed too.
 - **Forward (1.9.0)** sends the email on to `forward_to` with `comment` above it (Outlook's Forward), then marks it read (`mark_read`, on by default) and files it to `to` if given. `deleted` lists each one ("forwarded to …"). It needs **Mail.Send** as well as Mail.ReadWrite.
-  - **An email is never forwarded twice.** Its internet message ID is written to `forwarded_file` as "sending" before the forward goes, and as "sent" once Graph answers. If the answer is lost (a timeout or a dropped connection, after which the forward may well have gone), the email is queued saying so, to check Sent Items: it's never resent. If the forward went but marking or filing failed, the next run does only those.
+  - **An email is never forwarded twice.** Its internet message ID is written to `forwarded_file` as "sending" before the forward goes, and as "sent" once Graph answers. If the answer is lost (a 5xx, a timeout or a dropped connection, after which the forward may well have gone), the email is queued saying so, to check Sent Items: it's never resent. If the forward went but marking or filing failed, the next run does only those.
   - **`mail-triage forward <n>`** applies the rule to emails already in the queue, by number or Graph id (`--rule NAME` to name one): for mail queued before its rule existed. It's recorded and taken off the queue the same way.
   - A dry run says what it would do ("would forward to … and file to …"); `--writes journal` records the forward and sends nothing, and doesn't count it as sent.
 - **Check** runs a test on the email and deletes it only if there's nothing to do; otherwise it's queued with what the test found.
@@ -244,6 +244,10 @@ background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync 
   - **`mail-triage handle <n>`** hands one email over by hand: a queued one by number, or any email by Graph id (`--handler NAME` if no rule names one). For testing a handler, and for an email that was queued before its rule existed.
   - **Mail is from people you don't control.** A handler that gives it to an AI model should treat it as data, not instructions, and keep a person between the draft and anyone else.
 - **One run at a time**, so the watcher and a run started by hand can't both act on the same email. `clear` and `keep` take the same lock, so a run in progress can't write back a queue you've just cleared.
+- **A write that may have reached Microsoft is never sent again.** Reads (and the one POST that only reads, getSchedule) and removing a meeting from your calendar (a DELETE: finding it already gone counts as done) are retried after a 5xx or a dropped connection. Every other write (answering, declining, moving or cancelling a meeting, a hold, an invitation, forwarding, moving or marking an email) is sent once: only a 429 (throttled, so not processed) or a request that never connected is tried again. A 5xx, a timeout or a connection dropped after sending means it may have gone:
+  - **an automatic calendar change** (an invite answered by a rule, a decline on your days off, your own meeting cancelled on a day off, a double-booking rule, a 1:1 cancelled or moved for leave, a proposed new time accepted) **counts as done and is never made again**; it's listed in `deleted` under "Couldn't confirm: …" saying to check the calendar, and the watcher notifies ("N calendar changes may or may not have gone"). A proposal whose move may have gone is left in its folder.
+  - **a change made by hand** (`respond`, `cancel`, `move`, `hold`, `send-invite`) says so and asks you to check Outlook.
+  - **moving, deleting or marking an email** fails that run (logged); the next run reads the folder again, and an email that has already moved isn't there to move twice. A forward has its own record (above).
 - **Unattended deletes stay visible.** Everything the rules delete is recorded, and `mail-triage deleted` lists what went since you last cleared the queue, grouped by rule (`--all` for the last 60 days). `list` says how many. A rule that starts catching the wrong mail shows up there, and the email is still in Deleted Items.
 - **The watcher runs once at start, then every `every_minutes` within `hours`**, so logging on in the evening still clears the day's mail, and checking Outlook in the afternoon finds the folders already tidy. One watcher per settings file; it logs `alive` hourly and notifies a failure once, until a run succeeds.
 - **The watcher never opens a browser.** A lapsed sign-in is notified, and `mail-triage sign-in` at a console fixes it.
@@ -596,9 +600,8 @@ answers.** Sending the same invitation again, preview included, is refused with 
 
 **A send whose answer was lost** (a timeout, a dropped connection or a 5xx after the request went) **stays recorded as
 "sending" and is never retried**: it may have gone, and a second send would invite everyone twice. It says so, asks you
-to check Outlook, and is listed in `deleted` as "MAY HAVE GONE"; if it didn't go, send it from Outlook. The create goes
-through M365Graph's write-once call, which never resends a request that may have reached Microsoft (only a 429, or a
-request that never connected, is tried again). A refusal from Microsoft (4xx) sent nothing, so the record is dropped
+to check Outlook, and is listed in `deleted` as "MAY HAVE GONE"; if it didn't go, send it from Outlook. The create is
+sent once, as every write is (only a 429, or a request that never connected, is tried again). A refusal from Microsoft (4xx) sent nothing, so the record is dropped
 and you can fix it and send again. An entry is kept until the meeting has ended. A journal run (`--writes journal`)
 records nothing.
 

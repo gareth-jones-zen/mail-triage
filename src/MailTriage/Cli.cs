@@ -586,7 +586,13 @@ public static class Cli
             var (oldStart, oldEnd) = InviteTriage.Times(e);
             var start = PyTime.FromIso(args.Positional[1]);
             var end = args.Positional.Count > 2 ? start.Date + PyTime.TimeFromIso(args.Positional[2]) : start + (oldEnd - oldStart);
-            calendar.Move(eventId, start, end);
+            if (Unconfirmed.Try(() => calendar.Move(eventId, start, end)) is { } lost)
+            {
+                log($"move may have gone, not resent: {Py.Str(e.Get("subject"))}: {lost}");
+                Print(host.Err, $"Microsoft didn't confirm the move of \"{Py.Str(e.Get("subject"))}\", so it may have gone: check Outlook "
+                                + "before moving it again. It wasn't sent twice.");
+                return 1;
+            }
             log($"moved  {Py.Str(e.Get("subject"))}: {InviteTriage.Day(oldStart)} -> {InviteTriage.Day(start)}–{InviteTriage.Hm(end)}"
                 + (InviteTriage.People(e).Count <= 1 ? "" : " (attendees get an update)"));
             return 0;
@@ -599,6 +605,7 @@ public static class Cli
             return 0;
         }
         var decline = args.Flag("--decline");
+        var unconfirmed = 0;
         foreach (var e in found)
         {
             var (start, end) = InviteTriage.Times(e);
@@ -606,9 +613,16 @@ public static class Cli
             var note = args.Value("--note") is { Length: > 0 } given ? given : e.Req("note");
             Print(host.Out, $"  {InviteTriage.Day(start)}–{InviteTriage.Hm(end)}  {Py.Str(e.Get("subject"))}  ({InviteTriage.Organiser(e).Name}; "
                             + $"{Py.Str(e.Get("responseStatus").Get("response"))})" + (send ? $"  note: \"{note}\"" : "  (no response requested)"));
-            if (decline)
-                calendar.Respond(e.Req("id"), "decline", note, send);   // the occurrence: the rest of the series is untouched
+            // The occurrence: the rest of the series is untouched.
+            if (decline && Unconfirmed.Try(() => calendar.Respond(e.Req("id"), "decline", note, send)) is { } lost)
+            {
+                unconfirmed++;
+                log($"leave sweep: decline may have gone, not resent: {Py.Str(e.Get("subject"))}: {lost}");
+                Print(host.Err, "    Microsoft didn't confirm this decline, so it may have gone: check Outlook before declining it again.");
+            }
         }
+        if (unconfirmed > 0)
+            Print(host.Err, $"{unconfirmed} decline(s) may or may not have gone (above): never sent twice.");
         Print(host.Out, $"{found.Count} meeting(s) in your leave" + (decline ? ": declined, each occurrence on its own."
             : ". `--decline` declines them (each occurrence, not the series)."));
         if (decline)

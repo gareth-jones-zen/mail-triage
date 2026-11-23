@@ -201,9 +201,10 @@ public sealed class PyCompatTests
     {
         var seen = new List<string>();
         var adapter = new M365GraphAdapter(
-            (url, method, body, scopes, headers) =>
+            (url, method, body, scopes, headers, policy) =>
             {
-                seen.Add($"{method.Method} {url} {body?.ToJsonString()} {string.Join(",", scopes ?? [])} {string.Join(",", headers?.Values ?? [])}");
+                seen.Add($"{method.Method} {url} {body?.ToJsonString()} {string.Join(",", scopes ?? [])} {string.Join(",", headers?.Values ?? [])}"
+                         + (policy is null ? "" : policy == M365Graph.GraphRetryPolicy.Write ? " once" : " retried"));
                 return Task.FromResult(new JsonObject { ["ok"] = true });
             },
             (url, scopes, headers) => Pages(url, headers));
@@ -219,7 +220,10 @@ public sealed class PyCompatTests
         Assert.Equal(["1", "2"], events.Select(e => e.Req("id")));
         Assert.Equal("outlook.timezone=\"GMT Standard Time\"", events[0].Req("prefer"));
         Assert.True(adapter.Request("/me/x", "POST", new JsonObject(), ["Mail.ReadWrite"]).Truthy("ok"));
-        Assert.Equal(["POST /me/x {} Mail.ReadWrite "], seen);
+        Assert.Equal(["POST /me/x {} Mail.ReadWrite "], seen);   // no policy named: M365Graph sends a POST once
+        adapter.Request(ReadOnlyGraph.SchedulePath, "POST", new JsonObject());
+        adapter.RequestOnce("/me/events", "POST", new JsonObject());
+        Assert.Equal(["POST /me/calendar/getSchedule {}   retried", "POST /me/events {}   once"], seen.Skip(1));
     }
 
     [Fact]

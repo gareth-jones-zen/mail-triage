@@ -60,6 +60,9 @@ public static class Watcher
                             report = runOnce(settings, log);
                         if (report.New > 0 && settings.Notify == "new")
                             notify($"{report.New} email{(report.New > 1 ? "s" : "")} to review", ["mail-triage list"]);
+                        if (report.Unconfirmed > 0)
+                            notify($"{report.Unconfirmed} calendar change{(report.Unconfirmed > 1 ? "s" : "")} may or may not have gone",
+                                ["Microsoft didn't confirm; not sent again. Check the calendar: mail-triage deleted"]);
                         failing = null;
                         streak = 0;
                     }

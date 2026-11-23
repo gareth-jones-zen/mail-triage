@@ -12,6 +12,10 @@ public sealed record RunReport(int Deleted, int Filed, int New, int Waiting, int
 
     /// <summary>Emails a forward rule sent on (1.9.0).</summary>
     public int Forwarded { get; init; }
+
+    /// <summary>Automatic calendar writes whose answer was lost, so they may or may not have gone (never resent; listed in
+    /// `deleted` under "Couldn't confirm"). The watcher notifies when there are any.</summary>
+    public int Unconfirmed { get; init; }
 }
 
 /// <summary>One triage run, and what happens to the queue afterwards (triage.py).
@@ -88,6 +92,7 @@ public static class Triage
         int deleted = 0, again = 0, filed = 0, handled = 0, forwarded = 0;
         var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
         var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
+        var unconfirmedBefore = items.Count(Unconfirmed.Is);
         var waiting = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
         foreach (var i in previous)
             if (i.Get("key") is { } k)
@@ -343,7 +348,8 @@ public static class Triage
                     items.Add((JsonNode)new JsonObject
                     {
                         ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
-                        ["subject"] = a.GetCopy("subject"), ["rule"] = "Accepted: new time proposed, and free", ["accepted"] = a.GetCopy("why"),
+                        ["subject"] = a.GetCopy("subject"), ["rule"] = a.Str("rule") ?? "Accepted: new time proposed, and free",
+                        [a.Has("rule") ? "did" : "accepted"] = a.GetCopy("why"),
                     });
             }
             seen.UnionWith(pendingKeys);   // an invite answered elsewhere (in Outlook) drops off the queue
@@ -403,10 +409,13 @@ public static class Triage
             StateFiles.Save(settings.DeletedFile, record);
             SaveQueue(settings, [.. carried, .. added]);
         }
-        var report = new RunReport(deleted, filed, added.Count, carried.Count, Math.Max(0, again - carried.Count), invitesNew) { Handled = handled, Forwarded = forwarded };
+        var unconfirmed = items.Count(Unconfirmed.Is) - unconfirmedBefore;
+        var report = new RunReport(deleted, filed, added.Count, carried.Count, Math.Max(0, again - carried.Count), invitesNew)
+            { Handled = handled, Forwarded = forwarded, Unconfirmed = unconfirmed };
         log($"done: {deleted} deleted, " + (filed > 0 ? $"{filed} filed, " : "") + (forwarded > 0 ? $"{forwarded} forwarded, " : "")
             + (handled > 0 ? $"{handled} handled, " : "") + $"{added.Count} new to review"
-            + (invitesNew > 0 ? $" ({invitesNew} invites)" : "") + $", {carried.Count} still waiting from earlier runs, {report.Kept} seen before and kept");
+            + (invitesNew > 0 ? $" ({invitesNew} invites)" : "") + $", {carried.Count} still waiting from earlier runs, {report.Kept} seen before and kept"
+            + (unconfirmed > 0 ? $"; {unconfirmed} calendar change(s) may or may not have gone (see `mail-triage deleted`)" : ""));
         return report;
     }
 

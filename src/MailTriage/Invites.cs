@@ -449,12 +449,16 @@ public static class InviteTriage
             if (why is not null)
             {
                 var send = !first.Has("responseRequested") || Py.Truthy(first.Get("responseRequested"));
+                string? unknown = null;
                 if (!dryRun)
                 {
                     List<string> targets = Lone(group) ? [first.Req("id")]
                         : [first.Truthy("seriesMasterId") ? Py.Str(first.Get("seriesMasterId")) : first.Req("id"), .. Exceptions(group)];
-                    foreach (var target in targets)
-                        calendar.Respond(target, "accept", send: send);
+                    unknown = Unconfirmed.Try(() =>
+                    {
+                        foreach (var target in targets)
+                            calendar.Respond(target, "accept", send: send);
+                    });
                 }
                 foreach (var e in group)
                     memory[SlotKey(e)] = Slot(e);
@@ -462,14 +466,18 @@ public static class InviteTriage
                 if (acted is not null)
                 {
                     var (oname, oaddress) = Organiser(first);
-                    acted.Add(new JsonObject
+                    var entry = new JsonObject
                     {
                         ["received"] = PyTime.Iso(start, "minutes"), ["from"] = oname.Length > 0 ? oname : oaddress,
                         ["subject"] = $"{(first.StrOr("subject") is { Length: > 0 } s ? s : "(no subject)")}: {Day(start)}–{Hm(end)}",
                         ["why"] = why,
-                    });
+                    };
+                    if (unknown is not null)
+                        Unconfirmed.Mark(entry, unknown, "Accepted: already accepted, only shortened");
+                    acted.Add(entry);
                 }
-                log($"{(dryRun ? "would accept" : "invite accepted")}  [{why}] {Py.Str(first.Get("subject"))}");
+                log(unknown is not null ? $"invite accept may have gone, not resent  [{why}] {Py.Str(first.Get("subject"))}: {unknown}"
+                    : $"{(dryRun ? "would accept" : "invite accepted")}  [{why}] {Py.Str(first.Get("subject"))}");
                 continue;
             }
             seen.Add(k);
@@ -502,16 +510,19 @@ public static class InviteTriage
             };
             if (Auto(settings, first, verdict, rule) is { } auto)
             {
-                if (!dryRun)
-                    MailTriage.Triage.Apply(calendar, item, auto.Action, auto.Move, log);
+                var unknown = dryRun ? null : Unconfirmed.Try(() => MailTriage.Triage.Apply(calendar, item, auto.Action, auto.Move, log));
                 raised[k] = PyTime.Iso(Clock.Now, "seconds");
-                acted?.Add(new JsonObject
+                var answered = new JsonObject
                 {
                     ["received"] = PyTime.Iso(start, "minutes"), ["from"] = name.Length > 0 ? name : address, ["subject"] = item.GetCopy("subject"),
                     ["why"] = verdict.Why + (verdict.Note.Length > 0 && verdict.Decline.Count > 0 ? $" (declined {verdict.Decline.Count}: \"{verdict.Note}\")" : ""),
                     ["rule"] = auto.Label,
-                });
-                log($"{(dryRun ? "would answer" : "invite answered")}  [{auto.Label}] {Py.Str(first.Get("subject"))} ({Day(start)})");
+                };
+                if (unknown is not null)
+                    Unconfirmed.Mark(answered, unknown, auto.Label);
+                acted?.Add(answered);
+                log(unknown is not null ? $"invite answer may have gone, not resent  [{auto.Label}] {Py.Str(first.Get("subject"))} ({Day(start)}): {unknown}"
+                    : $"{(dryRun ? "would answer" : "invite answered")}  [{auto.Label}] {Py.Str(first.Get("subject"))} ({Day(start)})");
                 continue;
             }
             items.Add(item);
@@ -600,19 +611,25 @@ public static class InviteTriage
             }
             var note = OffNote(settings, day, away, bankOnly);
             var send = !m.Has("responseRequested") || Py.Truthy(m.Get("responseRequested"));
+            string? unknown = null;
             if (!dryRun)
             {
-                calendar.Respond(m.Req("id"), "decline", note, send);   // the occurrence: the rest of the series is untouched
+                // The occurrence: the rest of the series is untouched. Done even when the answer was lost: never sent twice.
+                unknown = Unconfirmed.Try(() => calendar.Respond(m.Req("id"), "decline", note, send));
                 done[key] = PyTime.Iso(Clock.Now, "seconds");
             }
             var (name, address) = Organiser(m);
-            acted.Add(new JsonObject
+            var entry = new JsonObject
             {
                 ["received"] = PyTime.Iso(start, "minutes"), ["from"] = name.Length > 0 ? name : address,
                 ["subject"] = $"{(m.StrOr("subject") is { Length: > 0 } s ? s : "(no subject)")}: {Day(start)}–{Hm(end)}",
                 ["why"] = note, ["rule"] = bankOnly.Contains(day) ? "Declined: bank holiday" : "Declined: on leave",
-            });
-            log($"{(dryRun ? "would decline" : "declined")}  [days off: {note}] {m.StrOr("subject")} ({Day(start)})");
+            };
+            if (unknown is not null)
+                Unconfirmed.Mark(entry, unknown, "Declined");
+            acted.Add(entry);
+            log(unknown is not null ? $"decline may have gone, not resent  [days off: {note}] {m.StrOr("subject")} ({Day(start)}): {unknown}"
+                : $"{(dryRun ? "would decline" : "declined")}  [days off: {note}] {m.StrOr("subject")} ({Day(start)})");
         }
         return acted;
     }
@@ -678,22 +695,30 @@ public static class InviteTriage
                 break;
             }
             var note = bank ? bankNote : myNote;
+            string? unknown = null;
             if (!dryRun)
             {
-                if (others.Count == 1)
-                    calendar.Cancel(m.Req("id"), note);   // that occurrence: the rest of the series is untouched
-                else
-                    calendar.Remove(m.Req("id"));
+                unknown = Unconfirmed.Try(() =>
+                {
+                    if (others.Count == 1)
+                        calendar.Cancel(m.Req("id"), note);   // that occurrence: the rest of the series is untouched
+                    else
+                        calendar.Remove(m.Req("id"));
+                });
                 done[key] = PyTime.Iso(Clock.Now, "seconds");
             }
             var what = others.Count == 1 ? "Cancelled" : "Removed";
-            acted.Add(new JsonObject
+            var entry = new JsonObject
             {
                 ["received"] = PyTime.Iso(start, "minutes"), ["from"] = "", ["subject"] = subject,
                 ["why"] = others.Count == 1 ? note : "your own block, on a day off",
                 ["rule"] = $"{what}: your {(others.Count == 1 ? "meeting" : "block")}, {(bank ? "bank holiday" : "on leave")}",
-            });
-            log($"{(dryRun ? (others.Count == 1 ? "would cancel" : "would remove") : what.ToLowerInvariant())}  [days off] {m.StrOr("subject")} ({Day(start)})");
+            };
+            if (unknown is not null)
+                Unconfirmed.Mark(entry, unknown, what);
+            acted.Add(entry);
+            log(unknown is not null ? $"{what.ToLowerInvariant()} may have gone, not resent  [days off] {m.StrOr("subject")} ({Day(start)}): {unknown}"
+                : $"{(dryRun ? (others.Count == 1 ? "would cancel" : "would remove") : what.ToLowerInvariant())}  [days off] {m.StrOr("subject")} ({Day(start)})");
         }
         return (items, acted, seen);
     }
