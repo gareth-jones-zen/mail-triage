@@ -271,6 +271,8 @@ mail-triage invite decline 5 --note "Clashes, sorry"   # the instance; --series 
 mail-triage invite accept 6 --move                     # accept, and move the travel to 19:00
 mail-triage move <event id> 2026-11-11T16:00           # move one of your own meetings or blocks by hand
 mail-triage hold 2026-11-25T16:15 17:00 "Hold: ITS"     # a hold in your calendar, no attendees (--yes to create)
+mail-triage respond <event id> tentative --note "I'll join after 14:00"   # answer a meeting you already accepted (--yes to send)
+mail-triage cancel <event id> --note "Moved to Thursday"   # cancel your meeting, or delete your block (--yes to do it)
 mail-triage sent                                       # with [sent]: what it would tidy in Sent Items (--yes to do it)
 mail-triage leave                                      # meetings in your leave you haven't declined
 mail-triage leave --decline                            # decline them, each with the leave note
@@ -509,6 +511,24 @@ you've chosen (a slot-finding skill proposes it): you open the hold, add the peo
 - `--online` makes it a Teams meeting; Microsoft adds the join details, which can't be removed afterwards.
 - **A create that may have reached Microsoft is never retried**: if the call fails after it was sent, it says so and
   asks you to check the calendar, so a hold is never made twice.
+
+## Answering and cancelling by hand: `respond` and `cancel` (1.22.0)
+
+Two more calendar writes, so that nothing needs a connector or a one-off script to change the calendar: each works
+like `move` and `hold`. **Without `--yes` they only show what they would do**; with `--yes` they write once, read the
+event back, log it, and list it in `mail-triage deleted` ("Answered by hand", "Cancelled by hand", "Deleted by hand").
+**A write that may have reached Microsoft is never retried**: if the call fails after it was sent, it says so and asks
+you to check the calendar. **One occurrence by default; `--series` for the whole series** (decline the instance, never
+the series, unless you mean it); a series id without `--series` is refused.
+
+- **`mail-triage respond <event id> accept|tentative|decline [--note TEXT] [--series] [--yes]`** answers a meeting you're
+  invited to, **whatever you said before** (accepted, tentative or not yet): the gap `invite` leaves, as it only answers
+  invites still pending. The organiser gets your response, with the note. The preview shows the meeting, its organiser,
+  what you've said so far and what would be sent. Your own meetings are refused (use `move` or `cancel`).
+- **`mail-triage cancel <event id> [--note TEXT] [--series] [--yes]`** is for your own events. **A block with no one else
+  invited is deleted, and no one is told.** **A meeting with attendees is cancelled**: each attendee gets a cancellation,
+  with the note, and the preview lists them all. Someone else's meeting is refused (use `respond <event id> decline`).
+
 
 ## Your 1:1s, when someone's on leave
 

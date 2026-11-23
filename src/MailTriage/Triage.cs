@@ -740,6 +740,20 @@ public static class Triage
         StateFiles.Save(settings.DeletedFile, record);
     }
 
+    /// <summary>Record a `respond` or `cancel` (1.22.0) in the deleted file, under its own heading ("Answered by hand",
+    /// "Cancelled by hand", "Deleted by hand"), so the review sees every calendar write made from a session.</summary>
+    public static void RecordCalendarWrite(Settings settings, string heading, string subject, DateTime start, string from, string did)
+    {
+        var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
+        var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
+        items.Add((JsonNode)new JsonObject
+        {
+            ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = PyTime.Iso(start), ["from"] = from,
+            ["subject"] = subject, ["rule"] = heading, ["did"] = did,
+        });
+        StateFiles.Save(settings.DeletedFile, record);
+    }
+
     /// <summary>Empty the queue; what the rules deleted counts as seen too.</summary>
     public static int Clear(Settings settings, Action<string> log)
     {

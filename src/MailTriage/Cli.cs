@@ -70,6 +70,14 @@ public static class Cli
                 [--online] [--yes]           a hold in your own calendar, never with attendees (you add them and send);
                                             without --yes, shows what it would create; --online makes it a Teams
                                             meeting, whose join details can't be removed afterwards
+            mail-triage respond <event id> accept|tentative|decline [--note TEXT] [--series] [--yes]
+                                            answer a meeting you're invited to, whatever you said before (accepted,
+                                            tentative or not yet); one occurrence unless --series; without --yes, shows
+                                            what it would send
+            mail-triage cancel <event id> [--note TEXT] [--series] [--yes]
+                                            one of your own events: a block with no attendees is deleted (no one is
+                                            told); a meeting with attendees is cancelled, and each gets a cancellation;
+                                            one occurrence unless --series; without --yes, shows what it would do
             mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
             mail-triage one-to-ones         with [one_to_ones]: what each run would do with your 1:1s and leave (changes nothing)
             mail-triage sent [--yes]        with [sent]: what it would delete or file in Sent Items (meeting messages you
@@ -89,7 +97,7 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
-         "move", "hold", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
+         "move", "hold", "respond", "cancel", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -120,6 +128,8 @@ public static class Cli
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
         ["days-off"] = ([], ["--days"]),
         ["hold"] = (["--yes", "--online"], ["--body", "--body-file", "--location"]),
+        ["respond"] = (["--yes", "--series"], ["--note"]),
+        ["cancel"] = (["--yes", "--series"], ["--note"]),
         ["sent"] = (["--yes"], []),
     };
 
@@ -216,6 +226,14 @@ public static class Cli
                 break;
             case "move":
                 Count(2, 3, "event, start");
+                break;
+            case "respond":
+                Count(2, 2, "event, action");
+                if (a.Positional[1] is not ("accept" or "tentative" or "decline"))
+                    throw new UsageException($"argument action: invalid choice: {Py.ReprString(a.Positional[1])} (choose from 'accept', 'tentative', 'decline')");
+                break;
+            case "cancel":
+                Count(1, 1, "event");
                 break;
             case "hold":
                 Count(3, 3, "start, end, subject");
@@ -339,6 +357,9 @@ public static class Cli
                 return SentCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command == "hold")
                 return HoldCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
+            if (args.Command is "respond" or "cancel")
+                return CalendarWrites.Run(args.Command, args.Positional, args.Value("--note") ?? "", args.Flag("--series"), args.Flag("--yes"),
+                    settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host.Out, host.Err);
             if (args.Command is "invite" or "move" or "leave")
             {
                 if (settings.Invites is null)
