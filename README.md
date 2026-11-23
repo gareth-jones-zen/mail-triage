@@ -463,7 +463,7 @@ subject, so only these are ever touched:
 |---|---|
 | `invites` | meeting requests and updates you sent (`meetingRequest`) |
 | `cancellations` | cancellations you sent (`meetingCancelled`) |
-| `responses` | your accepts, tentatives and declines (`meetingAccepted`, `meetingTenativelyAccepted`, `meetingDeclined`) |
+| `responses` | your accepts, tentatives and declines (`meetingAccepted`, `meetingTenativelyAccepted`, `meetingDeclined`), and (1.20.0) Outlook's **Follow** notifications ("Following: …", sent when you follow a meeting you can't attend). Graph types those as responses but with no meetingMessageType it names, so they're told by their message class, `IPM.Schedule.Meeting.Resp.Tent.Follow`, never by subject; the preview shows them as "follows" |
 | forwards | the Sent Items copy of a forward a `forward` rule made, when that rule has `file_sent` |
 
 ```toml

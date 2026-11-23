@@ -91,6 +91,15 @@ public sealed class Mailbox
     /// <summary>One message in full (a meeting message's meetingMessageType, startDateTime and endDateTime included).</summary>
     public JsonObject Message(string messageId) => Graph.Request($"/me/messages/{messageId}", scopes: ReadScopes);
 
+    /// <summary>A message's MAPI message class (PidTagMessageClass), or null: Outlook's "Follow" notification is
+    /// IPM.Schedule.Meeting.Resp.Tent.Follow, typed by Graph as an eventMessageResponse with no meetingMessageType it names.</summary>
+    public string? MessageClass(string messageId)
+    {
+        var expand = Uri.EscapeDataString("singleValueExtendedProperties($filter=id eq 'String 0x001A')");
+        var m = Graph.Request($"/me/messages/{messageId}?$select=id&$expand={expand}", scopes: ReadScopes);
+        return m.Get("singleValueExtendedProperties").Objects().Select(p => p.Str("value")).FirstOrDefault(v => v is not null);
+    }
+
     public string Body(string messageId) =>
         Graph.Request($"/me/messages/{messageId}?$select=body", scopes: ReadScopes).Get("body").Req("content");
 

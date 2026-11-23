@@ -55,7 +55,7 @@ public sealed class SentTests : IDisposable
     }
 
     /// <summary>Sent Items, each meeting message's details, the folder tree, and every write.</summary>
-    private sealed class Graph(List<JsonObject> sent, Dictionary<string, JsonObject> details) : IGraph
+    private sealed class Graph(List<JsonObject> sent, Dictionary<string, JsonObject> details, Dictionary<string, string>? classes = null) : IGraph
     {
         public List<(string Method, string Url, JsonNode? Body)> Calls { get; } = [];
         public List<string> Reads { get; } = [];
@@ -75,6 +75,14 @@ public sealed class SentTests : IDisposable
         public JsonObject Request(string url, string method = "GET", JsonNode? body = null, IReadOnlyList<string>? scopes = null,
             IReadOnlyDictionary<string, string>? headers = null)
         {
+            if (method == "GET" && url.StartsWith("/me/messages/", StringComparison.Ordinal) && url.Contains("singleValueExtendedProperties"))
+            {
+                var id = url["/me/messages/".Length..url.IndexOf('?')];
+                var props = new JsonArray();
+                if (classes is not null && classes.TryGetValue(id, out var cls))
+                    props.Add((JsonNode)new JsonObject { ["id"] = "String 0x1a", ["value"] = cls });
+                return new JsonObject { ["id"] = id, ["singleValueExtendedProperties"] = props };
+            }
             if (method == "GET" && url.StartsWith("/me/messages/", StringComparison.Ordinal) && details.TryGetValue(url["/me/messages/".Length..], out var d))
                 return (JsonObject)d.DeepClone();
             if (method != "GET")
@@ -145,6 +153,63 @@ public sealed class SentTests : IDisposable
         Assert.Equal("Suppliers/Notices", findings.Single(f => f.Id == "fwd").To);
         Assert.Contains("attachments", findings.Single(f => f.Id == "att").Why);
         Assert.Empty(graph.Calls);   // a plan only reads
+    }
+
+    /// <summary>Outlook's "Follow" notification (1.20.0): an eventMessageResponse whose meetingMessageType [sent] doesn't
+    /// name, told by its message class, never by its "Following: " subject.</summary>
+    private (Graph Graph, Settings Settings) FollowSetup(string text)
+    {
+        var settings = dir.Settings(text);
+        var sent = new List<JsonObject>
+        {
+            Msg("fol", "Following: Alt Net PCB", "2026-11-19T09:00:00Z", "#microsoft.graph.eventMessageResponse",
+                preview: "Gareth Jones is following this meeting Learn more about Follow"),
+            Msg("fol-att", "Following: Workshop", "2026-11-18T09:00:00Z", "#microsoft.graph.eventMessageResponse", attachments: true),
+            Msg("plain", "Following: up on the budget", "2026-11-17T09:00:00Z", preview: "Gareth Jones is following this meeting"),
+            Msg("odd", "Following: something", "2026-11-16T09:00:00Z", "#microsoft.graph.eventMessageResponse"),
+        };
+        var details = new Dictionary<string, JsonObject>
+        {
+            ["fol"] = Meeting("none"), ["fol-att"] = Meeting("none"), ["odd"] = Meeting("none"),
+        };
+        var classes = new Dictionary<string, string>
+        {
+            ["fol"] = "IPM.Schedule.Meeting.Resp.Tent.Follow", ["fol-att"] = "IPM.Schedule.Meeting.Resp.Tent.Follow",
+            ["odd"] = "IPM.Note",
+        };
+        return (new Graph(sent, details, classes), settings);
+    }
+
+    [Fact]
+    public void follow_notifications_are_follows_governed_by_responses()
+    {
+        var (graph, settings) = FollowSetup(AllNow);
+        var findings = Plan(graph, settings).Findings;
+        var actions = Actions(findings);
+        Assert.Equal("follows:delete", actions["fol"]);
+        Assert.Equal("follows:skip", actions["fol-att"]);   // attachments: never deleted
+        Assert.Equal("other:leave", actions["plain"]);      // "Following: " in a subject alone isn't enough
+        Assert.Equal("other:leave", actions["odd"]);        // a meeting message whose class isn't a response
+        Assert.Contains(SentItems.Describe(findings, true, 4, false), l => l.Contains("follows (meetings you followed") && l.Contains("would delete 1"));
+
+        var (offGraph, offSettings) = FollowSetup(Base + "\n[sent]\ninvites = \"immediately\"\n");
+        var off = Plan(offGraph, offSettings).Findings.Single(f => f.Id == "fol");
+        Assert.Equal("follows:leave", $"{off.Kind}:{off.Action}");
+        Assert.Contains("responses is off", off.Why);
+
+        var (laterGraph, laterSettings) = FollowSetup(Base + "\n[sent]\nresponses = \"after_sending\"\nresponses_days = 7\n");
+        Assert.Equal("follows:wait", Actions(Plan(laterGraph, laterSettings).Findings)["fol"]);   // sent 19 Nov + 7 days
+    }
+
+    [Fact]
+    public void message_class_says_which_kind()
+    {
+        Assert.Equal("follows", SentItems.KindOfClass("IPM.Schedule.Meeting.Resp.Tent.Follow"));
+        Assert.Equal("responses", SentItems.KindOfClass("IPM.Schedule.Meeting.Resp.Pos"));
+        Assert.Null(SentItems.KindOfClass("IPM.Note"));
+        Assert.Null(SentItems.KindOfClass(null));
+        Assert.Equal("responses", SentItems.SettingFor("follows"));
+        Assert.Equal("invites", SentItems.SettingFor("invites"));
     }
 
     [Fact]

@@ -9,7 +9,8 @@ namespace MailTriage;
 /// you sent it). The kinds are the meeting messages you sent, told apart by Graph's message type, never by subject:
 ///   invites        meeting requests and updates (meetingRequest)
 ///   cancellations  cancellations (meetingCancelled)
-///   responses      your accept, tentative and decline replies
+///   responses      your accept, tentative and decline replies, and Outlook "Follow" notifications (1.20.0: shown as
+///                  "follows", told by their message class IPM.Schedule.Meeting.Resp.Tent.Follow, governed by responses)
 /// Forwards made by a forward rule with file_sent are moved, never deleted, to that folder.</summary>
 public sealed class SentSettings
 {
@@ -74,6 +75,7 @@ public static class SentItems
         "invites" => "invites (meeting requests and updates you sent)",
         "cancellations" => "cancellations you sent",
         "responses" => "responses (your accepts, tentatives and declines)",
+        "follows" => "follows (meetings you followed; [sent] responses governs them)",
         _ => kind,
     };
 
@@ -85,6 +87,19 @@ public static class SentItems
         "meetingAccepted" or "meetingTenativelyAccepted" or "meetingTentativelyAccepted" or "meetingDeclined" => "responses",
         _ => null,
     };
+
+    /// <summary>A meeting message Graph types without a meetingMessageType [sent] knows, by its MAPI message class (1.20.0):
+    /// Outlook's "Follow" (IPM.Schedule.Meeting.Resp.Tent.Follow, "Following: …", sent when you follow a meeting you can't
+    /// attend) is "follows"; any other IPM.Schedule.Meeting.Resp.* is "responses". Never by subject.</summary>
+    public static string? KindOfClass(string? messageClass)
+    {
+        if (messageClass is null || !messageClass.StartsWith("IPM.Schedule.Meeting.Resp.", StringComparison.OrdinalIgnoreCase))
+            return null;
+        return messageClass.EndsWith(".Follow", StringComparison.OrdinalIgnoreCase) ? "follows" : "responses";
+    }
+
+    /// <summary>The [sent] setting that governs a kind: follows are responses (GJ, 23 Nov 2026).</summary>
+    public static string SettingFor(string kind) => kind == "follows" ? "responses" : kind;
 
     private static bool IsEventMessage(JsonObject m) =>
         m.Str("@odata.type") is { } t && t.StartsWith("#microsoft.graph.eventMessage", StringComparison.Ordinal);
@@ -153,15 +168,17 @@ public static class SentItems
             }
             var details = mailbox.Message(id);
             var kind = KindOf(details.Str("meetingMessageType"));
+            if (kind is null && KindOfClass(mailbox.MessageClass(id)) is { } byClass)
+                kind = byClass;
             if (kind is null)
             {
                 findings.Add(new SentFinding("other", "leave", m, "a meeting message of no kind [sent] handles"));
                 continue;
             }
-            var (when, days) = sent.For(kind);
+            var (when, days) = sent.For(SettingFor(kind));
             if (when == "off")
             {
-                findings.Add(new SentFinding(kind, "leave", m, $"{kind} is off in [sent]"));
+                findings.Add(new SentFinding(kind, "leave", m, $"{SettingFor(kind)} is off in [sent]"));
                 continue;
             }
             if (m.Truthy("hasAttachments"))
@@ -200,7 +217,7 @@ public static class SentItems
         {
             $"Sent Items: {read} message(s) read" + (first ? " (all of Sent Items: the first run)." : " (new since the last run)."),
         };
-        var order = new[] { "invites", "cancellations", "responses", "forwards", "other" };
+        var order = new[] { "invites", "cancellations", "responses", "follows", "forwards", "other" };
         foreach (var kind in order)
         {
             var group = findings.Where(f => f.Kind == kind).ToList();
