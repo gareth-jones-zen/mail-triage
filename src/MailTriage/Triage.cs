@@ -724,6 +724,22 @@ public static class Triage
         return gone.Count;
     }
 
+    /// <summary>A hold made by hand (1.18.0), recorded beside what the rules deleted, moved and declined, so the next review
+    /// sees it: `mail-triage deleted` lists it under "Holds".</summary>
+    public static void RecordHeld(Settings settings, string subject, DateTime start, DateTime end, string? eventId)
+    {
+        var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
+        var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
+        items.Add((JsonNode)new JsonObject
+        {
+            ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = PyTime.Iso(start), ["from"] = settings.Email,
+            ["subject"] = subject, ["rule"] = "Holds",
+            ["did"] = $"held {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, no attendees"
+                      + (eventId is null ? "" : $" ({eventId})"),
+        });
+        StateFiles.Save(settings.DeletedFile, record);
+    }
+
     /// <summary>Empty the queue; what the rules deleted counts as seen too.</summary>
     public static int Clear(Settings settings, Action<string> log)
     {

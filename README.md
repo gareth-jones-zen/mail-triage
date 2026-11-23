@@ -188,11 +188,10 @@ mail-triage adds one rule on top: **a half day counts only for what it overlaps.
 title says AM or PM, or "from PM" / "to AM" on a longer entry) is off for that half (before or after `[one_to_ones]`'
 `midday`, 13:00 by default); a few hours marked as leave are off for those hours; one whose half can't be told (People
 First's `Holiday (half day) (<job title>)`) is never acted on: invites on it are asked, accepted meetings left alone,
-and 1:1s raised. `mail-triage days-off` shows each weekday's verdict (`--differences`: only where the rules before 1.17.0
-said otherwise; that comparison goes in 1.18.0).
+and 1:1s raised. `mail-triage days-off` shows each weekday's verdict and the entry behind it.
 
 A file with neither `[leave]` nor the old settings keeps mail-triage's old defaults (`leave_pattern`'s
-`^(w+ )?(holidays?|annual leave|leave|bank holiday)` and the "Holiday" category) under the new rules.
+`^(\w+ )?(holidays?|annual leave|leave|bank holiday)\b` and the "Holiday" category) under the new rules.
 
 **Until 1.17.0** these were `leave_pattern` in `[invites]` (any length of entry matching it was a whole day off) and
 `bank_holiday_categories` in `[invites]` and `[one_to_ones]`. They're still read, as `subjects` and
@@ -271,6 +270,7 @@ mail-triage list
 mail-triage invite decline 5 --note "Clashes, sorry"   # the instance; --series for the whole series
 mail-triage invite accept 6 --move                     # accept, and move the travel to 19:00
 mail-triage move <event id> 2026-11-11T16:00           # move one of your own meetings or blocks by hand
+mail-triage hold 2026-11-25T16:15 17:00 "Hold: ITS"     # a hold in your calendar, no attendees (--yes to create)
 mail-triage leave                                      # meetings in your leave you haven't declined
 mail-triage leave --decline                            # decline them, each with the leave note
 ```
@@ -452,6 +452,21 @@ mail-triage double-bookings      # each upcoming double booking, and what the ru
 - **Keep all the `[[double_booking_rule]]` tables together** (as for every kind of `[[...]]` table): one split by
   another table is refused, rather than silently losing the rules before the break. Settings are checked strictly: an
   unknown key, an unknown group, an `action` other than move or decline, or a `note` on a move is an error.
+
+## Holds: a time kept for a meeting you'll send yourself
+
+`mail-triage hold START END SUBJECT [--body TEXT | --body-file FILE] [--location TEXT] [--online] [--yes]` puts an event
+in your own calendar, shown as busy, **with no attendees, ever**: there's no option to add any, and the write refuses an
+event that has one, because an attendee is sent an invitation the moment the event exists. It's for holding a time
+you've chosen (a slot-finding skill proposes it): you open the hold, add the people and send it yourself.
+
+- START is `YYYY-MM-DDTHH:MM`, END `HH:MM` (or a full time), in local time; a past start, or an end before the start, is
+  refused.
+- **Without `--yes` it only shows what it would create.** With `--yes` it creates it, reads it back, prints its id and
+  link, logs it, and lists it in `mail-triage deleted` under "Holds", next to what the rules moved and declined.
+- `--online` makes it a Teams meeting; Microsoft adds the join details, which can't be removed afterwards.
+- **A create that may have reached Microsoft is never retried**: if the call fails after it was sent, it says so and
+  asks you to check the calendar, so a hold is never made twice.
 
 ## Your 1:1s, when someone's on leave
 

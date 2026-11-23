@@ -121,26 +121,4 @@ public static class Leave
         DayOffKind.HalfDay => d.Half switch { HalfOfDay.Am => "half AM", HalfOfDay.Pm => "half PM", _ => "half ?" },
         _ => "working",
     };
-
-    // ---- The old rules, kept only for `days-off`'s comparison. REMOVE IN 1.18.0. ----
-
-    /// <summary>OLD (before 1.17.0, for `days-off` only): what the previous code made of a day: a bank holiday by
-    /// [invites]/[one_to_ones] bank_holiday_categories or a "Bank holiday" title; leave by [invites] leave_pattern, any
-    /// length; a half day only when every leave entry's title says half, AM or PM.</summary>
-    internal static (string Verdict, string? Entry) LegacyVerdict(Settings settings, List<JsonObject> events, DateOnly day)
-    {
-        var categories = settings.Leave.BankHolidayCategories;   // the same categories: the comparison is of the rules
-        var onDay = events.Where(e => InviteTriage.SpanDays(e).Contains(day)).ToList();
-        var bank = onDay.FirstOrDefault(e => InviteTriage.IsBankHoliday(settings, e, categories));
-        var pattern = PyRegex.Get(settings.Invites?.LeavePattern ?? Invites.DefaultLeavePattern, true);
-        var leave = onDay.Where(e => !InviteTriage.IsBankHoliday(settings, e, categories)
-                                     && InviteTriage.Organiser(e).Address == settings.Email && !e.Truthy("isCancelled")
-                                     && pattern.MatchStart(e.StrOr("subject")) is not null).ToList();
-        if (leave.Count > 0)
-        {
-            var half = leave.All(e => PyRegex.IsMatch(@"\bhalf\b|\b(am|pm)\b", e.StrOr("subject"), true));
-            return (half ? "half (its hours)" : "leave", leave[0].StrOr("subject"));
-        }
-        return bank is not null ? ("bank holiday", bank.StrOr("subject")) : ("working", null);
-    }
 }

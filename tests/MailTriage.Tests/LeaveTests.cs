@@ -37,22 +37,22 @@ public sealed class SharedLeave : IDisposable
     ];
 
     [Fact]
-    public void days_off_shows_each_weekday_with_the_old_verdict_and_marks_the_differences()
+    public void days_off_shows_each_weekday_and_its_verdict_only()
     {
         var lines = Cli.DaysOffLines(config, Fixtures(), new DateOnly(2026, 12, 7), 12);
         string Verdict(int i) => lines[i].New;
         Assert.Equal(10, lines.Count);   // weekdays only
         Assert.Equal(["leave", "half AM", "half ?", "leave", "bank holiday", "bank holiday", "leave", "leave", "leave", "working"],
             Enumerable.Range(0, 10).Select(Verdict));
-        // Where the old rules (leave_pattern, any length; a half day only by its title) said otherwise:
-        // the two hours on Tue (a whole day, then), "On leave PM" on Thu (a half day, then: the shared half_day is
-        // "(half day)" only), and "Christmas holidays" on Fri 18th (leave, then: not one of the shared subjects).
-        Assert.Equal(["Tue 08 Dec", "Thu 10 Dec", "Fri 18 Dec"],
-            lines.Where(l => l.Differs).Select(l => l.Text[2..12]));
-        Assert.Contains("(old: leave)", lines[1].Text);
-        Assert.Contains("(old: half (its hours))", lines[2].Text);   // same kind: not marked
-        Assert.False(lines[2].Differs);
+        // 1.18.0: the old rules' column (and --differences) are gone; each line is the day, the verdict and its entry.
+        Assert.DoesNotContain(lines, l => l.Text.Contains("(old:"));
+        Assert.StartsWith("  Mon 07 Dec  leave", lines[0].Text);
+        Assert.EndsWith("Holiday (Principal Architect)", lines[0].Text);
     }
+
+    [Fact]
+    public void days_off_refuses_the_retired_differences_flag() =>
+        Assert.Throws<UsageException>(() => Cli.Parse(["days-off", "--differences"]));
 
     [Fact]
     public void a_half_day_counts_only_for_what_it_overlaps_and_one_of_unknown_half_not_at_all()

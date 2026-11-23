@@ -34,6 +34,11 @@ public interface ICalendarWriter
     /// <summary>Take a meeting someone else has cancelled off your calendar: Outlook's "Remove from calendar". The
     /// one write here that notifies nobody, as you aren't the organiser (callers check).</summary>
     void Remove(string eventId);
+
+    /// <summary>Create a hold in your own calendar (1.18.0): an event with no attendees, so it notifies nobody. The body is
+    /// Holds.Body's, which never has attendees; the writer refuses one that does. Returns the created event (Live), or null
+    /// when the write was only journalled.</summary>
+    JsonObject? Hold(JsonObject body);
 }
 
 /// <summary>How a run may write: Live sends; Journal records what it would send and sends nothing; Refuse throws.
@@ -106,7 +111,7 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
     private static readonly string[] MailScopes = ["Mail.ReadWrite"];
     private static readonly string[] SendScopes = ["Mail.Send"];
     private static readonly string[] CalendarScopes = ["Calendars.ReadWrite"];
-    private readonly Action<WriteCall, string[]> send;
+    private readonly Func<WriteCall, string[], JsonObject?> send;
 
     public GraphWrites(IGraph graph)
     {
@@ -114,7 +119,11 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
         Sends = true;
     }
 
-    public GraphWrites(Action<WriteCall> sink) => send = (call, _) => sink(call);
+    public GraphWrites(Action<WriteCall> sink) => send = (call, _) =>
+    {
+        sink(call);
+        return null;
+    };
 
     /// <summary>Whether writes really reach Graph (Live), rather than a journal or a refusal: a forward is only
     /// recorded as sent when it was.</summary>
@@ -164,4 +173,10 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
         send(new WriteCall("POST", $"/me/events/{eventId}/cancel", new JsonObject { ["comment"] = comment }), CalendarScopes);
 
     public void Remove(string eventId) => send(new WriteCall("DELETE", $"/me/events/{eventId}", null), CalendarScopes);
+
+    public JsonObject? Hold(JsonObject body)
+    {
+        Holds.CheckNoAttendees(body);
+        return send(new WriteCall("POST", "/me/events", body), CalendarScopes);
+    }
 }

@@ -66,10 +66,14 @@ public static class Cli
                 --move                          with accept: move each clash you can move to its suggested slot
                 --series                        with decline: the whole series (otherwise only the instances)
             mail-triage move <event id> 2026-11-11T16:00 [16:50]   move one of your own meetings or blocks
+            mail-triage hold 2026-11-25T16:15 17:00 "Hold: ITS in FibreHub" [--body TEXT | --body-file FILE] [--location TEXT]
+                [--online] [--yes]           a hold in your own calendar, never with attendees (you add them and send);
+                                            without --yes, shows what it would create; --online makes it a Teams
+                                            meeting, whose join details can't be removed afterwards
             mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
             mail-triage one-to-ones         with [one_to_ones]: what each run would do with your 1:1s and leave (changes nothing)
-            mail-triage days-off [--days N] [--differences]   each weekday ahead: leave, a half day (which half), a bank
-                                            holiday or working, from [leave]; with the old rules' verdict beside it
+            mail-triage days-off [--days N]   each weekday ahead: leave, a half day (which half), a bank holiday or
+                                            working, from [leave]
             mail-triage double-bookings     each upcoming double booking, and what the [[double_booking_rule]]s would do
                                             with it (changes nothing)
 
@@ -82,7 +86,7 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
-         "move", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
+         "move", "hold", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -111,7 +115,8 @@ public static class Cli
         ["forward"] = ([], ["--rule"]),
         ["leave"] = (["--decline"], ["--days", "--note"]),
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
-        ["days-off"] = (["--differences"], ["--days"]),
+        ["days-off"] = ([], ["--days"]),
+        ["hold"] = (["--yes", "--online"], ["--body", "--body-file", "--location"]),
     };
 
     internal static Args Parse(string[] argv)
@@ -207,6 +212,11 @@ public static class Cli
                 break;
             case "move":
                 Count(2, 3, "event, start");
+                break;
+            case "hold":
+                Count(3, 3, "start, end, subject");
+                if (a.Value("--body") is not null && a.Value("--body-file") is not null)
+                    throw new UsageException("argument --body-file: not allowed with argument --body");
                 break;
             case "autostart":
                 Count(1, 1, "action");
@@ -321,6 +331,8 @@ public static class Cli
                 return DoubleBookingsCommand(settings, graph, host);
             if (args.Command == "days-off")
                 return DaysOffCommand(args, settings, graph, host);
+            if (args.Command == "hold")
+                return HoldCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command is "invite" or "move" or "leave")
             {
                 if (settings.Invites is null)
@@ -561,8 +573,91 @@ public static class Cli
         return 0;
     }
 
-    /// <summary>A preview (1.17.0): each weekday from today, what [leave]'s shared rules make of it, and what the old rules
-    /// did (marked ! where they differ). It only reads. The old column goes in 1.18.0.</summary>
+    /// <summary>A hold in your own calendar (1.18.0), for the find-a-slot skill: never with attendees (there's no way to
+    /// add one), so it notifies nobody; you open it, add the people and send. Without --yes it only shows what it would
+    /// create. A create that may have reached Microsoft is never retried: it says to check the calendar.</summary>
+    private static int HoldCommand(Args args, Settings settings, IGraph graph, WriteDoor door, Action<string> log, CliHost host)
+    {
+        DateTime start, end;
+        try
+        {
+            start = PyTime.FromIso(args.Positional[0]);
+            end = args.Positional[1].Contains('T') ? PyTime.FromIso(args.Positional[1]) : start.Date + PyTime.TimeFromIso(args.Positional[1]);
+        }
+        catch (FormatException)
+        {
+            Print(host.Err, "Start is YYYY-MM-DDTHH:MM and end is HH:MM (or YYYY-MM-DDTHH:MM), in local time.");
+            return 2;
+        }
+        var subject = args.Positional[2].Trim();
+        if (subject.Length == 0)
+        {
+            Print(host.Err, "The hold needs a subject.");
+            return 2;
+        }
+        if (end <= start)
+        {
+            Print(host.Err, $"The end ({PyTime.Strftime(end, "%d/%m %H:%M")}) must be after the start ({PyTime.Strftime(start, "%d/%m %H:%M")}).");
+            return 2;
+        }
+        if (start <= Clock.Now)
+        {
+            Print(host.Err, $"The start ({PyTime.Strftime(start, "%a %d/%m %H:%M")}) is in the past.");
+            return 2;
+        }
+        var body = args.Value("--body") ?? (args.Value("--body-file") is { } file ? PyStr.ReadText(file) : "");
+        var location = args.Value("--location");
+        var online = args.Flag("--online");
+        var what = $"\"{subject}\", {PyTime.Strftime(start, "%a %d %b %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, busy, no attendees"
+                   + (location is { Length: > 0 } ? $", at {location}" : "") + (online ? ", a Teams meeting" : "");
+        if (!args.Flag("--yes"))
+        {
+            Print(host.Out, $"Would create in your calendar: {what}.");
+            if (body.Length > 0)
+                Print(host.Out, "  Body: " + PyStr.Head(body.Replace("\n", " / "), 300));
+            Print(host.Out, "Nothing written. Run again with --yes to create it.");
+            return 0;
+        }
+        var calendar = new Calendar(graph, door.Calendar);
+        JsonObject? created;
+        try
+        {
+            created = calendar.Hold(subject, start, end, body, location, online);
+        }
+        catch (M365Graph.GraphRequestException error) when ((int)error.Status is >= 400 and < 500)
+        {
+            Print(host.Err, $"Microsoft refused the hold ({(int)error.Status}): nothing was created. {PyStr.Head(error.Message, 200)}");
+            return 1;
+        }
+        catch (Exception error) when (error is not WriteRefusedException and not InvalidOperationException)
+        {
+            log($"hold failed, may have reached Microsoft: {subject} {PyTime.Strftime(start, "%d/%m %H:%M")}: {error.GetType().Name}: {error.Message}");
+            Print(host.Err, "The hold may or may not have been created (the call failed after it was sent). Check your calendar before "
+                            + "trying again: it isn't retried, so it can't be made twice.");
+            return 1;
+        }
+        if (door.Mode != WriteMode.Live)
+        {
+            Print(host.Out, $"Journalled, not sent: {what}.");
+            return 0;
+        }
+        var id = created?.Str("id");
+        if (id is not null)
+        {
+            var back = calendar.Event(id);
+            Print(host.Out, $"Held: {what}.");
+            Print(host.Out, $"  id   {id}");
+            if (back.Str("webLink") is { } link)
+                Print(host.Out, $"  open {link}");
+        }
+        else
+            Print(host.Out, $"Held: {what} (Microsoft returned no id: check your calendar).");
+        Triage.RecordHeld(settings, subject, start, end, id);
+        log($"held  {subject}: {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, no attendees");
+        return 0;
+    }
+
+    /// <summary>A preview: each weekday from today, what [leave]'s shared rules make of it. It only reads.</summary>
     private static int DaysOffCommand(Args args, Settings settings, IGraph graph, CliHost host)
     {
         if (settings.Invites is null)
@@ -574,31 +669,25 @@ public static class Cli
         var days = args.Value("--days") is { } d ? long.Parse(d, System.Globalization.CultureInfo.InvariantCulture) : settings.Invites.Days(Clock.Now);
         var events = new Calendar(graph, WriteDoor.Refusing().Calendar).Events(today, days);
         var lines = DaysOffLines(settings, events, today, days);
-        var shown = args.Flag("--differences") ? lines.Where(l => l.Differs).ToList() : lines;
-        foreach (var l in shown)
+        foreach (var l in lines)
             Print(host.Out, l.Text);
-        var differ = lines.Count(l => l.Differs);
-        Print(host.Out, $"{lines.Count} weekday(s) from {PyTime.Strftime(today, "%d/%m")}: {lines.Count(l => l.New != "working")} off in some way; "
-                        + (differ == 0 ? "the old rules agree on every one." : $"{differ} where the old rules differ (!)."));
+        Print(host.Out, $"{lines.Count} weekday(s) from {PyTime.Strftime(today, "%d/%m")}: {lines.Count(l => l.New != "working")} off in some way.");
         return 0;
     }
 
-    /// <summary>One line per weekday: (text, new verdict, whether it differs from the old in kind).</summary>
-    internal static List<(string Text, string New, bool Differs)> DaysOffLines(Settings settings, List<JsonObject> events, DateOnly today, long days)
+    /// <summary>One line per weekday: (text, verdict).</summary>
+    internal static List<(string Text, string New)> DaysOffLines(Settings settings, List<JsonObject> events, DateOnly today, long days)
     {
-        static string Kind(string v) => v.StartsWith("half", StringComparison.Ordinal) ? "half" : v;
         var view = Leave.View(settings, events);
-        var output = new List<(string, string, bool)>();
+        var output = new List<(string, string)>();
         for (var day = today; day < today.AddDays((int)days); day = day.AddDays(1))
         {
             if (PyTime.Weekday(day) >= 5)
                 continue;
             var d = view.Days.GetValueOrDefault(day);
             var now = Leave.Verdict(d);
-            var (old, oldEntry) = Leave.LegacyVerdict(settings, events, day);
-            var differs = Kind(now) != Kind(old);
-            var entry = d?.Entry?.Subject ?? oldEntry;
-            output.Add(($"{(differs ? "!" : " ")} {PyTime.Strftime(day, "%a %d %b")}  {now,-13} (old: {old}){(entry is null ? "" : $"  {entry}")}", now, differs));
+            var entry = d?.Entry?.Subject;
+            output.Add(($"  {PyTime.Strftime(day, "%a %d %b")}  {now,-13}{(entry is null ? "" : $"  {entry}")}", now));
         }
         return output;
     }

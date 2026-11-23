@@ -74,18 +74,6 @@ public static class InviteTriage
         return DaysOf(start, end);
     }
 
-    /// <summary>OLD (for `days-off`'s comparison only; REMOVE IN 1.18.0: [leave] decides, Leave.View). Whether an entry of yours marks a bank holiday (1.10.0): in one of the bank-holiday categories, all
-    /// day or a block of time, or titled "Bank holiday...". So an all-day entry alone, or a block alone, is enough (until
-    /// 1.10.0 invite triage saw only a "Bank holiday" title, and the 1:1 rule a category only on an all-day entry).</summary>
-    public static bool IsBankHoliday(Settings settings, JsonObject e, IReadOnlyList<string> categories)
-    {
-        var (_, address) = Organiser(e);
-        if (address != settings.Email || e.Truthy("isCancelled"))
-            return false;
-        return e.Get("categories").Strings().Any(c => categories.Contains(c, StringComparer.OrdinalIgnoreCase))
-               || PyRegex.Get(@"bank holiday\b", true).MatchStart(e.StrOr("subject")) is not null;
-    }
-
     /// <summary>Your days off (1.17.0: [leave], the shared rules; see DaysOffView): whole days off, and those that are only
     /// a bank holiday, which get the bank holiday note rather than the leave one.</summary>
     public static (HashSet<DateOnly> Away, HashSet<DateOnly> BankOnly) DaysOff(Settings settings, List<JsonObject> events)

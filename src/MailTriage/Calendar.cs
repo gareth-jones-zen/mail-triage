@@ -69,6 +69,10 @@ public sealed class Calendar : ICalendar
 
     public void Remove(string eventId) => writer.Remove(eventId);
 
+    /// <summary>Create a hold (no attendees: Holds.Body), in this calendar's zone. The created event, or null if journalled.</summary>
+    public JsonObject? Hold(string subject, DateTime start, DateTime end, string body = "", string? location = null, bool online = false) =>
+        writer.Hold(Holds.Body(subject, start, end, Timezone, body, location, online));
+
     public List<(DateTime Start, DateTime End, string? Status)>? Schedule(string address, DateTime start, DateTime end)
     {
         JsonObject When(DateTime t) => new() { ["dateTime"] = PyTime.Strftime(t, "%Y-%m-%dT%H:%M:%S"), ["timeZone"] = Timezone };
