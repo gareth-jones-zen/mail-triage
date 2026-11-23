@@ -75,6 +75,16 @@ public sealed class Calendar : ICalendar
         HoldRoom? room = null, IReadOnlyCollection<string>? allowedRooms = null) =>
         writer.Hold(Holds.Body(subject, start, end, Timezone, body, location, online, room), allowedRooms);
 
+    /// <summary>Send an invitation (1.24.0): SendInvites.Body in this calendar's zone, through the writer, which checks every
+    /// attendee against what was approved. The created event, or null if journalled.</summary>
+    public JsonObject? Invite(InviteDraft draft, IReadOnlyCollection<string> allowedRooms) =>
+        writer.Invite(SendInvites.Body(draft, Timezone), draft.People.Select(p => p.Address).ToList(), allowedRooms);
+
+    /// <summary>An event with the fields a sent invitation is read back for: its attendees as stored, and the Teams join
+    /// link (1.24.0).</summary>
+    public JsonObject InviteEvent(string eventId) =>
+        graph.Request($"/me/events/{eventId}?$select=id,subject,start,end,attendees,isOnlineMeeting,onlineMeeting,webLink", scopes: Scopes, headers: Prefer);
+
     public List<(DateTime Start, DateTime End, string? Status)>? Schedule(string address, DateTime start, DateTime end)
     {
         JsonObject When(DateTime t) => new() { ["dateTime"] = PyTime.Strftime(t, "%Y-%m-%dT%H:%M:%S"), ["timeZone"] = Timezone };

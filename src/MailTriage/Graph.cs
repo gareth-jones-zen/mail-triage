@@ -12,6 +12,13 @@ public interface IGraph
 
     /// <summary>Every item across @odata.nextLink pages, the same headers on every page. Lazy, as Python's generator.</summary>
     IEnumerable<JsonObject> Pages(string url, IReadOnlyList<string>? scopes = null, IReadOnlyDictionary<string, string>? headers = null);
+
+    /// <summary>A write that must never be applied twice (1.24.0: sending an invitation): sent once, and never again after a
+    /// 5xx, a timeout or a dropped connection that may have reached Microsoft (only a 429, or a request that never
+    /// connected, is retried). A failed status throws GraphRequestException; an answer lost after sending throws
+    /// GraphDeliveryUnknownException. A fake Graph's Request stands in.</summary>
+    JsonObject RequestOnce(string url, string method, JsonNode? body, IReadOnlyList<string>? scopes = null) =>
+        Request(url, method, body, scopes);
 }
 
 /// <summary>A write was asked of a Graph that only reads: a bug, never a decision. Nothing was sent.</summary>
@@ -36,6 +43,9 @@ public sealed class ReadOnlyGraph(IGraph inner) : IGraph
 
     public IEnumerable<JsonObject> Pages(string url, IReadOnlyList<string>? scopes = null, IReadOnlyDictionary<string, string>? headers = null) =>
         inner.Pages(url, scopes, headers);
+
+    public JsonObject RequestOnce(string url, string method, JsonNode? body, IReadOnlyList<string>? scopes = null) =>
+        throw new WriteRefusedException($"{method} {url}");
 }
 
 /// <summary>The real Graph, through background-tools-lib's M365Graph (the shared sign-in, timeouts, retries, IPv4
@@ -71,6 +81,20 @@ public sealed class M365GraphAdapter : IGraph
         foreach (var item in pages(url, scopes, headers).ToBlockingEnumerable())
             if (item is JsonObject o)
                 yield return o;
+    }
+
+    /// <summary>Through M365Graph's raw call with its Write policy, which never resends a request that may have been
+    /// applied (Request retries a 5xx and a dropped connection, which for an invitation would send it twice).</summary>
+    public JsonObject RequestOnce(string url, string method, JsonNode? body, IReadOnlyList<string>? scopes = null)
+    {
+        if (Client is null)
+            return Request(url, method, body, scopes);
+        var response = Client.SendRawAsync(new HttpMethod(method), url, body is null ? null : System.Text.Encoding.UTF8.GetBytes(body.ToJsonString()),
+            body is null ? null : "application/json", GraphRetryPolicy.Write, scopes).GetAwaiter().GetResult();
+        var text = System.Text.Encoding.UTF8.GetString(response.Body);
+        if (!response.IsSuccess)
+            throw new GraphRequestException(response.Status, method, url, text);
+        return text.Trim().Length == 0 ? new JsonObject() : JsonNode.Parse(text) as JsonObject ?? new JsonObject();
     }
 
     /// <summary>A client as cli.py's client(): the settings' cache, tenant and login hint, never a browser when

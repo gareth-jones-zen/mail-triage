@@ -39,6 +39,12 @@ public interface ICalendarWriter
     /// Holds.Body's; the writer refuses any attendee that isn't a resource in `rooms` (1.23.0). Returns the created event (Live), or null
     /// when the write was only journalled.</summary>
     JsonObject? Hold(JsonObject body, IReadOnlyCollection<string>? rooms = null);
+
+    /// <summary>Send an invitation (1.24.0): create a meeting in your own calendar with these people on it, so Exchange
+    /// sends each an invitation. The body is SendInvites.Body's; the writer refuses any person who isn't in `people` (the
+    /// addresses the owner approved) and any resource that isn't in `rooms`. Sent once, never resent (IGraph.RequestOnce).
+    /// Returns the created event (Live), or null when the write was only journalled.</summary>
+    JsonObject? Invite(JsonObject body, IReadOnlyCollection<string> people, IReadOnlyCollection<string> rooms);
 }
 
 /// <summary>How a run may write: Live sends; Journal records what it would send and sends nothing; Refuse throws.
@@ -112,18 +118,24 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
     private static readonly string[] SendScopes = ["Mail.Send"];
     private static readonly string[] CalendarScopes = ["Calendars.ReadWrite"];
     private readonly Func<WriteCall, string[], JsonObject?> send;
+    private readonly Func<WriteCall, string[], JsonObject?> sendOnce;
 
     public GraphWrites(IGraph graph)
     {
         send = (call, scopes) => graph.Request(call.Url, call.Method, call.Body, scopes);
+        sendOnce = (call, scopes) => graph.RequestOnce(call.Url, call.Method, call.Body, scopes);
         Sends = true;
     }
 
-    public GraphWrites(Action<WriteCall> sink) => send = (call, _) =>
+    public GraphWrites(Action<WriteCall> sink)
     {
-        sink(call);
-        return null;
-    };
+        send = (call, _) =>
+        {
+            sink(call);
+            return null;
+        };
+        sendOnce = send;
+    }
 
     /// <summary>Whether writes really reach Graph (Live), rather than a journal or a refusal: a forward is only
     /// recorded as sent when it was.</summary>
@@ -178,5 +190,11 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
     {
         Holds.CheckOnlyRooms(body, rooms);
         return send(new WriteCall("POST", "/me/events", body), CalendarScopes);
+    }
+
+    public JsonObject? Invite(JsonObject body, IReadOnlyCollection<string> people, IReadOnlyCollection<string> rooms)
+    {
+        SendInvites.CheckAttendees(body, people, rooms);
+        return sendOnce(new WriteCall("POST", "/me/events", body), CalendarScopes);
     }
 }

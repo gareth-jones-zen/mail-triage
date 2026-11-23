@@ -74,6 +74,13 @@ public static class Cli
                                             --room books a room from [hold] rooms (its address or name);
                                             without --yes, shows what it would create; --online makes it a Teams
                                             meeting, whose join details can't be removed afterwards
+            mail-triage send-invite 2026-12-01T10:00 10:30 "Subject" --to ADDR[,ADDR...] [--optional ADDR,...]
+                [--body TEXT | --body-file FILE] [--room ROOM | --location TEXT] [--no-online]
+                [--replace-hold EVENT_ID] [--yes]
+                                            send a meeting invitation from your calendar, once you've approved the
+                                            wording: without --yes, shows exactly what would go; a Teams meeting
+                                            unless --no-online; --room from [hold] rooms; --replace-hold deletes that
+                                            hold once the invite is created; never sent twice
             mail-triage respond <event id> accept|tentative|decline [--note TEXT] [--series] [--yes]
                                             answer a meeting you're invited to, whatever you said before (accepted,
                                             tentative or not yet); one occurrence unless --series; without --yes, shows
@@ -101,7 +108,7 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
-         "move", "hold", "respond", "cancel", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
+         "move", "hold", "send-invite", "respond", "cancel", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -132,6 +139,7 @@ public static class Cli
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
         ["days-off"] = ([], ["--days"]),
         ["hold"] = (["--yes", "--online"], ["--body", "--body-file", "--location", "--room"]),
+        ["send-invite"] = (["--yes", "--no-online"], ["--to", "--optional", "--body", "--body-file", "--location", "--room", "--replace-hold"]),
         ["respond"] = (["--yes", "--series"], ["--note"]),
         ["cancel"] = (["--yes", "--series"], ["--note"]),
         ["sent"] = (["--yes"], []),
@@ -241,6 +249,15 @@ public static class Cli
                 break;
             case "hold":
                 Count(3, 3, "start, end, subject");
+                if (a.Value("--body") is not null && a.Value("--body-file") is not null)
+                    throw new UsageException("argument --body-file: not allowed with argument --body");
+                if (a.Value("--location") is not null && a.Value("--room") is not null)
+                    throw new UsageException("argument --room: not allowed with argument --location (the room is the location)");
+                break;
+            case "send-invite":
+                Count(3, 3, "start, end, subject");
+                if (a.Value("--to") is not { } to || to.Trim().Length == 0)
+                    throw new UsageException("the following arguments are required: --to");
                 if (a.Value("--body") is not null && a.Value("--body-file") is not null)
                     throw new UsageException("argument --body-file: not allowed with argument --body");
                 if (a.Value("--location") is not null && a.Value("--room") is not null)
@@ -363,6 +380,8 @@ public static class Cli
                 return SentCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command == "hold")
                 return HoldCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
+            if (args.Command == "send-invite")
+                return SendInvites.Run(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command is "respond" or "cancel")
                 return CalendarWrites.Run(args.Command, args.Positional, args.Value("--note") ?? "", args.Flag("--series"), args.Flag("--yes"),
                     settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host.Out, host.Err);
@@ -660,14 +679,10 @@ public static class Cli
         HoldRoom? room = null;
         if (args.Value("--room") is { } wanted)
         {
-            room = settings.HoldRooms.FirstOrDefault(r => string.Equals(r.Address, wanted.Trim(), StringComparison.OrdinalIgnoreCase)
-                                                          || string.Equals(r.Name, wanted.Trim(), StringComparison.OrdinalIgnoreCase));
+            room = Holds.FindRoom(settings.HoldRooms, wanted);
             if (room is null)
             {
-                Print(host.Err, settings.HoldRooms.Count == 0
-                    ? $"{wanted} isn't a room this hold can book: there's no [hold] rooms in the settings, so a hold books no room."
-                    : $"{wanted} isn't one of [hold] rooms ({string.Join(", ", settings.HoldRooms.Select(r => r.Name))}): a hold books only a "
-                      + "listed room, never a person. Nothing written.");
+                Print(host.Err, Holds.NotARoom(settings.HoldRooms, wanted, "a hold"));
                 return 2;
             }
         }
@@ -715,12 +730,8 @@ public static class Cli
             {
                 // The room's mailbox answers on its own, usually within seconds: read back a few times for its answer.
                 // Only reads: the create is never repeated, whatever the room says.
-                var back = calendar.Event(id);
-                for (var read = 1; room is not null && (answer = Holds.RoomAnswer(back, room.Address)) is null && read < RoomReads; read++)
-                {
-                    host.Sleep(RoomWait);
-                    back = calendar.Event(id);
-                }
+                var back = Holds.ReadUntil(() => calendar.Event(id), e => room is null || Holds.RoomAnswer(e, room.Address) is not null, host.Sleep);
+                answer = room is null ? null : Holds.RoomAnswer(back, room.Address);
                 if (back.Str("webLink") is { } link)
                     Print(host.Out, $"  open {link}");
             }
@@ -745,10 +756,6 @@ public static class Cli
             + (room is null ? "no attendees" : $"room {room.Name} ({answer ?? "no answer yet"}), no people invited"));
         return 0;
     }
-
-    /// <summary>How many times a hold with a room is read back for the room's answer, and the wait between reads.</summary>
-    private const int RoomReads = 4;
-    private static readonly TimeSpan RoomWait = TimeSpan.FromSeconds(5);
 
     /// <summary>`mail-triage sent` (1.19.0): what [sent] would do in Sent Items; with --yes, do it. Under the run lock.</summary>
     private static int SentCommand(Args args, Settings settings, IGraph graph, WriteDoor door, Action<string> log, CliHost host)

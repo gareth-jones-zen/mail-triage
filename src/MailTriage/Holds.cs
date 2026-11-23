@@ -75,6 +75,34 @@ public static class Holds
         }
     }
 
+    /// <summary>The room in `[hold] rooms` that `wanted` names, by address or name (any case); null if none does.</summary>
+    public static HoldRoom? FindRoom(IEnumerable<HoldRoom> rooms, string wanted) =>
+        rooms.FirstOrDefault(r => string.Equals(r.Address, wanted.Trim(), StringComparison.OrdinalIgnoreCase)
+                                  || string.Equals(r.Name, wanted.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Why `wanted` can't be booked: it isn't in `[hold] rooms`, or there's no such list.</summary>
+    public static string NotARoom(IReadOnlyCollection<HoldRoom> rooms, string wanted, string what) => rooms.Count == 0
+        ? $"{wanted} isn't a room {what} can book: there's no [hold] rooms in the settings, so {what} books no room."
+        : $"{wanted} isn't one of [hold] rooms ({string.Join(", ", rooms.Select(r => r.Name))}): {what} books only a "
+          + "listed room, never a person. Nothing written.";
+
+    /// <summary>How many times an event is read back for a room's answer (or a Teams link), and the wait between reads.</summary>
+    public const int Reads = 4;
+    public static readonly TimeSpan ReadWait = TimeSpan.FromSeconds(5);
+
+    /// <summary>Read an event back until `done` holds, up to Reads times, ReadWait apart. Only reads: the write is never
+    /// repeated, whatever comes back.</summary>
+    public static JsonObject ReadUntil(Func<JsonObject> read, Func<JsonObject, bool> done, Action<TimeSpan> sleep)
+    {
+        var back = read();
+        for (var n = 1; !done(back) && n < Reads; n++)
+        {
+            sleep(ReadWait);
+            back = read();
+        }
+        return back;
+    }
+
     /// <summary>The room's answer on a read-back event: "accepted", "declined", "tentativelyAccepted", or null while it
     /// hasn't answered ("none", "notResponded") or isn't on the event.</summary>
     public static string? RoomAnswer(JsonObject ev, string address)

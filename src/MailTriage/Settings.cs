@@ -270,6 +270,11 @@ public sealed class Settings
     /// its time (a kind set to after_meeting or after_sending).</summary>
     public string SentFile { get; init; } = System.IO.Path.Combine(Local, "sent.json");
 
+    /// <summary>Each invitation `send-invite` has sent (1.24.0), by a hash of its start, end, subject and people: "sending"
+    /// before the create, "sent" once Microsoft answers, so the same invitation is never sent twice, and one whose answer
+    /// was lost is never resent. Kept until the meeting has ended.</summary>
+    public string SentInvitesFile { get; init; } = System.IO.Path.Combine(Local, "sent-invites.json");
+
     /// <summary>[sent] (1.19.0): what's tidied from Sent Items; null when there's no [sent], and nothing is touched there.</summary>
     public SentSettings? Sent { get; set; }
 
@@ -347,7 +352,7 @@ public sealed class Settings
         "double_bookings_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule", "leave",
-        "calendar_months_ahead", "sent", "sent_file", "hold",
+        "calendar_months_ahead", "sent", "sent_file", "hold", "sent_invites_file",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -531,6 +536,7 @@ public sealed class Settings
             DoubleBookingsFile = PathOr("double_bookings_file", System.IO.Path.Combine(Local, "double-bookings.json")),
             ForwardedFile = PathOr("forwarded_file", System.IO.Path.Combine(Local, "forwarded.json")),
             SentFile = PathOr("sent_file", System.IO.Path.Combine(Local, "sent.json")),
+            SentInvitesFile = PathOr("sent_invites_file", System.IO.Path.Combine(Local, "sent-invites.json")),
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
             Schedule = schedule,
@@ -856,7 +862,7 @@ public sealed class Settings
         }
     }
 
-    private static bool IsAddress(object? value) => value is string s && PyRegex.Get(@"^[^@\s]+@[^@\s]+\.[^@\s]+$").FullMatch(s);
+    internal static bool IsAddress(object? value) => value is string s && PyRegex.Get(@"^[^@\s]+@[^@\s]+\.[^@\s]+$").FullMatch(s);
 
     /// <summary>[groups] (1.13.0): each a list of addresses, kept in lower case.</summary>
     private static void ReadGroups(TomlTable raw, string full, Settings settings)

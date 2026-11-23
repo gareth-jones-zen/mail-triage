@@ -160,7 +160,7 @@ handler = "team-chat-draft"
 Write regular expressions in TOML's single-quoted literal strings, so backslashes stay as they
 are. `mail-triage which <sender> "<subject>"` says which rule an email would meet, which is the
 quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-in), `tenant`,
-`queue_file`, `state_file`, `handled_file`, `forwarded_file`, `log_file`.
+`queue_file`, `state_file`, `handled_file`, `forwarded_file`, `sent_invites_file`, `log_file`.
 
 **Keep each kind of table together**: all the `[[rule]]`s in one run, then the `[[handler]]`s, and so on. The TOML
 reader silently drops the tables before a break when one kind is split by another, so since 1.3.1 a file whose
@@ -271,6 +271,7 @@ mail-triage invite decline 5 --note "Clashes, sorry"   # the instance; --series 
 mail-triage invite accept 6 --move                     # accept, and move the travel to 19:00
 mail-triage move <event id> 2026-11-11T16:00           # move one of your own meetings or blocks by hand
 mail-triage hold 2026-11-25T16:15 17:00 "Hold: ITS" --room "MTG Room 3.A.2"   # a hold in your calendar, no people; optionally a listed room (--yes to create)
+mail-triage send-invite 2026-12-01T10:00 10:30 "ITS planning" --to sam@example.com,pat@example.com --body-file invite.txt   # send an invitation you've approved (--yes to send)
 mail-triage respond <event id> tentative --note "I'll join after 14:00"   # answer a meeting you already accepted (--yes to send)
 mail-triage cancel <event id> --note "Moved to Thursday"   # cancel your meeting, or delete your block (--yes to do it)
 mail-triage sent                                       # with [sent]: what it would tidy in Sent Items (--yes to do it)
@@ -535,6 +536,88 @@ rooms = [
   nothing is retried; pick another room in Outlook, or delete the hold and hold again with another `--room`), or hasn't
   answered yet (check the hold in Outlook). The room and its answer are in the log and in `deleted` under "Holds".
 - Without `[hold] rooms`, a hold books no room.
+
+## Sending an invite: `send-invite` (1.24.0)
+
+```
+mail-triage send-invite START END SUBJECT --to ADDR[,ADDR...] [--optional ADDR,...] [--body TEXT | --body-file FILE]
+                        [--room ROOM | --location TEXT] [--no-online] [--replace-hold EVENT_ID] [--yes]
+```
+
+Sends a meeting invitation from your own calendar to the people named, **once you've approved its exact wording**. It
+finishes what a hold starts: find a time, draft the invitation (a session does it in chat), change it until it's right,
+then send it. It's `hold` with people on it.
+
+- START is `YYYY-MM-DDTHH:MM`, END `HH:MM` (the same day), in local time.
+- **Without `--yes` it shows exactly what would go, and sends nothing**: the subject, date and time, the required and
+  optional people (their names when the directory gives them, the address always; an address outside your own domain,
+  from `email`, is marked `(external)`), the room, whether it's a Teams meeting, and the body as it will read:
+
+  ```
+  Would send this invitation from your calendar (Exchange sends it to each person):
+    Subject   ITS planning
+    When      Tue 01 Dec 10:00-10:30
+    To        Sam Jones <sam@example.com>
+              pat@partner.example (external)
+    Optional  Kim Lee <kim@example.com>
+    Room      MTG Room 3.A.1 <MTGRoom3.A.1@example.com> (booked as a resource: its mailbox accepts or declines)
+    Teams     yes: a Teams meeting (Microsoft adds the join details; they can't be removed afterwards)
+    Replies   requested; busy in your calendar
+    Body:
+      | Hi both,
+      |
+      | - the plan
+      | - the risks
+  Nothing sent. Run again with --yes to send it.
+  ```
+- **With `--yes`** it creates the meeting in your calendar with the people as required or optional attendees, and
+  Exchange sends each an invitation. Shown as busy, responses requested, the reminder left to Outlook's default. Then it
+  reads the meeting back (up to four times, five seconds apart) and prints its id, the attendees as stored, the Teams
+  join link, the link to open it, and the room's answer. It's logged, and listed by `mail-triage deleted` under
+  "Invites sent" (subject, time, how many people, the room and its answer, Teams yes or no, and "replaced hold" when
+  it did).
+- **A Teams meeting by default**, in person too; `--no-online` turns it off. `--location TEXT` names a place without
+  booking it.
+- **`--room ROOM` books a room from `[hold] rooms`**, exactly as `hold --room` does (a resource attendee and the
+  location); anything else is refused, and `--room` can't be given with `--location`.
+- **The body** (`--body TEXT` or `--body-file FILE`) is plain text: lines, blank lines between paragraphs, and lines
+  starting `- ` as bullets. Nothing else is markdown, and everything is escaped, so it can't become markup. It's sent as
+  simple HTML laid out the way Outlook writes mail.
+- **Refused before anything is sent:** no `--to`; an end before the start, or on another day; a past start; something
+  that isn't an address; your own address; a room's address given as a person (use `--room`); an address in both
+  `--to` and `--optional`; a room not in `[hold] rooms`. The write itself refuses any person who isn't one of those
+  named, and any resource that isn't a listed room.
+
+### Never sent twice
+
+Each send is recorded in `sent_invites_file` (top level; default `%LOCALAPPDATA%\mail-triage\sent-invites.json`) by a
+hash of its start, end, subject and people (sorted; not the room): **"sending" before the create, "sent" once Microsoft
+answers.** Sending the same invitation again, preview included, is refused with a message to check your calendar.
+
+**A send whose answer was lost** (a timeout, a dropped connection or a 5xx after the request went) **stays recorded as
+"sending" and is never retried**: it may have gone, and a second send would invite everyone twice. It says so, asks you
+to check Outlook, and is listed in `deleted` as "MAY HAVE GONE"; if it didn't go, send it from Outlook. The create goes
+through M365Graph's write-once call, which never resends a request that may have reached Microsoft (only a 429, or a
+request that never connected, is tried again). A refusal from Microsoft (4xx) sent nothing, so the record is dropped
+and you can fix it and send again. An entry is kept until the meeting has ended. A journal run (`--writes journal`)
+records nothing.
+
+### Replacing a hold: `--replace-hold EVENT_ID`
+
+Once the invitation is confirmed created, the hold is deleted. **It's checked first, before anything is sent**: it must
+be yours, a single event (not a series), its subject starting `Hold:`, with no one on it but a room; anything else is
+refused with nothing sent. If the send fails, or Microsoft returns no id, the hold is left alone.
+
+- **Why create-then-delete, not turning the hold into the invitation.** Graph can add attendees to an existing event,
+  and Exchange then sends invitations, but that changes the hold in place: its time, body and Teams setting would all
+  have to be patched in the same call, and how Exchange behaves when a plain appointment becomes a meeting can't be
+  checked without sending to real people. Creating a new meeting and deleting the hold afterwards uses only the calls `hold` and
+  `cancel` already make, and if anything fails part-way, the worst case is a hold left over, never a lost or doubled
+  invitation.
+- **A hold that booked the same room:** the preview warns that the room may decline the invitation as double-booked,
+  since the hold still has it when the invitation is created. The hold is deleted after the send, which frees the
+  room; if the room declined, the result says so: open the invitation in Outlook and add the room again (it isn't
+  resent from here). A hold with a different room has that room freed when the hold is deleted.
 
 ## Answering and cancelling by hand: `respond` and `cancel` (1.22.0)
 
