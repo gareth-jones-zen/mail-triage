@@ -280,7 +280,7 @@ mail-triage respond <event id> tentative --note "I'll join after 14:00"   # answ
 mail-triage cancel <event id> --note "Moved to Thursday"   # cancel your meeting, or delete your block (--yes to do it)
 mail-triage sent                                       # with [sent]: what it would tidy in Sent Items (--yes to do it)
 mail-triage leave                                      # meetings in your leave you haven't declined
-mail-triage leave --decline                            # decline them, each with the leave note
+mail-triage leave --decline                            # what declining them would send, each with the leave note (--yes to send: 1.29.0)
 ```
 
 | What it finds | Recommends |
@@ -308,8 +308,8 @@ mail-triage leave --decline                            # decline them, each with
   in a `bank_holiday_categories` category (`[invites]`' own, else `[one_to_ones]`', else "Holiday"), or titled
   "Bank holiday...". Before 1.10.0 invites saw only that title, so an all-day bank holiday entry alone was missed.
 - **`delete` refuses an invite**; answer it instead. **`move` refuses someone else's meeting.**
-- **`invite` and `move` only show what they would do without `--yes`** (1.28.0), like `respond`, `cancel`, `hold` and
-  `send-invite`; nothing is sent, whatever `--writes` says, and the queue is unchanged:
+- **`invite` and `move` only show what they would do without `--yes`** (1.28.0; `leave --decline` since 1.29.0), like
+  `respond`, `cancel`, `hold` and `send-invite`; nothing is sent, whatever `--writes` says, and the queue is unchanged:
   - **`mail-triage invite accept|tentative|decline <n...> [--note TEXT] [--silent] [--series] [--move] [--yes]`**: for
     each invite, the response, which occurrences (declining the instances lists their dates; **`--series` shows as
     THE WHOLE SERIES**), the note, and whether the organiser gets a response (not with `--silent`, nor where they
@@ -319,8 +319,15 @@ mail-triage leave --decline                            # decline them, each with
     and each attendee who gets an update (or that no one else is invited). **A clash at the new time is a warning, not
     a refusal**: anything in your calendar that holds time (busy, out of office, tentative; your leave too) and you
     haven't declined. With `--yes` it moves once and, like the rest, never resends a move that may have gone.
-  - What a run does by itself (auto-accepts, moves of your blocks, 1:1s, catch-ups, double bookings, rules that
-    forward) is unchanged: `--yes` is the brake on commands typed by hand.
+  - **`mail-triage leave --decline [--note TEXT] [--days N] [--yes]`** (1.29.0): for each meeting in your leave you
+    haven't declined, its title and organiser, when it is and your answer so far, that **only that occurrence is
+    declined, never the series** (as `leave --decline` always has: it declines each occurrence on its own), the note
+    (the leave note, or `--note`), and whether the organiser gets a response (not where they didn't ask for one). Then
+    "Nothing sent. Run again with --decline --yes to decline them." With `--decline --yes` it declines each once, as
+    before, carrying on past one whose answer was lost and never resending it. `leave` alone is still only the list;
+    `leave --yes` without `--decline` is refused.
+  - What a run does by itself (auto-accepts, moves of your blocks, declines on your days off, 1:1s, catch-ups, double
+    bookings, rules that forward) is unchanged: `--yes` is the brake on commands typed by hand.
 - It needs `Calendars.ReadWrite`.
 
 ```toml
@@ -640,7 +647,7 @@ refused with nothing sent. If the send fails, or Microsoft returns no id, the ho
 
 Two more calendar writes, so that nothing needs a connector or a one-off script to change the calendar. **Without
 `--yes` they only show what they would do**, like `hold` and `send-invite` (and, since 1.28.0, `move`, `invite` and
-`forward`); with `--yes` they write once, read the event back, log it, and list it in `mail-triage deleted` ("Answered
+`forward`; since 1.29.0, `leave --decline`); with `--yes` they write once, read the event back, log it, and list it in `mail-triage deleted` ("Answered
 by hand", "Cancelled by hand", "Deleted by hand").
 **A write that may have reached Microsoft is never retried**: if the call fails after it was sent, it says so and asks
 you to check the calendar. **One occurrence by default; `--series` for the whole series** (decline the instance, never

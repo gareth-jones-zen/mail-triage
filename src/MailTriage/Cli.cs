@@ -94,7 +94,10 @@ public static class Cli
                                             one of your own events: a block with no attendees is deleted (no one is
                                             told); a meeting with attendees is cancelled, and each gets a cancellation;
                                             one occurrence unless --series; without --yes, shows what it would do
-            mail-triage leave [--decline]   meetings in your leave you haven't declined (the next 60 days), and decline them
+            mail-triage leave [--decline [--yes]] [--note TEXT] [--days N]
+                                            meetings in your leave you haven't declined (the next 60 days); --decline
+                                            shows each decline it would send (each occurrence, never the series: the
+                                            note, and whether the organiser is told); --decline --yes declines them
             mail-triage one-to-ones         with [one_to_ones] and/or [catch_ups]: what each run would do with your 1:1s and
                                             catch-ups when someone's on leave (changes nothing); [--days N]
             mail-triage sent [--yes]        with [sent]: what it would delete or file in Sent Items (meeting messages you
@@ -142,7 +145,7 @@ public static class Cli
         ["file"] = ([], ["--to"]),
         ["handle"] = ([], ["--handler"]),
         ["forward"] = (["--yes"], ["--rule"]),
-        ["leave"] = (["--decline"], ["--days", "--note"]),
+        ["leave"] = (["--decline", "--yes"], ["--days", "--note"]),
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
         ["days-off"] = ([], ["--days"]),
         ["hold"] = (["--yes", "--online"], ["--body", "--body-file", "--location", "--room"]),
@@ -399,9 +402,15 @@ public static class Cli
                     Print(host.Err, $"{settings.Path} has no [invites] section.");
                     return 2;
                 }
+                if (args.Command == "leave" && args.Flag("--yes") && !args.Flag("--decline"))
+                {
+                    Print(host.Err, "--yes goes with --decline: `mail-triage leave --decline` shows what it would send, "
+                                    + "`mail-triage leave --decline --yes` declines them. Nothing sent.");
+                    return 2;
+                }
                 // 1.28.0: invite and move write only with --yes, whatever --writes says; without it they preview through a
-                // door that refuses every write.
-                var preview = args.Command is "invite" or "move" && !args.Flag("--yes");
+                // door that refuses every write. 1.29.0: so does leave, which writes only with --decline --yes.
+                var preview = args.Command is "invite" or "move" ? !args.Flag("--yes") : args.Command == "leave" && !(args.Flag("--decline") && args.Flag("--yes"));
                 return CalendarCommand(args, settings, graph, preview ? WriteDoor.Refusing() : Door(args, graph, args.Writes, settings), log, host);
             }
             if (args.Command == "forward" && !args.Flag("--yes"))
@@ -679,23 +688,23 @@ public static class Cli
             return 0;
         }
         var days = long.Parse(args.Value("--days") ?? "60", System.Globalization.CultureInfo.InvariantCulture);
-        var found = InviteTriage.LeaveSweep(settings, calendar, DateOnly.FromDateTime(Clock.Now), days);
+        var found = InviteTriage.PlanLeaveDeclines(settings, calendar, DateOnly.FromDateTime(Clock.Now), days, args.Value("--note"));
         if (found.Count == 0)
         {
             Print(host.Out, $"Nothing in your leave over the next {days} days that you haven't declined.");
             return 0;
         }
         var decline = args.Flag("--decline");
+        if (decline && !args.Flag("--yes"))
+            return PreviewLeaveDeclines(found, days, host);   // 1.29.0: what --decline --yes would send, and nothing sent
         var unconfirmed = 0;
-        foreach (var e in found)
+        foreach (var d in found)
         {
-            var (start, end) = InviteTriage.Times(e);
-            var send = !e.Has("responseRequested") || Py.Truthy(e.Get("responseRequested"));
-            var note = args.Value("--note") is { Length: > 0 } given ? given : e.Req("note");
-            Print(host.Out, $"  {InviteTriage.Day(start)}–{InviteTriage.Hm(end)}  {Py.Str(e.Get("subject"))}  ({InviteTriage.Organiser(e).Name}; "
-                            + $"{Py.Str(e.Get("responseStatus").Get("response"))})" + (send ? $"  note: \"{note}\"" : "  (no response requested)"));
+            var e = d.Event;
+            Print(host.Out, $"  {InviteTriage.Day(d.Start)}–{InviteTriage.Hm(d.End)}  {Py.Str(e.Get("subject"))}  ({InviteTriage.Organiser(e).Name}; "
+                            + $"{Py.Str(e.Get("responseStatus").Get("response"))})" + (d.Respond ? $"  note: \"{d.Note}\"" : "  (no response requested)"));
             // The occurrence: the rest of the series is untouched.
-            if (decline && Unconfirmed.Try(() => calendar.Respond(e.Req("id"), "decline", note, send)) is { } lost)
+            if (decline && Unconfirmed.Try(() => calendar.Respond(e.Req("id"), "decline", d.Note, d.Respond)) is { } lost)
             {
                 unconfirmed++;
                 log($"leave sweep: decline may have gone, not resent: {Py.Str(e.Get("subject"))}: {lost}");
@@ -705,9 +714,35 @@ public static class Cli
         if (unconfirmed > 0)
             Print(host.Err, $"{unconfirmed} decline(s) may or may not have gone (above): never sent twice.");
         Print(host.Out, $"{found.Count} meeting(s) in your leave" + (decline ? ": declined, each occurrence on its own."
-            : ". `--decline` declines them (each occurrence, not the series)."));
+            : ". `--decline` shows what declining them would send (each occurrence, not the series); `--decline --yes` declines them."));
         if (decline)
             log($"leave sweep: declined {found.Count} meeting(s)");
+        return 0;
+    }
+
+    /// <summary>`leave --decline` without --yes (1.29.0): for each meeting, when it is, the organiser, that only this
+    /// occurrence is declined (never the series), the note, and whether the organiser gets a response. It only reads (the
+    /// calendar, already read for the plan); nothing is sent, whatever --writes says.</summary>
+    private static int PreviewLeaveDeclines(List<InviteTriage.LeaveDecline> found, long days, CliHost host)
+    {
+        Print(host.Out, $"Would decline {found.Count} meeting{(found.Count == 1 ? "" : "s")} in your leave over the next {days} days, "
+                        + "each occurrence on its own, never the series:");
+        var n = 0;
+        foreach (var d in found)
+        {
+            var e = d.Event;
+            var (name, address) = InviteTriage.Organiser(e);
+            var organiser = name.Length > 0 ? name : address;
+            Print(host.Out, $"  {++n}. \"{e.StrOr("subject")}\", organised by {(name.Length > 0 && address.Length > 0 ? $"{name} <{address}>" : organiser)}");
+            Print(host.Out, $"     {InviteTriage.Day(d.Start)}–{InviteTriage.Hm(d.End)}; your answer so far: {CalendarWrites.Current(e)}");
+            Print(host.Out, CalendarWrites.Scope(e) == "this occurrence only"
+                ? "     Would decline this occurrence only, not the series."
+                : "     Would decline it.");
+            Print(host.Out, d.Respond
+                ? $"     {organiser} gets a response" + (d.Note.Length > 0 ? $", with the note \"{d.Note}\"." : ", with no note.")
+                : $"     No response is sent (the organiser didn't ask for one): {organiser} isn't told" + (d.Note.Length > 0 ? ", and the note isn't sent." : "."));
+        }
+        Print(host.Out, $"Nothing sent. Run again with --decline --yes to decline {(found.Count == 1 ? "it" : "them")}.");
         return 0;
     }
 

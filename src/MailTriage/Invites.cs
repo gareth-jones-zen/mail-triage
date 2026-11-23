@@ -792,4 +792,18 @@ public static class InviteTriage
             e["note"] = OffNote(settings, DateOnly.FromDateTime(Times(e).Start), away, bankOnly);
         return found;
     }
+
+    /// <summary>One decline `leave --decline` makes: the event (an occurrence from calendarView, or a one-off meeting; never
+    /// a series), its time, the note, and whether the organiser gets a response (only where they asked for one).</summary>
+    internal sealed record LeaveDecline(JsonObject Event, DateTime Start, DateTime End, string Note, bool Respond);
+
+    /// <summary>The declines `leave --decline` makes, worked out once for both the declines and their preview (1.29.0), so
+    /// the preview shows exactly what --yes would do. A given note (--note) replaces each meeting's own.</summary>
+    internal static List<LeaveDecline> PlanLeaveDeclines(Settings settings, ICalendar calendar, DateOnly start, long days, string? note) =>
+        LeaveSweep(settings, calendar, start, days).Select(e =>
+        {
+            var (from, to) = Times(e);
+            var respond = !e.Has("responseRequested") || Py.Truthy(e.Get("responseRequested"));
+            return new LeaveDecline(e, from, to, note is { Length: > 0 } given ? given : e.Req("note"), respond);
+        }).ToList();
 }
