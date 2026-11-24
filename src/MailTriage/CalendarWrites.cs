@@ -57,7 +57,7 @@ public static class CalendarWrites
         return (eventId, type is "occurrence" or "exception" ? "this occurrence only" : "this meeting", null);
     }
 
-    public static int Run(string command, List<string> positional, string note, bool series, bool yes, Settings settings, IGraph graph,
+    public static int Run(string command, List<string> positional, string note, bool series, bool yes, bool again, Settings settings, IGraph graph,
         WriteDoor door, Action<string> log, TextWriter output, TextWriter errors)
     {
         void Out(string text) => output.WriteLine(Py.Lines(text));
@@ -69,7 +69,23 @@ public static class CalendarWrites
         {
             e = calendar.Event(eventId);
         }
-        catch (M365Graph.GraphRequestException error) when ((int)error.Status is 404 or 400)
+        catch (M365Graph.GraphRequestException error) when ((int)error.Status is 404 or 410)
+        {
+            // 1.30.0: gone, after a cancel or a decline whose answer was lost: that's the change, so it went.
+            var went = UnconfirmedWrites.ForEvent(settings, eventId)
+                .Select(r => UnconfirmedWrites.Check(settings, r.Key, () => null, r.Entry.Str("kind") == "cancel" ? UnconfirmedWrites.Cancelled : UnconfirmedWrites.Answered, log))
+                .Where(l => l.Seen == UnconfirmedWrites.Seen.Went).ToList();
+            foreach (var look in went)
+                Out(look.Text);
+            if (went.Count > 0)
+            {
+                Out("Nothing to do: it's no longer in your calendar.");
+                return 0;
+            }
+            Err($"No event with that id in your calendar ({(int)error.Status}).");
+            return 2;
+        }
+        catch (M365Graph.GraphRequestException error) when ((int)error.Status is 400)
         {
             Err($"No event with that id in your calendar ({(int)error.Status}).");
             return 2;
@@ -83,13 +99,72 @@ public static class CalendarWrites
             Err(refusal);
             return 2;
         }
+        var write = new Once(settings, calendar, eventId, target!, yes, again, door, log, Out, Err);
         return command == "respond"
-            ? Respond(positional[1], e, subject, start, when, target!, scope, note, yes, settings, calendar, door, log, Out, Err)
-            : Cancel(e, subject, start, when, target!, scope, note, yes, settings, calendar, door, log, Out, Err);
+            ? Respond(positional[1], e, subject, start, end, when, target!, scope, note, yes, settings, calendar, door, log, Out, Err, write)
+            : Cancel(e, subject, start, end, when, target!, scope, note, yes, settings, calendar, door, log, Out, Err, write);
     }
 
-    private static int Respond(string action, JsonObject e, string subject, DateTime start, string when, string target, string scope,
-        string note, bool yes, Settings settings, Calendar calendar, WriteDoor door, Action<string> log, Action<string> Out, Action<string> Err)
+    /// <summary>1.30.0: one `respond` or `cancel` write against unconfirmed_file. Before: an earlier lost write to the same
+    /// event is read again (cleared if it went, skipped if it may not have landed, unless --again). After: a lost answer
+    /// is recorded; a write sent with --again that's confirmed clears the record.</summary>
+    private sealed class Once(Settings settings, Calendar calendar, string asked, string target, bool yes, bool again, WriteDoor door,
+        Action<string> log, Action<string> Out, Action<string> Err)
+    {
+        private string key = "";
+        private bool pending;
+
+        /// <summary>Null to go on (preview or write); otherwise the exit code: 0 when the change is already there, 1 when
+        /// it's skipped.</summary>
+        public int? Before(string kind, Func<JsonObject?, JsonObject, bool> landed, Func<JsonObject?, bool> already)
+        {
+            key = UnconfirmedWrites.Key(kind, target);
+            JsonObject? now = null;
+            var look = UnconfirmedWrites.Check(settings, key, () => now = ReadBack(calendar, target), landed, log);
+            if (look.Seen == UnconfirmedWrites.Seen.Went)
+            {
+                Out(look.Text);
+                if (already(now))
+                {
+                    Out("Nothing to do: it's already that way.");
+                    return 0;
+                }
+            }
+            pending = look.Seen == UnconfirmedWrites.Seen.Pending;
+            if (!pending)
+                return null;
+            if (!yes)
+            {
+                Out(look.Text + (again ? " --again: it would be sent again." : " --yes would skip it; once you've checked, --again --yes sends it."));
+                return null;
+            }
+            if (!again)
+            {
+                log($"unconfirmed: skipped {UnconfirmedWrites.Describe(look.Entry!)}: an earlier one may not have landed");
+                Err(look.Text + " Not sent again: once you've checked, `--again --yes` sends it.");
+                return 1;
+            }
+            log($"unconfirmed: sending {UnconfirmedWrites.Describe(look.Entry!)} again (--again)");
+            return null;
+        }
+
+        public string Tail => pending && !again ? "Nothing sent." : pending ? "Nothing sent. Run again with --again --yes to send it." : "";
+
+        public void Lost(JsonObject entry, string lost)
+        {
+            entry["asked"] = asked == target ? null : asked;
+            UnconfirmedWrites.Record(settings, key, entry, lost, log);
+        }
+
+        public void Confirmed()
+        {
+            if (pending && door.Mode == WriteMode.Live)
+                UnconfirmedWrites.Clear(settings, key, "sent again with --again, and confirmed", log);
+        }
+    }
+
+    private static int Respond(string action, JsonObject e, string subject, DateTime start, DateTime end, string when, string target, string scope,
+        string note, bool yes, Settings settings, Calendar calendar, WriteDoor door, Action<string> log, Action<string> Out, Action<string> Err, Once once)
     {
         if (e.Truthy("isOrganizer"))
         {
@@ -100,20 +175,24 @@ public static class CalendarWrites
         var organiser = organiserName.Length > 0 ? organiserName : organiserAddress;
         var what = $"\"{subject}\", {when} ({scope}), organised by {organiser}: you've {(Current(e) == "not answered yet" ? "not answered yet" : "said " + Current(e))}";
         var send = $"{Verb(action)}" + (note.Length > 0 ? $", with the note \"{note}\"" : ", with no note");
+        var intended = UnconfirmedWrites.AnswerEntry("respond", target, null, subject, action, $"{PyTime.Strftime(start, "%a %d %b %H:%M")}, {scope}", end);
+        if (once.Before("respond", UnconfirmedWrites.Answered, now => UnconfirmedWrites.Answered(now, intended)) is { } done)
+            return done;
         if (!yes)
         {
             Out($"Would answer {what}.");
             Out($"  Would send {organiser} a response: {send}.");
-            Out("Nothing sent. Run again with --yes to send it.");
+            Out(once.Tail.Length > 0 ? once.Tail : "Nothing sent. Run again with --yes to send it.");
             return 0;
         }
-        if (Write(() => calendar.Respond(target, action, note, send: true), "answer", subject, start, log, Err) is { } failed)
+        if (Write(() => calendar.Respond(target, action, note, send: true), "answer", subject, start, log, Err, lost => once.Lost(intended, lost)) is { } failed)
             return failed;
         if (door.Mode != WriteMode.Live)
         {
             Out($"Journalled, not sent: {Verb(action)} for {what}.");
             return 0;
         }
+        once.Confirmed();
         var now = ReadBack(calendar, target);
         Out($"Answered: {Verb(action)}, \"{subject}\", {when} ({scope}); {organiser} gets your response."
             + (now is null ? "" : $" Your calendar now says: {Current(now)}."));
@@ -123,8 +202,8 @@ public static class CalendarWrites
         return 0;
     }
 
-    private static int Cancel(JsonObject e, string subject, DateTime start, string when, string target, string scope, string note, bool yes,
-        Settings settings, Calendar calendar, WriteDoor door, Action<string> log, Action<string> Out, Action<string> Err)
+    private static int Cancel(JsonObject e, string subject, DateTime start, DateTime end, string when, string target, string scope, string note, bool yes,
+        Settings settings, Calendar calendar, WriteDoor door, Action<string> log, Action<string> Out, Action<string> Err, Once once)
     {
         if (!e.Truthy("isOrganizer"))
         {
@@ -134,6 +213,8 @@ public static class CalendarWrites
         var owner = (settings.Email ?? "").ToLowerInvariant();
         var others = InviteTriage.People(e).Where(a => InviteTriage.Address(a) != owner).ToList();
         var isMeeting = others.Count > 0;
+        if (once.Before("cancel", UnconfirmedWrites.Cancelled, now => UnconfirmedWrites.Cancelled(now, [])) is { } done)
+            return done;
         if (!yes)
         {
             if (isMeeting)
@@ -145,22 +226,25 @@ public static class CalendarWrites
             }
             else
                 Out($"Would delete your block \"{subject}\", {when} ({scope}). No one else is invited, so no one is told.");
-            Out("Nothing changed. Run again with --yes to do it.");
+            Out(once.Tail.Length > 0 ? once.Tail.Replace("Nothing sent.", "Nothing changed.").Replace("to send it", "to do it")
+                : "Nothing changed. Run again with --yes to do it.");
             return 0;
         }
+        var intended = UnconfirmedWrites.CancelEntry(target, null, subject, isMeeting, $"{PyTime.Strftime(start, "%a %d %b %H:%M")}, {scope}", end);
         if (Write(() =>
             {
                 if (isMeeting)
                     calendar.Cancel(target, note);
                 else
                     calendar.Remove(target);
-            }, isMeeting ? "cancel" : "delete", subject, start, log, Err) is { } failed)
+            }, isMeeting ? "cancel" : "delete", subject, start, log, Err, lost => once.Lost(intended, lost)) is { } failed)
             return failed;
         if (door.Mode != WriteMode.Live)
         {
             Out($"Journalled, not sent: {(isMeeting ? "cancel" : "delete")} \"{subject}\", {when} ({scope}).");
             return 0;
         }
+        once.Confirmed();
         var still = ReadBack(calendar, target);
         var gone = still is null || still.Truthy("isCancelled");
         var did = isMeeting
@@ -178,7 +262,7 @@ public static class CalendarWrites
 
     /// <summary>One write, once. A refusal from Microsoft (4xx) changed nothing; anything else may have reached it, so it's
     /// never retried: check the calendar instead. Null when the write went through.</summary>
-    private static int? Write(Action write, string verb, string subject, DateTime start, Action<string> log, Action<string> Err)
+    private static int? Write(Action write, string verb, string subject, DateTime start, Action<string> log, Action<string> Err, Action<string> lost)
     {
         try
         {
@@ -194,7 +278,8 @@ public static class CalendarWrites
         {
             log($"{verb} failed, may have reached Microsoft: {subject} {PyTime.Strftime(start, "%d/%m %H:%M")}: {error.GetType().Name}: {error.Message}");
             Err($"The {verb} may or may not have gone through (the call failed after it was sent). Check your calendar before trying "
-                + "again: it isn't retried, so nothing is sent twice.");
+                + "again: it isn't retried, so nothing is sent twice. It's recorded: the next `respond` or `cancel` of it checks whether it landed.");
+            lost($"{error.GetType().Name}: {error.Message}");
             return 1;
         }
     }

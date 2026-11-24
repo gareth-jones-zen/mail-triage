@@ -407,6 +407,12 @@ public sealed class Settings
     /// was lost is never resent. Kept until the meeting has ended.</summary>
     public string SentInvitesFile { get; init; } = System.IO.Path.Combine(Local, "sent-invites.json");
 
+    /// <summary>Each calendar write made by hand whose answer was lost (1.30.0): `move`, `leave --decline`, `invite`,
+    /// `respond`, `cancel` and `hold`, by what it was and which event. A later preview or --yes for the same event reads it
+    /// again: a change that's visibly there clears the record; one that isn't is skipped (never resent) unless --again.
+    /// Runtime state: kept until the meeting has ended.</summary>
+    public string UnconfirmedFile { get; init; } = System.IO.Path.Combine(Local, "unconfirmed.json");
+
     /// <summary>[sent] (1.19.0): what's tidied from Sent Items; null when there's no [sent], and nothing is touched there.</summary>
     public SentSettings? Sent { get; set; }
 
@@ -487,7 +493,7 @@ public sealed class Settings
         "double_bookings_file",
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule", "leave",
-        "calendar_months_ahead", "sent", "sent_file", "hold", "sent_invites_file", "catch_ups", "catch_up_skip", "catch_up",
+        "calendar_months_ahead", "sent", "sent_file", "hold", "sent_invites_file", "unconfirmed_file", "catch_ups", "catch_up_skip", "catch_up",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -672,6 +678,7 @@ public sealed class Settings
             ForwardedFile = PathOr("forwarded_file", System.IO.Path.Combine(Local, "forwarded.json")),
             SentFile = PathOr("sent_file", System.IO.Path.Combine(Local, "sent.json")),
             SentInvitesFile = PathOr("sent_invites_file", System.IO.Path.Combine(Local, "sent-invites.json")),
+            UnconfirmedFile = PathOr("unconfirmed_file", System.IO.Path.Combine(Local, "unconfirmed.json")),
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
             Schedule = schedule,

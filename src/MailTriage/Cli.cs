@@ -108,6 +108,10 @@ public static class Cli
             mail-triage double-bookings     each upcoming double booking, and what the [[double_booking_rule]]s would do
                                             with it (changes nothing)
 
+            A calendar write by hand whose answer was lost (move, leave --decline, invite, respond, cancel, hold) is
+            recorded: the next preview or --yes for it reads the event again, says if it went, and otherwise skips it
+            (exit 1); --again sends it, once you've checked Outlook.
+
             mail-triage watch              run now, then every every_minutes in working hours; what autostart runs
             mail-triage autostart on        the watcher at every logon, and now (off, restart, status)
 
@@ -140,18 +144,18 @@ public static class Cli
         ["list"] = (["--json"], []),
         ["deleted"] = (["--all"], []),
         ["summary"] = (["--json"], []),
-        ["invite"] = (["--silent", "--series", "--move", "--yes"], ["--note"]),
-        ["move"] = (["--yes"], []),
+        ["invite"] = (["--silent", "--series", "--move", "--yes", "--again"], ["--note"]),
+        ["move"] = (["--yes", "--again"], []),
         ["file"] = ([], ["--to"]),
         ["handle"] = ([], ["--handler"]),
         ["forward"] = (["--yes"], ["--rule"]),
-        ["leave"] = (["--decline", "--yes"], ["--days", "--note"]),
+        ["leave"] = (["--decline", "--yes", "--again"], ["--days", "--note"]),
         ["one-to-ones"] = (["--dry-run"], ["--days"]),
         ["days-off"] = ([], ["--days"]),
-        ["hold"] = (["--yes", "--online"], ["--body", "--body-file", "--location", "--room"]),
+        ["hold"] = (["--yes", "--online", "--again"], ["--body", "--body-file", "--location", "--room"]),
         ["send-invite"] = (["--yes", "--no-online"], ["--to", "--optional", "--body", "--body-file", "--location", "--room", "--replace-hold"]),
-        ["respond"] = (["--yes", "--series"], ["--note"]),
-        ["cancel"] = (["--yes", "--series"], ["--note"]),
+        ["respond"] = (["--yes", "--series", "--again"], ["--note"]),
+        ["cancel"] = (["--yes", "--series", "--again"], ["--note"]),
         ["sent"] = (["--yes"], []),
     };
 
@@ -394,7 +398,7 @@ public static class Cli
                 return SendInvites.Run(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command is "respond" or "cancel")
                 return CalendarWrites.Run(args.Command, args.Positional, args.Value("--note") ?? "", args.Flag("--series"), args.Flag("--yes"),
-                    settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host.Out, host.Err);
+                    args.Flag("--again"), settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host.Out, host.Err);
             if (args.Command is "invite" or "move" or "leave")
             {
                 if (settings.Invites is null)
@@ -589,17 +593,19 @@ public static class Cli
     private static int CalendarCommand(Args args, Settings settings, IGraph graph, WriteDoor door, Action<string> log, CliHost host)
     {
         var calendar = new Calendar(graph, door.Calendar);
+        var again = args.Flag("--again");
         if (args.Command == "invite")
         {
             // 1.28.0: without --yes, a preview: it reads the queue (and the events it names) and takes no lock, so it
             // neither waits for a run nor holds one up.
             if (!args.Flag("--yes"))
                 return Triage.PreviewAnswer(settings, calendar, args.Positional[1..], args.Positional[0], args.Value("--note") ?? "", !args.Flag("--silent"),
-                    args.Flag("--series"), args.Flag("--move"), line => Print(host.Out, line));
+                    args.Flag("--series"), args.Flag("--move"), line => Print(host.Out, line), args.Flag("--again"), log);
+            (int Answered, int NotDone) answered;
             using (Locks.Exclusive(Watcher.RunLock(settings), 600, "triage run"))
-                Triage.Answer(settings, calendar, args.Positional[1..], args.Positional[0], args.Value("--note") ?? "", !args.Flag("--silent"), log,
-                    series: args.Flag("--series"), move: args.Flag("--move"));
-            return 0;
+                answered = Triage.Answer(settings, calendar, args.Positional[1..], args.Positional[0], args.Value("--note") ?? "", !args.Flag("--silent"), log,
+                    series: args.Flag("--series"), move: args.Flag("--move"), again: args.Flag("--again"), say: line => Print(host.Err, line));
+            return answered.NotDone > 0 ? 1 : 0;   // 1.30.0: a lost answer, or one skipped for an earlier one, exits 1
         }
         if (args.Command == "move")
         {
@@ -636,8 +642,29 @@ public static class Cli
             var others = InviteTriage.People(e).Where(a => InviteTriage.Address(a) != owner).ToList();
             var moving = $"\"{subject}\" ({CalendarWrites.Scope(e)}): {InviteTriage.Day(oldStart)}–{InviteTriage.Hm(oldEnd)} -> "
                          + $"{InviteTriage.Day(start)}–{InviteTriage.Hm(end)}";
+            // 1.30.0: an earlier move of this event whose answer was lost is checked against the event as it is now (just read).
+            var moveKey = UnconfirmedWrites.Key("move", eventId);
+            var earlierMove = UnconfirmedWrites.Check(settings, moveKey, () => e, UnconfirmedWrites.Moved, log);
+            if (earlierMove.Seen == UnconfirmedWrites.Seen.Went)
+            {
+                Print(host.Out, earlierMove.Text);
+                if (UnconfirmedWrites.Moved(e, UnconfirmedWrites.MoveEntry("move", eventId, subject, oldEnd, start, end)))
+                {
+                    Print(host.Out, "Nothing to do: it's already at that time.");
+                    return 0;
+                }
+            }
+            var pendingMove = earlierMove.Seen == UnconfirmedWrites.Seen.Pending;
+            if (pendingMove && args.Flag("--yes") && !again)
+            {
+                log($"unconfirmed: skipped {UnconfirmedWrites.Describe(earlierMove.Entry!)}: an earlier one may not have landed");
+                Print(host.Err, earlierMove.Text + " Not sent again: once you've checked, `--again --yes` moves it.");
+                return 1;
+            }
             if (!args.Flag("--yes"))
             {
+                if (pendingMove)
+                    Print(host.Out, earlierMove.Text);
                 Print(host.Out, $"Would move your {(others.Count > 0 ? "meeting" : "block")} {moving}.");
                 if (others.Count > 0)
                 {
@@ -668,14 +695,19 @@ public static class Cli
                 {
                     Print(host.Out, $"  (Couldn't read your calendar at the new time, so clashes aren't checked: {PyStr.Head(error.Message, 120)})");
                 }
-                Print(host.Out, (others.Count > 0 ? "Nothing sent." : "Nothing changed.") + " Run again with --yes to move it.");
+                Print(host.Out, (others.Count > 0 ? "Nothing sent." : "Nothing changed.")
+                                + (!pendingMove ? " Run again with --yes to move it."
+                                    : again ? " Run again with --again --yes to move it."
+                                    : " --yes would skip it, as the earlier move may have landed; once you've checked Outlook, --again --yes moves it."));
                 return 0;
             }
+            if (pendingMove)
+                log($"unconfirmed: sending {UnconfirmedWrites.Describe(earlierMove.Entry!)} again (--again)");
             if (Unconfirmed.Try(() => calendar.Move(eventId, start, end)) is { } lost)
             {
-                log($"move may have gone, not resent: {Py.Str(e.Get("subject"))}: {lost}");
+                UnconfirmedWrites.Record(settings, moveKey, UnconfirmedWrites.MoveEntry("move", eventId, subject, oldEnd, start, end), lost, log);
                 Print(host.Err, $"Microsoft didn't confirm the move of \"{Py.Str(e.Get("subject"))}\", so it may have gone: check Outlook "
-                                + "before moving it again. It wasn't sent twice.");
+                                + "before moving it again. It wasn't sent twice. It's recorded: the next `move` of it checks whether it landed.");
                 return 1;
             }
             if (door.Mode != WriteMode.Live)
@@ -683,47 +715,96 @@ public static class Cli
                 Print(host.Out, $"Journalled, not sent: move {moving}.");
                 return 0;
             }
+            if (pendingMove)
+                UnconfirmedWrites.Clear(settings, moveKey, "sent again with --again, and confirmed", log);
             log($"moved  {Py.Str(e.Get("subject"))}: {InviteTriage.Day(oldStart)} -> {InviteTriage.Day(start)}–{InviteTriage.Hm(end)}"
                 + (InviteTriage.People(e).Count <= 1 ? "" : " (attendees get an update)"));
             return 0;
         }
         var days = long.Parse(args.Value("--days") ?? "60", System.Globalization.CultureInfo.InvariantCulture);
         var found = InviteTriage.PlanLeaveDeclines(settings, calendar, DateOnly.FromDateTime(Clock.Now), days, args.Value("--note"));
+        var decline = args.Flag("--decline");
+        // 1.30.0: the declines an earlier `leave --decline --yes` sent whose answer was lost. One that has dropped out of the
+        // plan (declined, or gone from the calendar) is read again and cleared if it went; one still in it isn't declined,
+        // so it may not have landed: skipped unless --again.
+        var inPlan = found.Select(d => d.Event.Req("id")).ToHashSet(StringComparer.Ordinal);
+        foreach (var (key, entry) in UnconfirmedWrites.Matching(settings, o => o.Str("command") == "leave" && !inPlan.Contains(o.StrOr("event"))))
+        {
+            var look = UnconfirmedWrites.Check(settings, key, () => UnconfirmedWrites.ReadOrGone(calendar, entry.Req("event")), UnconfirmedWrites.Answered, log);
+            if (look.Seen == UnconfirmedWrites.Seen.Went)
+                Print(host.Out, look.Text);
+        }
+        var earlier = new Dictionary<string, UnconfirmedWrites.Look>(StringComparer.Ordinal);
+        foreach (var d in found)
+        {
+            var look = UnconfirmedWrites.Check(settings, UnconfirmedWrites.Key("respond", d.Event.Req("id")), () => d.Event, UnconfirmedWrites.Answered, log);
+            if (look.Seen == UnconfirmedWrites.Seen.Went)
+                Print(host.Out, look.Text);   // an earlier answer of another kind (a `respond`) that went: this decline is new
+            else if (look.Seen == UnconfirmedWrites.Seen.Pending)
+                earlier[d.Event.Req("id")] = look;
+        }
         if (found.Count == 0)
         {
             Print(host.Out, $"Nothing in your leave over the next {days} days that you haven't declined.");
             return 0;
         }
-        var decline = args.Flag("--decline");
         if (decline && !args.Flag("--yes"))
-            return PreviewLeaveDeclines(found, days, host);   // 1.29.0: what --decline --yes would send, and nothing sent
+            return PreviewLeaveDeclines(found, days, earlier, again, host);   // 1.29.0: what --decline --yes would send, and nothing sent
         var unconfirmed = 0;
+        var skipped = 0;
         foreach (var d in found)
         {
             var e = d.Event;
+            var id = e.Req("id");
             Print(host.Out, $"  {InviteTriage.Day(d.Start)}–{InviteTriage.Hm(d.End)}  {Py.Str(e.Get("subject"))}  ({InviteTriage.Organiser(e).Name}; "
                             + $"{Py.Str(e.Get("responseStatus").Get("response"))})" + (d.Respond ? $"  note: \"{d.Note}\"" : "  (no response requested)"));
+            var pending = earlier.GetValueOrDefault(id);
+            if (!decline)
+            {
+                if (pending is not null)
+                    Print(host.Out, $"    {pending.Text}");
+                continue;
+            }
+            if (pending is not null && !again)
+            {
+                skipped++;
+                log($"unconfirmed: skipped {UnconfirmedWrites.Describe(pending.Entry!)}: an earlier one may not have landed");
+                Print(host.Err, $"    {pending.Text} Skipped, never resent: once you've checked, `leave --decline --again --yes` declines it.");
+                continue;
+            }
+            if (pending is not null)
+                log($"unconfirmed: sending {UnconfirmedWrites.Describe(pending.Entry!)} again (--again)");
             // The occurrence: the rest of the series is untouched.
-            if (decline && Unconfirmed.Try(() => calendar.Respond(e.Req("id"), "decline", d.Note, d.Respond)) is { } lost)
+            if (Unconfirmed.Try(() => calendar.Respond(id, "decline", d.Note, d.Respond)) is { } lost)
             {
                 unconfirmed++;
-                log($"leave sweep: decline may have gone, not resent: {Py.Str(e.Get("subject"))}: {lost}");
+                UnconfirmedWrites.Record(settings, UnconfirmedWrites.Key("respond", id), UnconfirmedWrites.AnswerEntry("leave", id, null, e.StrOr("subject"),
+                    "decline", $"{InviteTriage.Day(d.Start)}, {CalendarWrites.Scope(e)}", d.End), lost, log);
                 Print(host.Err, "    Microsoft didn't confirm this decline, so it may have gone: check Outlook before declining it again.");
             }
+            else if (pending is not null && door.Mode == WriteMode.Live)
+                UnconfirmedWrites.Clear(settings, UnconfirmedWrites.Key("respond", id), "sent again with --again, and confirmed", log);
         }
         if (unconfirmed > 0)
-            Print(host.Err, $"{unconfirmed} decline(s) may or may not have gone (above): never sent twice.");
-        Print(host.Out, $"{found.Count} meeting(s) in your leave" + (decline ? ": declined, each occurrence on its own."
-            : ". `--decline` shows what declining them would send (each occurrence, not the series); `--decline --yes` declines them."));
+            Print(host.Err, $"{unconfirmed} decline(s) may or may not have gone (above): never sent twice. Each is recorded, so the next "
+                            + "`leave --decline` checks whether each landed.");
+        if (skipped > 0)
+            Print(host.Err, $"{skipped} decline(s) skipped: an earlier one may not have landed (above).");
+        var declined = found.Count - unconfirmed - skipped;
+        Print(host.Out, $"{found.Count} meeting(s) in your leave" + (!decline
+            ? ". `--decline` shows what declining them would send (each occurrence, not the series); `--decline --yes` declines them."
+            : declined == found.Count ? ": declined, each occurrence on its own."
+            : $": {declined} declined, each occurrence on its own."));
         if (decline)
-            log($"leave sweep: declined {found.Count} meeting(s)");
-        return 0;
+            log($"leave sweep: declined {declined} meeting(s)");
+        return decline && unconfirmed + skipped > 0 ? 1 : 0;   // 1.30.0: a lost answer exits 1, as `move` does
     }
 
     /// <summary>`leave --decline` without --yes (1.29.0): for each meeting, when it is, the organiser, that only this
     /// occurrence is declined (never the series), the note, and whether the organiser gets a response. It only reads (the
     /// calendar, already read for the plan); nothing is sent, whatever --writes says.</summary>
-    private static int PreviewLeaveDeclines(List<InviteTriage.LeaveDecline> found, long days, CliHost host)
+    private static int PreviewLeaveDeclines(List<InviteTriage.LeaveDecline> found, long days, Dictionary<string, UnconfirmedWrites.Look> earlier,
+        bool again, CliHost host)
     {
         Print(host.Out, $"Would decline {found.Count} meeting{(found.Count == 1 ? "" : "s")} in your leave over the next {days} days, "
                         + "each occurrence on its own, never the series:");
@@ -735,6 +816,9 @@ public static class Cli
             var organiser = name.Length > 0 ? name : address;
             Print(host.Out, $"  {++n}. \"{e.StrOr("subject")}\", organised by {(name.Length > 0 && address.Length > 0 ? $"{name} <{address}>" : organiser)}");
             Print(host.Out, $"     {InviteTriage.Day(d.Start)}–{InviteTriage.Hm(d.End)}; your answer so far: {CalendarWrites.Current(e)}");
+            if (earlier.GetValueOrDefault(e.Req("id")) is { } pending)
+                Print(host.Out, $"     {pending.Text}" + (again ? " --again: it would be declined again."
+                    : " --yes would skip it; once you've checked, --again --yes declines it."));
             Print(host.Out, CalendarWrites.Scope(e) == "this occurrence only"
                 ? "     Would decline this occurrence only, not the series."
                 : "     Would decline it.");
@@ -742,7 +826,7 @@ public static class Cli
                 ? $"     {organiser} gets a response" + (d.Note.Length > 0 ? $", with the note \"{d.Note}\"." : ", with no note.")
                 : $"     No response is sent (the organiser didn't ask for one): {organiser} isn't told" + (d.Note.Length > 0 ? ", and the note isn't sent." : "."));
         }
-        Print(host.Out, $"Nothing sent. Run again with --decline --yes to decline {(found.Count == 1 ? "it" : "them")}.");
+        Print(host.Out, $"Nothing sent. Run again with --decline {(again ? "--again " : "")}--yes to decline {(found.Count == 1 ? "it" : "them")}.");
         return 0;
     }
 
@@ -841,15 +925,38 @@ public static class Cli
         var what = $"\"{subject}\", {PyTime.Strftime(start, "%a %d %b %H:%M")}-{PyTime.Strftime(end, "%H:%M")}, busy, "
                    + (room is null ? "no attendees" : $"books {room.Name}; no people invited")
                    + (room is null && location is { Length: > 0 } ? $", at {location}" : "") + (online ? ", a Teams meeting" : "");
+        var calendar = new Calendar(graph, door.Calendar);
+        // 1.30.0: an earlier hold of this time and subject whose answer was lost: is it in the calendar now?
+        var again = args.Flag("--again");
+        var holdKey = UnconfirmedWrites.HoldKey(subject, start, end);
+        var earlier = UnconfirmedWrites.Check(settings, holdKey, () => Holds.Find(calendar, subject, start, end), UnconfirmedWrites.Held, log);
+        if (earlier.Seen == UnconfirmedWrites.Seen.Went)
+        {
+            Print(host.Out, earlier.Text);
+            Print(host.Out, "Nothing to do: the hold is in your calendar.");
+            return 0;
+        }
+        var pending = earlier.Seen == UnconfirmedWrites.Seen.Pending;
+        if (pending && args.Flag("--yes") && !again)
+        {
+            log($"unconfirmed: skipped {UnconfirmedWrites.Describe(earlier.Entry!)}: an earlier one may not have landed");
+            Print(host.Err, earlier.Text + " Not created again: once you've checked, `--again --yes` creates it.");
+            return 1;
+        }
         if (!args.Flag("--yes"))
         {
+            if (pending)
+                Print(host.Out, earlier.Text);
             Print(host.Out, $"Would create in your calendar: {what}.");
             if (body.Length > 0)
                 Print(host.Out, "  Body: " + PyStr.Head(body.Replace("\n", " / "), 300));
-            Print(host.Out, "Nothing written. Run again with --yes to create it.");
+            Print(host.Out, "Nothing written." + (!pending ? " Run again with --yes to create it."
+                : again ? " Run again with --again --yes to create it."
+                : " --yes would skip it, as the earlier hold may have been made; once you've checked Outlook, --again --yes creates it."));
             return 0;
         }
-        var calendar = new Calendar(graph, door.Calendar);
+        if (pending)
+            log($"unconfirmed: sending {UnconfirmedWrites.Describe(earlier.Entry!)} again (--again)");
         JsonObject? created;
         try
         {
@@ -863,8 +970,9 @@ public static class Cli
         catch (Exception error) when (error is not WriteRefusedException and not InvalidOperationException)
         {
             log($"hold failed, may have reached Microsoft: {subject} {PyTime.Strftime(start, "%d/%m %H:%M")}: {error.GetType().Name}: {error.Message}");
+            UnconfirmedWrites.Record(settings, holdKey, UnconfirmedWrites.HoldEntry(subject, start, end), $"{error.GetType().Name}: {error.Message}", log);
             Print(host.Err, "The hold may or may not have been created (the call failed after it was sent). Check your calendar before "
-                            + "trying again: it isn't retried, so it can't be made twice.");
+                            + "trying again: it isn't retried, so it can't be made twice. It's recorded: the next `hold` of it checks whether it's there.");
             return 1;
         }
         if (door.Mode != WriteMode.Live)
@@ -872,6 +980,8 @@ public static class Cli
             Print(host.Out, $"Journalled, not sent: {what}.");
             return 0;
         }
+        if (pending)
+            UnconfirmedWrites.Clear(settings, holdKey, "made again with --again, and confirmed", log);
         var id = created?.Str("id");
         string? answer = null;
         if (id is not null)

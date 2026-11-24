@@ -160,7 +160,8 @@ handler = "team-chat-draft"
 Write regular expressions in TOML's single-quoted literal strings, so backslashes stay as they
 are. `mail-triage which <sender> "<subject>"` says which rule an email would meet, which is the
 quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-in), `tenant`,
-`queue_file`, `state_file`, `handled_file`, `forwarded_file`, `sent_invites_file`, `log_file`.
+`queue_file`, `state_file`, `handled_file`, `forwarded_file`, `sent_invites_file`, `unconfirmed_file` (1.30.0),
+`log_file`.
 
 **Keep each kind of table together**: all the `[[rule]]`s in one run, then the `[[handler]]`s, and so on. The TOML
 reader silently drops the tables before a break when one kind is split by another, so since 1.3.1 a file whose
@@ -246,8 +247,15 @@ background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync 
 - **One run at a time**, so the watcher and a run started by hand can't both act on the same email. `clear` and `keep` take the same lock, so a run in progress can't write back a queue you've just cleared.
 - **A write that may have reached Microsoft is never sent again.** Reads (and the one POST that only reads, getSchedule) and removing a meeting from your calendar (a DELETE: finding it already gone counts as done) are retried after a 5xx or a dropped connection. Every other write (answering, declining, moving or cancelling a meeting, a hold, an invitation, forwarding, moving or marking an email) is sent once: only a 429 (throttled, so not processed) or a request that never connected is tried again. A 5xx, a timeout or a connection dropped after sending means it may have gone:
   - **an automatic calendar change** (an invite answered by a rule, a decline on your days off, your own meeting cancelled on a day off, a double-booking rule, a 1:1 cancelled or moved for leave, a proposed new time accepted) **counts as done and is never made again**; it's listed in `deleted` under "Couldn't confirm: …" saying to check the calendar, and the watcher notifies ("N calendar changes may or may not have gone"). A proposal whose move may have gone is left in its folder.
-  - **a change made by hand** (`respond`, `cancel`, `move`, `hold`, `send-invite`) says so and asks you to check Outlook.
-  - **moving, deleting or marking an email** fails that run (logged); the next run reads the folder again, and an email that has already moved isn't there to move twice. A forward has its own record (above).
+  - **a change made by hand** (`move`, `leave --decline`, `invite`, `respond`, `cancel`, `hold`) says so, asks you to check Outlook, exits 1, and **is recorded, so a later command never sends it again by itself** (1.30.0; below). `send-invite` has its own record (below), as a forward does (above).
+  - **moving, deleting or marking an email** fails that run (logged); the next run reads the folder again, and an email that has already moved isn't there to move twice. That's also why `delete`, `file`, `sent --yes` and the `then` of `handle` need no record: a move that went leaves nothing to move again (Graph answers 404), and it tells no one. A handler itself is never run twice for one email (`handled_file`).
+- **A lost answer by hand is recorded and checked (1.30.0).** Until 1.29.0 a command typed by hand only avoided resending within the same command: nothing was kept, so the next `move --yes` or `leave --decline --yes` offered the same write again, with only a printed warning in the way. Now each write by hand whose answer is lost is written to **`unconfirmed_file`** (top level; default `%LOCALAPPDATA%\mail-triage\unconfirmed.json`; runtime state, beside the others): what it was (a move, an answer, a cancel or delete, a hold), which event (for a hold, its time and subject), the intended change, when, and the error. Each record and each clear is logged (`unconfirmed: recorded …`, `unconfirmed: cleared …: it went`), as is each skip and resend.
+  - **The next preview or `--yes` for the same event reads it again.** If the change is visibly there (moved to that time, the answer sent, declined or gone from the calendar, cancelled or deleted, the hold in your calendar), the record is cleared and it says so: *An earlier move of "…" (to Thu 26 Nov 10:00–10:30) on Mon 23 Nov 09:00 went: it's there now, so it isn't sent again.* If the same change was asked for again, there's nothing to do (exit 0); a different one (another time, another answer) goes ahead as a new write.
+  - **If it isn't there, it's skipped by default**: *An earlier decline of "…" (Wed 16 Dec 09:00, this occurrence only) on Mon 23 Nov 09:00 may not have landed: check Outlook.* A preview shows that and what `--yes` would skip; `--yes` skips it and exits 1. A read that fails counts as not there. **`--again`** (on `move`, `leave`, `invite`, `respond`, `cancel` and `hold`) sends it, once, after you've checked Outlook; confirmed, the record is cleared; lost again, it's recorded again. Nothing is ever resent without it.
+  - **`invite` stops at a lost answer**: nothing after it in that invite is sent (the rest of the occurrences, any `--move`), the invite stays queued saying so, and the record keeps what of it had already gone, so the next `invite` of it never sends those again: it checks the lost one, then carries on.
+  - **`leave --decline`** checks its own earlier declines on every listing, preview and `--yes`: one still in your leave undeclined is skipped (unless `--again`); one that has dropped out (declined, or gone) is read again and cleared.
+  - A record is kept until the meeting has ended (one whose end isn't known, an answer to a series, for 60 days). A journal run (`--writes journal`) records nothing. **Runs (the watcher) neither read nor write `unconfirmed_file`**: their own lost answers count as done, as above.
+  - **Exit codes:** 1 when a write's answer was lost: `move`, `leave --decline --yes` (it was 0 until 1.30.0), `invite --yes` (a lost answer used to stop it with a bare failure), `respond`, `cancel`, `hold`, `send-invite` and `forward`. 1 too when a write was skipped for an earlier lost one (`move`, `leave`, `invite`, `respond`, `cancel`, `hold`; `forward` leaves it queued, also 1; `send-invite` refuses it with 2, as before). 0 when everything went or there was nothing to do, and for any preview; 2 for a refusal before anything was sent (a usage error, an unknown event, someone else's meeting).
 - **Unattended deletes stay visible.** Everything the rules delete is recorded, and `mail-triage deleted` lists what went since you last cleared the queue, grouped by rule (`--all` for the last 60 days). `list` says how many. A rule that starts catching the wrong mail shows up there, and the email is still in Deleted Items.
 - **The watcher runs once at start, then every `every_minutes` within `hours`**, so logging on in the evening still clears the day's mail, and checking Outlook in the afternoon finds the folders already tidy. One watcher per settings file; it logs `alive` hourly and notifies a failure once, until a run succeeds.
 - **The watcher never opens a browser.** A lapsed sign-in is notified, and `mail-triage sign-in` at a console fixes it.
@@ -318,13 +326,16 @@ mail-triage leave --decline                            # what declining them wou
   - **`mail-triage move <event id> START [END] [--yes]`**: the meeting, old time -> new, whether it's one occurrence,
     and each attendee who gets an update (or that no one else is invited). **A clash at the new time is a warning, not
     a refusal**: anything in your calendar that holds time (busy, out of office, tentative; your leave too) and you
-    haven't declined. With `--yes` it moves once and, like the rest, never resends a move that may have gone.
+    haven't declined. With `--yes` it moves once and, like the rest, never resends a move that may have gone: it's
+    recorded, and the next `move` of it checks whether it landed (1.30.0; `--again` to send it after checking).
   - **`mail-triage leave --decline [--note TEXT] [--days N] [--yes]`** (1.29.0): for each meeting in your leave you
     haven't declined, its title and organiser, when it is and your answer so far, that **only that occurrence is
     declined, never the series** (as `leave --decline` always has: it declines each occurrence on its own), the note
     (the leave note, or `--note`), and whether the organiser gets a response (not where they didn't ask for one). Then
     "Nothing sent. Run again with --decline --yes to decline them." With `--decline --yes` it declines each once, as
-    before, carrying on past one whose answer was lost and never resending it. `leave` alone is still only the list;
+    before, carrying on past one whose answer was lost and never resending it. **Since 1.30.0 a lost decline is
+    recorded and exits 1**, and the next `leave` checks it: skipped while it may not have landed (`--decline --again
+    --yes` declines it after you've checked), cleared once it's declined. `leave` alone is still only the list;
     `leave --yes` without `--decline` is refused.
   - What a run does by itself (auto-accepts, moves of your blocks, declines on your days off, 1:1s, catch-ups, double
     bookings, rules that forward) is unchanged: `--yes` is the brake on commands typed by hand.
@@ -650,7 +661,8 @@ Two more calendar writes, so that nothing needs a connector or a one-off script 
 `forward`; since 1.29.0, `leave --decline`); with `--yes` they write once, read the event back, log it, and list it in `mail-triage deleted` ("Answered
 by hand", "Cancelled by hand", "Deleted by hand").
 **A write that may have reached Microsoft is never retried**: if the call fails after it was sent, it says so and asks
-you to check the calendar. **One occurrence by default; `--series` for the whole series** (decline the instance, never
+you to check the calendar; since 1.30.0 it's recorded too, and the next `respond` or `cancel` of that event checks
+whether it landed (`--again` to send it after checking; an event that's gone counts as cancelled or declined). **One occurrence by default; `--series` for the whole series** (decline the instance, never
 the series, unless you mean it); a series id without `--series` is refused.
 
 - **`mail-triage respond <event id> accept|tentative|decline [--note TEXT] [--series] [--yes]`** answers a meeting you're

@@ -166,6 +166,7 @@ public static class Make
         log_file = "log.txt"
         accepted_file = "accepted.json"
         days_off_file = "days-off.json"
+        unconfirmed_file = "unconfirmed.json"
 
         [invites]
         days_ahead = 30

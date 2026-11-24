@@ -689,38 +689,137 @@ public static class Triage
 
     /// <summary>Answer queued invites (by number): accept, tentative or decline. Accepting a series accepts it whole,
     /// with each unanswered occurrence changed on its own; declining declines instances, never the series, unless
-    /// series is true. No response is sent where the organiser didn't ask for one.</summary>
-    public static int Answer(Settings settings, ICalendar calendar, IReadOnlyList<string> refs, string action, string note = "",
-        bool send = true, Action<string>? log = null, bool series = false, bool move = false)
+    /// series is true. No response is sent where the organiser didn't ask for one.
+    /// <para>1.30.0: a write whose answer is lost is recorded in unconfirmed_file, with what of that invite had already
+    /// gone, and the rest of it isn't sent: it stays queued, saying so. The next `invite` of it sends nothing that went,
+    /// reads the lost one's event again (cleared if the change is there; skipped, with the rest, if not, unless again),
+    /// then carries on. Returns how many invites were answered, and how many weren't finished (`say` says why).</para></summary>
+    public static (int Answered, int NotDone) Answer(Settings settings, ICalendar calendar, IReadOnlyList<string> refs, string action, string note = "",
+        bool send = true, Action<string>? log = null, bool series = false, bool move = false, bool again = false, Action<string>? say = null)
     {
         log ??= _ => { };
+        say ??= _ => { };
         var plan = PlanAnswer(settings, refs, action, note, send, series, move);
         var keep = new List<string>();
-        foreach (var p in plan)
+        var checks = new Dictionary<string, string>(StringComparer.Ordinal);
+        var done = new List<string>();
+        try
         {
-            var item = p.Item;
-            foreach (var target in p.Targets)
-                calendar.Respond(target, action, p.Text, p.Respond);
-            var done = action switch { "accept" => "accepted", "tentative" => "accepted tentatively", "decline" => "declined", _ => throw new KeyNotFoundException(action) };
-            log($"invite {done} ({p.What}){(p.Respond ? "" : " (no response sent)")}  "
-                + $"{item.Fmt("from")}: {item.Fmt("subject")}" + (p.Text.Length > 0 && p.Respond ? $" | note: {p.Text}" : ""));
-            foreach (var c in p.Moves)
+            foreach (var p in plan)
             {
-                var start = PyTime.FromIso(c.Req("to"));
-                var end = PyTime.FromIso(c.Req("to_end"));
-                calendar.Move(c.Req("id"), start, end);
-                var was = c.Req("start");
-                log($"moved  {c.Fmt("subject")}: {was[5..Math.Min(16, was.Length)]} -> {PyTime.Strftime(start, "%a %d %b %H:%M")}–{PyTime.Strftime(end, "%H:%M")}");
-            }
-            if (p.Keep)
-            {
-                keep.Add(item.Req("id"));
-                log($"  still queued: decline {item.Get("decline").Strings().Count} occurrence(s) with `mail-triage invite decline {item.Fmt("n", "None")}`");
+                var item = p.Item;
+                var went = WentBefore(settings, item);
+                var sent = new List<string>();
+                string? stopped = null;
+                foreach (var w in InviteWrites(p, action, calendar))
+                {
+                    if (went.Contains(w.Sig))
+                    {
+                        sent.Add(w.Sig);   // went before an earlier lost answer: never sent again
+                        continue;
+                    }
+                    var look = UnconfirmedWrites.Check(settings, w.Key, () => UnconfirmedWrites.ReadOrGone(calendar, w.EventId), w.Landed, log);
+                    if (look.Seen == UnconfirmedWrites.Seen.Went)
+                    {
+                        say($"  {look.Text}");
+                        if (look.Entry!.Str("sig") == w.Sig)
+                        {
+                            sent.Add(w.Sig);
+                            continue;
+                        }
+                    }
+                    if (look.Seen == UnconfirmedWrites.Seen.Pending && !again)
+                    {
+                        log($"unconfirmed: skipped {UnconfirmedWrites.Describe(look.Entry!)}: an earlier one may not have landed");
+                        say($"  {look.Text} Skipped, with the rest of this invite: once you've checked, `invite {action} <n> --again --yes` sends it.");
+                        stopped = $"an earlier {look.Entry!.StrOr("verb")} may not have landed: check Outlook, then `invite {action} <n> --again --yes`";
+                        break;
+                    }
+                    if (look.Seen == UnconfirmedWrites.Seen.Pending)
+                        log($"unconfirmed: sending {UnconfirmedWrites.Describe(look.Entry!)} again (--again)");
+                    if (Unconfirmed.Try(w.Send) is { } lost)
+                    {
+                        var entry = (JsonObject)w.Entry.DeepClone();
+                        entry["item"] = item.Req("id");
+                        entry["sent"] = J.Array(sent);
+                        UnconfirmedWrites.Record(settings, w.Key, entry, lost, log);
+                        say($"  Microsoft didn't confirm the {UnconfirmedWrites.Describe(entry)}, so it may have gone: check Outlook. It wasn't "
+                            + "sent twice, nothing after it in this invite was sent, and the invite stays queued: the next `invite` of it checks "
+                            + "whether it landed.");
+                        stopped = $"the {entry.StrOr("verb")} may have gone (its answer was lost): check Outlook; the next `invite` of it checks";
+                        break;
+                    }
+                    if (look.Seen == UnconfirmedWrites.Seen.Pending)
+                        UnconfirmedWrites.Clear(settings, w.Key, "sent again with --again, and confirmed", log);
+                    sent.Add(w.Sig);
+                    w.Done(log);
+                }
+                if (stopped is not null)
+                {
+                    keep.Add(item.Req("id"));
+                    checks[item.Req("id")] = stopped;
+                    continue;
+                }
+                done.Add(item.Req("id"));
+                var did = action switch { "accept" => "accepted", "tentative" => "accepted tentatively", "decline" => "declined", _ => throw new KeyNotFoundException(action) };
+                log($"invite {did} ({p.What}){(p.Respond ? "" : " (no response sent)")}  "
+                    + $"{item.Fmt("from")}: {item.Fmt("subject")}" + (p.Text.Length > 0 && p.Respond ? $" | note: {p.Text}" : ""));
+                if (p.Keep)
+                {
+                    keep.Add(item.Req("id"));
+                    log($"  still queued: decline {item.Get("decline").Strings().Count} occurrence(s) with `mail-triage invite decline {item.Fmt("n", "None")}`");
+                }
             }
         }
-        var gone = plan.Select(p => p.Item.Req("id")).Except(keep).ToHashSet(StringComparer.Ordinal);
-        SaveQueue(settings, Queue(settings).Where(i => !gone.Contains(i.Req("id"))).ToList());
-        return plan.Count;
+        finally
+        {
+            // What went is off the queue even if a later invite fails, so it's never answered twice.
+            var gone = done.Except(keep).ToHashSet(StringComparer.Ordinal);
+            SaveQueue(settings, Queue(settings).Where(i => !gone.Contains(i.Req("id")))
+                .Select(i => { if (checks.TryGetValue(i.Req("id"), out var c)) i["check"] = c; return i; }).ToList());
+        }
+        return (done.Count, checks.Count);
+    }
+
+    /// <summary>What of this invite went before a write whose answer was lost (1.30.0): never sent again.</summary>
+    private static HashSet<string> WentBefore(Settings settings, JsonObject item) =>
+        UnconfirmedWrites.Matching(settings, o => o.Str("item") == item.Req("id")).SelectMany(r => r.Entry.Get("sent").Strings()).ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>One write `invite` makes (1.30.0): its record key (by event), its signature (exactly what, so an invite that
+    /// stopped part-way never resends what went), the event it changes, the record it leaves if its answer is lost, what
+    /// would show it landed, the send, and its log line.</summary>
+    internal sealed record InviteWrite(string Key, string Sig, string EventId, JsonObject Entry, Func<JsonObject?, JsonObject, bool> Landed,
+        Action Send, Action<Action<string>> Done);
+
+    /// <summary>The writes for one invite, in order: each response, then each move of your own (--move).</summary>
+    internal static List<InviteWrite> InviteWrites(AnswerPlan p, string action, ICalendar calendar)
+    {
+        var item = p.Item;
+        var writes = new List<InviteWrite>();
+        foreach (var target in p.Targets)
+        {
+            var scope = target == item.Str("series") ? "the whole series" : item.Truthy("series") ? "one occurrence" : "this meeting";
+            var entry = UnconfirmedWrites.AnswerEntry("invite", target, null, item.Fmt("subject"), action, scope, null);
+            var sig = $"respond:{target}:{action}";
+            entry["sig"] = sig;
+            writes.Add(new(UnconfirmedWrites.Key("respond", target), sig, target, entry, UnconfirmedWrites.Answered,
+                () => calendar.Respond(target, action, p.Text, p.Respond), _ => { }));
+        }
+        foreach (var c in p.Moves)
+        {
+            var id = c.Req("id");
+            var start = PyTime.FromIso(c.Req("to"));
+            var end = PyTime.FromIso(c.Req("to_end"));
+            var entry = UnconfirmedWrites.MoveEntry("invite", id, c.Fmt("subject"), PyTime.FromIso(c.Req("end")), start, end);
+            var sig = $"move:{id}:{c.Req("to")}";
+            entry["sig"] = sig;
+            writes.Add(new(UnconfirmedWrites.Key("move", id), sig, id, entry, UnconfirmedWrites.Moved, () => calendar.Move(id, start, end), log =>
+            {
+                var was = c.Req("start");
+                log($"moved  {c.Fmt("subject")}: {was[5..Math.Min(16, was.Length)]} -> {PyTime.Strftime(start, "%a %d %b %H:%M")}–{PyTime.Strftime(end, "%H:%M")}");
+            }));
+        }
+        return writes;
     }
 
     /// <summary>What answering one queued invite does: the responses (Targets, each with Text, a response sent to the
@@ -767,9 +866,10 @@ public static class Triage
     /// stands out), the note, whether the organiser is told, and with --move each of yours it would move and who gets an
     /// update. It only reads (the queue, and the events it would move or decline); it takes no lock and changes nothing.</summary>
     public static int PreviewAnswer(Settings settings, ICalendar calendar, IReadOnlyList<string> refs, string action, string note,
-        bool send, bool series, bool move, Action<string> output)
+        bool send, bool series, bool move, Action<string> output, bool again = false, Action<string>? log = null)
     {
         var plan = PlanAnswer(settings, refs, action, note, send, series, move);
+        var pending = false;
         var owner = (settings.Email ?? "").ToLowerInvariant();
         var verb = action == "decline" ? "decline" : "accept";
         var how = action == "tentative" ? " tentatively" : "";
@@ -830,8 +930,27 @@ public static class Triage
             }
             if (p.Keep)
                 output($"     It stays queued, to decline {item.Get("decline").Strings().Count} occurrence(s) with `mail-triage invite decline {item.Fmt("n", "None")}`.");
+            // 1.30.0: what an earlier `invite` of it left unconfirmed: read again, cleared if it went.
+            var went = WentBefore(settings, item);
+            foreach (var w in InviteWrites(p, action, calendar))
+            {
+                if (went.Contains(w.Sig))
+                {
+                    output($"     Already sent by an earlier `invite` (before an answer was lost), so not sent again: {UnconfirmedWrites.Describe(w.Entry)}.");
+                    continue;
+                }
+                var look = UnconfirmedWrites.Check(settings, w.Key, () => UnconfirmedWrites.ReadOrGone(calendar, w.EventId), w.Landed, log ?? (_ => { }));
+                if (look.Seen == UnconfirmedWrites.Seen.Went)
+                    output($"     {look.Text}" + (look.Entry!.Str("sig") == w.Sig ? "" : " This one is new, so it would be sent."));
+                else if (look.Seen == UnconfirmedWrites.Seen.Pending)
+                {
+                    pending = true;
+                    output($"     {look.Text}" + (again ? " --again: it would be sent again."
+                        : " --yes would skip it and the rest of this invite; once you've checked, --again --yes sends it."));
+                }
+            }
         }
-        output("Nothing sent. Run again with --yes to send it.");
+        output(pending && !again ? "Nothing sent." : $"Nothing sent. Run again with {(again ? "--again " : "")}--yes to send it.");
         return 0;
     }
 

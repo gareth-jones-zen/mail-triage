@@ -117,4 +117,13 @@ public static class Holds
             }
         return null;
     }
+
+    /// <summary>A hold of yours already in the calendar at exactly this time with this subject (1.30.0), or null: how a
+    /// hold whose answer was lost is checked before it's made again.</summary>
+    public static JsonObject? Find(ICalendar calendar, string subject, DateTime start, DateTime end)
+    {
+        var zone = calendar.Zone();
+        return calendar.Between(PyTime.At(zone, start), PyTime.At(zone, end)).FirstOrDefault(e =>
+            e.Truthy("isOrganizer") && !e.Truthy("isCancelled") && e.StrOr("subject").Trim() == subject && InviteTriage.Times(e) == (start, end));
+    }
 }
