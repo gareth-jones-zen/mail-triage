@@ -448,7 +448,8 @@ public static class SendInvites
         {
             log($"invite failed, may have gone: {subject} {PyTime.Strftime(start, "%d/%m %H:%M")}: {error.GetType().Name}: {error.Message}");
             Triage.RecordCalendarWrite(settings, "Invites sent", subject, start, owner ?? "",
-                $"MAY HAVE GONE {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}: the answer was lost; not resent");
+                $"MAY HAVE GONE {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}: the answer was lost; not resent",
+                "send-invite", unconfirmed: true);
             Err("The invitation may or may not have gone (the call failed after it was sent). Check Outlook (your calendar and Sent "
                 + "Items) before doing anything else. It's recorded as possibly sent, so it's never sent again from here; if it didn't "
                 + "go, send it from Outlook." + (hold is null ? "" : " The hold wasn't deleted."));
@@ -470,7 +471,7 @@ public static class SendInvites
             Out($"Sent: {Summary(draft)} (Microsoft returned no id: check your calendar)."
                 + (hold is null ? "" : " The hold wasn't deleted, as the invitation couldn't be confirmed: delete it in Outlook once you've checked."));
             Triage.RecordCalendarWrite(settings, "Invites sent", subject, start, owner ?? "",
-                $"sent {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")} to {people.Count}; no id returned");
+                $"sent {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")} to {people.Count}; no id returned", "send-invite");
             log($"invite sent  {subject}: no id returned");
             return 0;
         }
@@ -544,7 +545,7 @@ public static class SendInvites
                   + $"{(people.Count == 1 ? "person" : "people")}" + (optional.Count > 0 ? $" ({optional.Count} optional)" : "")
                   + (room is null ? "" : $"; room {room.Name} ({answer ?? "no answer yet"})") + $"; Teams: {(draft.Online ? "yes" : "no")}"
                   + (replaced ? $"; replaced hold \"{hold!.StrOr("subject")}\"" : "") + $" ({id})";
-        Triage.RecordCalendarWrite(settings, "Invites sent", subject, start, owner ?? "", did);
+        Triage.RecordCalendarWrite(settings, "Invites sent", subject, start, owner ?? "", did, "send-invite", id, $"mail-triage cancel {id}");
         log($"invite sent  {subject}: {did}");
         return 0;
     }

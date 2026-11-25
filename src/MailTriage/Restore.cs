@@ -272,6 +272,7 @@ public static class Restores
         }
 
         var deleted = e.StrOr("when").Replace('T', ' ');
+        JsonObject? moved = null;
         output(yes ? "Moving this email from Deleted Items back to the Inbox:" : "Would move this email from Deleted Items back to the Inbox:");
         output($"  From      {Triage.Sender(message)}");
         output($"  Subject   {message.StrOr("subject")}");
@@ -288,7 +289,7 @@ public static class Restores
 
         try
         {
-            door.Mail.Restore(message.Req("id"));
+            moved = door.Mail.Restore(message.Req("id"));
         }
         catch (GraphDeliveryUnknownException error)
         {
@@ -317,6 +318,10 @@ public static class Restores
         UnconfirmedWrites.Clear(settings, writeKey, "moved again with --again, and Microsoft confirmed it", log);
         Mark(messageKey, "restored");
         log($"restored to the Inbox by hand  {e.StrOr("from")}: {e.StrOr("subject")}");
+        Activity.Write(settings, log, "restore", ActivityJournal.By.Hand, e.Str("subject"), "by hand",
+            $"back to the Inbox from Deleted Items (deleted {(deleted.Length >= 16 ? deleted[..16] : deleted)}, "
+            + (e.Truthy("by_hand") ? "by hand" : $"rule \"{e.StrOr("rule")}\"") + ")",
+            messageKey, moved?.Str("id") is { Length: > 0 } movedId ? $"mail-triage delete {movedId}" : null);   // 1.33.0
 
         // Read back: Microsoft answered, so it went; this says where it is now.
         JsonObject? back = null;

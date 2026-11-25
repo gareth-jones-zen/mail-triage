@@ -137,6 +137,18 @@ public static class Triage
                 waiting.TryAdd(Py.Str(k), i);
         var resolved = new HashSet<string>(StringComparer.Ordinal);
         var notes = NoteTaker.For(settings, mailbox, raised, dryRun, log);   // 1.31.0: the notes in what's answered without asking
+        // 1.33.0: each thing the run did, recorded, is also a line in the shared activity journal; only when it really went
+        // (not a dry run, nor --writes journal or refuse).
+        var journalLive = !dryRun && mailbox.Writer is GraphWrites { Sends: true };
+        void Record(JsonObject entry, string? what = null, JsonObject? from = null)
+        {
+            var tag = Activity.Take(entry);
+            if (from is not null && from[Activity.Tag] is JsonObject carried)
+                tag = (JsonObject)carried.DeepClone();
+            items.Add((JsonNode)entry);
+            if (journalLive)
+                Activity.Recorded(settings, log, entry, tag, ActivityJournal.By.Auto, what);
+        }
 
         foreach (var folder in settings.Folders)
         {
@@ -154,12 +166,12 @@ public static class Triage
                         if (!dryRun)
                         {
                             mailbox.Delete(message.Req("id"));
-                            items.Add((JsonNode)new JsonObject
+                            Record(new JsonObject
                             {
                                 ["when"] = NowMicro(), ["folder"] = folder.Name, ["received"] = message.GetCopy("receivedDateTime"),
                                 ["from"] = Sender(message), ["subject"] = message.GetCopy("subject", ""), ["rule"] = passed.Rule.Name,
                                 ["check"] = passed.Why, ["key"] = key,
-                            });
+                            }, "delete");
                             resolved.Add(key);
                         }
                         log($"{(dryRun ? "would delete" : "deleted")}  {passLabel}");
@@ -228,11 +240,11 @@ public static class Triage
                             note = did;
                         if (action == "leave")
                         {
-                            items.Add((JsonNode)new JsonObject
+                            Record(new JsonObject
                             {
                                 ["when"] = NowMicro(), ["folder"] = folder.Name, ["received"] = message.GetCopy("receivedDateTime"),
                                 ["from"] = Sender(message), ["subject"] = message.GetCopy("subject", ""), ["rule"] = rule.Name, ["did"] = did + ", left in the folder",
-                            });
+                            }, "handle");
                             raised[key] = NowSeconds();
                             log($"{did}, left in the folder  {subjectLabel}");
                             continue;
@@ -252,7 +264,7 @@ public static class Triage
                     var why = Forwarding.Apply(settings, mailbox, key, message.Req("id"), rule!);
                     if (why is null)
                     {
-                        items.Add((JsonNode)Forwarding.Entry(folder.Name, message, rule!, NowMicro()));
+                        Record(Forwarding.Entry(folder.Name, message, rule!, NowMicro()), "forward");
                         log($"{Forwarding.Describe(rule!, done: true)}  {label}");
                         forwarded++;
                         continue;
@@ -283,7 +295,7 @@ public static class Triage
                         if (did is not null)
                             entry["did"] = did;
                         notes?.Annotate(entry, said);
-                        items.Add((JsonNode)entry);
+                        Record(entry, "delete");
                     }
                     log($"{(dryRun ? "would delete" : "deleted")}  {label}");
                     deleted++;
@@ -301,7 +313,7 @@ public static class Triage
                         };
                         if (did is not null)
                             entry["did"] = did;
-                        items.Add((JsonNode)entry);
+                        Record(entry, "file");
                     }
                     log($"{(dryRun ? "would file" : "filed")} to {to}  {label}");
                     filed++;
@@ -336,21 +348,21 @@ public static class Triage
             if (!dryRun)
                 StateFiles.Save(settings.AcceptedFile, accepted);
             foreach (var a in acted)
-                items.Add((JsonNode)new JsonObject
+                Record(new JsonObject
                 {
                     ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
                     ["subject"] = a.GetCopy("subject"), ["rule"] = a.Str("rule") ?? "Accepted: already accepted, only shortened",
                     [a.Has("rule") ? "did" : "accepted"] = a.GetCopy("why"),
-                });
+                }, from: a);
             if (invites.DeclineDaysOff)
             {
                 var done = StateFiles.LoadObject(settings.DaysOffFile, () => []);
                 foreach (var a in InviteTriage.DeclineDaysOff(settings, cal, calendarEvents, done, log, Clock.Now, dryRun))
-                    items.Add((JsonNode)new JsonObject
+                    Record(new JsonObject
                     {
                         ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
                         ["subject"] = a.GetCopy("subject"), ["rule"] = a.GetCopy("rule"), ["did"] = a.GetCopy("why"),
-                    });
+                    }, from: a);
                 if (!dryRun)
                     StateFiles.Save(settings.DaysOffFile, done);
             }
@@ -362,11 +374,11 @@ public static class Triage
                 added.AddRange(oItems);
                 seen.UnionWith(oSeen);
                 foreach (var a in oActed)
-                    items.Add((JsonNode)new JsonObject
+                    Record(new JsonObject
                     {
                         ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
                         ["subject"] = a.GetCopy("subject"), ["rule"] = a.GetCopy("rule"), ["did"] = a.GetCopy("why"),
-                    });
+                    }, from: a);
                 if (!dryRun)
                     StateFiles.Save(settings.DaysOffFile, done);
             }
@@ -378,11 +390,11 @@ public static class Triage
                 added.AddRange(dItems);
                 seen.UnionWith(dSeen);
                 foreach (var a in dActed)
-                    items.Add((JsonNode)new JsonObject
+                    Record(new JsonObject
                     {
                         ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
                         ["subject"] = a.GetCopy("subject"), ["rule"] = a.GetCopy("rule"), ["did"] = a.GetCopy("why"),
-                    });
+                    }, from: a);
                 if (!dryRun && settings.DoubleBookings is not null)
                     StateFiles.Save(settings.DoubleBookingsFile, done);
             }
@@ -392,12 +404,12 @@ public static class Triage
                 added.AddRange(pItems);
                 seen.UnionWith(pSeen);
                 foreach (var a in pActed)
-                    items.Add((JsonNode)WithNote(new JsonObject
+                    Record(WithNote(new JsonObject
                     {
                         ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
                         ["subject"] = a.GetCopy("subject"), ["rule"] = a.Str("rule") ?? "Accepted: new time proposed, and free",
                         [a.Has("rule") ? "did" : "accepted"] = a.GetCopy("why"),
-                    }, a));
+                    }, a), from: a);
             }
             seen.UnionWith(pendingKeys);   // an invite answered elsewhere (in Outlook) drops off the queue
             added.AddRange(inviteItems);
@@ -414,11 +426,11 @@ public static class Triage
                 added.AddRange(oItems);
                 seen.UnionWith(oSeen);
                 foreach (var a in oActed)
-                    items.Add((JsonNode)new JsonObject
+                    Record(new JsonObject
                     {
                         ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
                         ["subject"] = a.GetCopy("subject"), ["rule"] = a.GetCopy("rule"), ["did"] = a.GetCopy("why"),
-                    });
+                    }, from: a);
             }
             foreach (var name in invites.RequestsFolders)
             {
@@ -445,7 +457,7 @@ public static class Triage
                         if (m.Has("remove"))
                             entry["did"] = "removed from the calendar";
                         notes?.Annotate(entry, said);
-                        items.Add((JsonNode)entry);
+                        Record(entry, "delete");
                     }
                     log($"{(dryRun ? "would delete" : "deleted")}  [{(cancellation ? "cancellation" : "answered invitation")}: "
                         + $"{Py.Str(m.Get("answer"))}] {Py.Str(m.Get("subject"))}");
@@ -578,12 +590,14 @@ public static class Triage
                 log($"deleted by hand  {(item is not null ? item.Fmt("from") + ": " + item.Fmt("subject") : PyStr.Head(id, 24) + "…")}");
                 if (!live || (item is null && message is null))
                     continue;
-                recorded.Add((JsonNode)new JsonObject
+                var entry = new JsonObject
                 {
                     ["when"] = NowMicro(), ["folder"] = item?.Str("folder") ?? "", ["received"] = item is not null ? item.GetCopy("received") : message!.GetCopy("receivedDateTime"),
                     ["from"] = item is not null ? item.GetCopy("from") : Sender(message!), ["subject"] = (item ?? message)!.GetCopy("subject", ""),
                     ["rule"] = Restores.ByHandRule, ["by_hand"] = true, ["key"] = item is not null ? item.GetCopy("key") : Key(message!),
-                });
+                };
+                recorded.Add((JsonNode)entry);
+                Activity.Recorded(settings, log, entry, null, ActivityJournal.By.Hand, "delete");   // 1.33.0
             }
         }
         finally
@@ -671,6 +685,9 @@ public static class Triage
             ? queue.Select(i => { if (i.Str("id") == id) i["check"] = did; return i; }).ToList()
             : queue.Where(i => i.Str("id") != id).ToList());
         log($"{did}, then {handler.Then}  {label}");
+        Activity.Write(settings, log, handler.Then switch { "delete" => "delete", "file" => "file", _ => "handle" }, ActivityJournal.By.Hand,
+            message.Str("subject"), rule?.Name ?? handler.Name, did + (handler.Then == "file" ? $", filed to {handler.To}" : handler.Then == "leave" ? ", left in the folder" : ""),
+            Key(message), handler.Then == "delete" ? $"mail-triage restore {Restores.Id(entry)}" : null);   // 1.33.0
         return 0;
     }
 
@@ -684,10 +701,14 @@ public static class Triage
             throw new LookupException("A note's email is already in Deleted Items: `mail-triage keep <n>` takes the note off the queue.");
         var box = mailbox ?? throw new InvalidOperationException("No mailbox.");
         var folderId = box.FolderPath(to);
+        var live = box.Writer is GraphWrites { Sends: true };
         foreach (var item in chosen)
         {
             box.File(item.Req("id"), folderId);
             log($"filed to {to} by hand  {item.Fmt("from")}: {item.Fmt("subject")}");
+            if (live)   // 1.33.0
+                Activity.Write(settings, log, "file", ActivityJournal.By.Hand, item.Str("subject"), "by hand", $"filed to {to}, left unread",
+                    item.Str("key") ?? item.Req("id"), null);
         }
         var gone = chosen.Select(i => i.Req("id")).ToHashSet(StringComparer.Ordinal);
         SaveQueue(settings, Queue(settings).Where(i => !gone.Contains(i.Req("id"))).ToList());
@@ -717,7 +738,10 @@ public static class Triage
                     log($"not forwarded ({why})  {label}");
                     continue;
                 }
-                items.Add((JsonNode)Forwarding.Entry(item.Str("folder") ?? "", message, rule, NowMicro()));
+                var entry = Forwarding.Entry(item.Str("folder") ?? "", message, rule, NowMicro());
+                items.Add((JsonNode)entry);
+                if (mailbox.Writer is GraphWrites { Sends: true })
+                    Activity.Recorded(settings, log, entry, null, ActivityJournal.By.Hand, "forward");   // 1.33.0
                 if (!raised.ContainsKey(Key(message)))
                     raised[Key(message)] = NowSeconds();
                 gone.Add(item.Req("id"));
@@ -804,7 +828,8 @@ public static class Triage
     /// reads the lost one's event again (cleared if the change is there; skipped, with the rest, if not, unless again),
     /// then carries on. Returns how many invites were answered, and how many weren't finished (`say` says why).</para></summary>
     public static (int Answered, int NotDone) Answer(Settings settings, ICalendar calendar, IReadOnlyList<string> refs, string action, string note = "",
-        bool send = true, Action<string>? log = null, bool series = false, bool move = false, bool again = false, Action<string>? say = null)
+        bool send = true, Action<string>? log = null, bool series = false, bool move = false, bool again = false, Action<string>? say = null,
+        bool journal = false)
     {
         log ??= _ => { };
         say ??= _ => { };
@@ -873,6 +898,11 @@ public static class Triage
                 var did = action switch { "accept" => "accepted", "tentative" => "accepted tentatively", "decline" => "declined", _ => throw new KeyNotFoundException(action) };
                 log($"invite {did} ({p.What}){(p.Respond ? "" : " (no response sent)")}  "
                     + $"{item.Fmt("from")}: {item.Fmt("subject")}" + (p.Text.Length > 0 && p.Respond ? $" | note: {p.Text}" : ""));
+                if (journal)   // 1.33.0: only when it really went (--writes live)
+                    Activity.Write(settings, log, action, ActivityJournal.By.Hand, item.Str("subject"), "by hand",
+                        $"{did} {p.What}" + (p.Respond ? (p.Text.Length > 0 ? $", with the note \"{p.Text}\"" : "") : ", no response sent")
+                        + (p.Moves.Count > 0 ? $"; {p.Moves.Count} of yours moved" : ""),
+                        item.Str("id"), Activity.Answer(item.Str("occurrence"), action, series: p.What == "the whole series" || p.Targets.Count > 1));
                 if (p.Keep)
                 {
                     keep.Add(item.Req("id"));
@@ -1087,12 +1117,18 @@ public static class Triage
             calendar.Respond(target, "decline", note, respond);
     }
 
-    /// <summary>Take emails off the queue and leave them in their folder. They won't be raised again.</summary>
+    /// <summary>Take emails off the queue and leave them in their folder. They won't be raised again. 1.33.0: each is
+    /// recorded as it was (kept_file), so `requeue` can put it back.</summary>
     public static int Keep(Settings settings, IReadOnlyList<string> refs, Action<string> log)
     {
-        var gone = Pick(settings, refs).Select(i => i.Req("id")).ToHashSet(StringComparer.Ordinal);
+        var chosen = Pick(settings, refs).GroupBy(i => i.Req("id")).Select(g => g.First()).ToList();
+        var gone = chosen.Select(i => i.Req("id")).ToHashSet(StringComparer.Ordinal);
+        Kept.Add(settings, chosen);
         SaveQueue(settings, Queue(settings).Where(i => !gone.Contains(i.Req("id"))).ToList());
         log($"kept {gone.Count}: off the queue, left in the folder");
+        foreach (var item in chosen)
+            Activity.Write(settings, log, "keep", ActivityJournal.By.Hand, item.Str("subject"), "by hand", "off the queue, left where it is",
+                item.Str("key") ?? item.Req("id"), $"mail-triage requeue {item.Req("id")}");
         return gone.Count;
     }
 
@@ -1112,11 +1148,15 @@ public static class Triage
                       + (eventId is null ? "" : $" ({eventId})"),
         });
         StateFiles.Save(settings.DeletedFile, record);
+        Activity.Write(settings, null, "hold", ActivityJournal.By.Hand, subject, "by hand",
+            $"held {PyTime.Strftime(start, "%a %d/%m %H:%M")}-{PyTime.Strftime(end, "%H:%M")}" + (room is null ? ", no attendees" : $", room {room} ({roomAnswer ?? "no answer yet"})"),
+            eventId, eventId is null ? null : $"mail-triage cancel {eventId}");   // 1.33.0
     }
 
     /// <summary>Record a `respond` or `cancel` (1.22.0) in the deleted file, under its own heading ("Answered by hand",
     /// "Cancelled by hand", "Deleted by hand"), so the review sees every calendar write made from a session.</summary>
-    public static void RecordCalendarWrite(Settings settings, string heading, string subject, DateTime start, string from, string did)
+    public static void RecordCalendarWrite(Settings settings, string heading, string subject, DateTime start, string from, string did,
+        string? what = null, string? item = null, string? undo = null, bool unconfirmed = false)
     {
         var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
         var items = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
@@ -1126,6 +1166,8 @@ public static class Triage
             ["subject"] = subject, ["rule"] = heading, ["did"] = did,
         });
         StateFiles.Save(settings.DeletedFile, record);
+        if (what is not null)   // 1.33.0
+            Activity.Write(settings, null, what, ActivityJournal.By.Hand, subject, "by hand", did, item, undo, unconfirmed);
     }
 
     /// <summary>Empty the queue; what the rules deleted counts as seen too.</summary>
@@ -1137,6 +1179,8 @@ public static class Triage
         record["seen_until"] = NowMicro();
         StateFiles.Save(settings.DeletedFile, record);
         log($"queue cleared: {count}");
+        Activity.Write(settings, log, "clear", ActivityJournal.By.Hand, null, "by hand",
+            $"{count} item{(count == 1 ? "" : "s")} off the queue, each left where it is; what the rules deleted marked as seen", null, null);
         return count;
     }
 

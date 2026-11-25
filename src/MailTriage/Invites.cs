@@ -474,6 +474,8 @@ public static class InviteTriage
                     };
                     if (unknown is not null)
                         Unconfirmed.Mark(entry, unknown, "Accepted: already accepted, only shortened");
+                    Activity.Mark(entry, "accept", Lone(group) || !first.Truthy("seriesMasterId") ? first.Req("id") : Py.Str(first.Get("seriesMasterId")),
+                        Activity.Answer(first.Req("id"), "accept", series: !Lone(group)));
                     acted.Add(entry);
                 }
                 log(unknown is not null ? $"invite accept may have gone, not resent  [{why}] {Py.Str(first.Get("subject"))}: {unknown}"
@@ -520,6 +522,7 @@ public static class InviteTriage
                 };
                 if (unknown is not null)
                     Unconfirmed.Mark(answered, unknown, auto.Label);
+                Activity.Mark(answered, auto.Action, item.Str("id"), Activity.Answer(first.Req("id"), auto.Action, series: whole));
                 acted?.Add(answered);
                 log(unknown is not null ? $"invite answer may have gone, not resent  [{auto.Label}] {Py.Str(first.Get("subject"))} ({Day(start)}): {unknown}"
                     : $"{(dryRun ? "would answer" : "invite answered")}  [{auto.Label}] {Py.Str(first.Get("subject"))} ({Day(start)})");
@@ -627,6 +630,7 @@ public static class InviteTriage
             };
             if (unknown is not null)
                 Unconfirmed.Mark(entry, unknown, "Declined");
+            Activity.Mark(entry, "decline", m.Req("id"), Activity.Answer(m.Req("id"), "decline"));
             acted.Add(entry);
             log(unknown is not null ? $"decline may have gone, not resent  [days off: {note}] {m.StrOr("subject")} ({Day(start)}): {unknown}"
                 : $"{(dryRun ? "would decline" : "declined")}  [days off: {note}] {m.StrOr("subject")} ({Day(start)})");
@@ -719,6 +723,7 @@ public static class InviteTriage
             };
             if (unknown is not null)
                 Unconfirmed.Mark(entry, unknown, what);
+            Activity.Mark(entry, others.Count == 1 ? "cancel" : "remove", m.Req("id"));   // told the other person, or your own block: no undo
             acted.Add(entry);
             log(unknown is not null ? $"{what.ToLowerInvariant()} may have gone, not resent  [days off] {m.StrOr("subject")} ({Day(start)}): {unknown}"
                 : $"{(dryRun ? (others.Count == 1 ? "would cancel" : "would remove") : what.ToLowerInvariant())}  [days off] {m.StrOr("subject")} ({Day(start)})");

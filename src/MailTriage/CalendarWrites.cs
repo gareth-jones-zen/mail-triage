@@ -197,7 +197,8 @@ public static class CalendarWrites
         Out($"Answered: {Verb(action)}, \"{subject}\", {when} ({scope}); {organiser} gets your response."
             + (now is null ? "" : $" Your calendar now says: {Current(now)}."));
         var did = $"{Verb(action)} {PyTime.Strftime(start, "%a %d/%m %H:%M")} ({scope})" + (note.Length > 0 ? $": \"{note}\"" : "");
-        Triage.RecordCalendarWrite(settings, "Answered by hand", subject, start, organiserAddress, did);
+        Triage.RecordCalendarWrite(settings, "Answered by hand", subject, start, organiserAddress, did, action, target,
+            $"mail-triage respond {target} {(action == "decline" ? "accept" : "decline")}" + (scope == "the whole series" ? " --series" : ""));
         log($"answered  {subject}: {did}");
         return 0;
     }
@@ -255,7 +256,8 @@ public static class CalendarWrites
             : $"Deleted: \"{subject}\", {when} ({scope}); no one else was invited.");
         if (!gone)
             Out("  It still shows in your calendar for now: Outlook can take a moment to catch up.");
-        Triage.RecordCalendarWrite(settings, isMeeting ? "Cancelled by hand" : "Deleted by hand", subject, start, settings.Email ?? "", did);
+        Triage.RecordCalendarWrite(settings, isMeeting ? "Cancelled by hand" : "Deleted by hand", subject, start, settings.Email ?? "", did,
+            isMeeting ? "cancel" : "remove", target);
         log($"{(isMeeting ? "cancelled" : "deleted")}  {subject}: {did}");
         return 0;
     }

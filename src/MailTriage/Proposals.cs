@@ -143,6 +143,7 @@ public static class Proposals
                         Unconfirmed.Mark(entry, unknown, "Accepted: new time proposed, and free");
                     else if (!dryRun)
                         entry["key"] = k;   // 1.32.0: deleted, so `restore` can find it in Deleted Items
+                    Activity.Mark(entry, "move", plan!.Value.Id);   // your meeting, to the time proposed (attendees told)
                     if (notes is not null)
                     {
                         var proposer = m.Get("from").Get("emailAddress") is var who && who.StrOr("name") is { Length: > 0 } pn ? pn : who.StrOr("address");

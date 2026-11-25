@@ -285,7 +285,7 @@ public static class SentItems
     /// <summary>Do it: delete what's due, move rule forwards' copies, remember what waits, and record each in the deleted
     /// list. State is saved only when the writes really reach Graph (a journal or refused run changes nothing).</summary>
     public static (int Deleted, int Moved, int Waiting, int Skipped) Apply(Settings settings, Mailbox mailbox, JsonObject state,
-        List<SentFinding> findings, bool first, Action<string> log)
+        List<SentFinding> findings, bool first, Action<string> log, string by = ActivityJournal.By.Auto)
     {
         var live = mailbox.Writer is GraphWrites { Sends: true };
         var seen = state.Get("seen") as JsonObject ?? [];
@@ -316,6 +316,8 @@ public static class SentItems
                     deleted++;
                     waiting.Remove(f.Id);
                     items.Add((JsonNode)Entry(f, $"Sent Items: {f.Kind}", "deleted from Sent Items"));
+                    if (live)   // 1.33.0
+                        Activity.Write(settings, log, "delete", by, f.Subject, $"Sent Items: {f.Kind}", "deleted from Sent Items (restore it in Outlook)", f.Id, null);
                     log($"sent: deleted  [{f.Kind}] {f.Subject}");
                     break;
                 case "move":
@@ -324,6 +326,8 @@ public static class SentItems
                     mailbox.File(f.Id, folderId);
                     moved++;
                     items.Add((JsonNode)Entry(f, $"Sent Items: forwards", $"filed to {f.To} (the Sent Items copy)"));
+                    if (live)   // 1.33.0
+                        Activity.Write(settings, log, "file", by, f.Subject, "Sent Items: forwards", $"filed to {f.To} (the Sent Items copy)", f.Id, null);
                     log($"sent: filed  {f.Subject} -> {f.To}");
                     break;
                 case "wait":

@@ -15,6 +15,7 @@ mail-triage list
      [Power Automate failure digests] Weekly report (3 failures): 2 request(s) since its last success haven't been picked up
 mail-triage delete 1     # mark read, move to Deleted Items
 mail-triage keep 2       # off the queue, left in the folder
+mail-triage requeue 1    # undo a keep: back on the queue as it was (its number in `kept`; 1.33.0)
 mail-triage file 2 --to Inbox/Projects   # move it to a folder, left unread
 mail-triage forward 2    # what the forward rule it matches would do; --yes to forward, mark read, file (1.9.0)
 mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule, numbered
@@ -162,7 +163,7 @@ Write regular expressions in TOML's single-quoted literal strings, so backslashe
 are. `mail-triage which <sender> "<subject>"` says which rule an email would meet, which is the
 quickest way to check a new rule. Also: `msal_cache` (share another tool's sign-in), `tenant`,
 `queue_file`, `state_file`, `handled_file`, `forwarded_file`, `sent_invites_file`, `unconfirmed_file` (1.30.0),
-`log_file`.
+`kept_file` (1.33.0), `journal_file` (1.33.0, [below](#the-shared-activity-journal-1330)), `log_file`.
 
 **Keep each kind of table together**: all the `[[rule]]`s in one run, then the `[[handler]]`s, and so on. The TOML
 reader silently drops the tables before a break when one kind is split by another, so since 1.3.1 a file whose
@@ -213,7 +214,7 @@ background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync 
   - A dry run says what it would do ("would forward to … and file to …"); `--writes journal` records the forward and sends nothing, and doesn't count it as sent.
 - **Check** runs a test on the email and deletes it only if there's nothing to do; otherwise it's queued with what the test found.
   - **And again on every run while it waits (1.9.0).** A check can be asked too soon: a failed build checked while its fixing run was still going sat in the queue saying "still failing" for two days. So each run checks every queued email its `check` rule raised (once a run, by the rule's name). If it passes now, it's deleted and recorded just as a first-time pass would be ("it has passed since: …") and taken off the queue; if not, its reason is brought up to date. A check that errors leaves the email as it was: an error never removes anything.
-- **Each email is raised once.** Every email ever queued is recorded by its internet message ID (Graph's own id changes when an email moves), so one you've seen and kept in the folder doesn't come back. The first version re-queued everything still in the folders on every run, and the same six emails were put to their owner twice. **What's waiting stays in the queue until you `delete`, `keep` or `clear` it**, and an email deleted in Outlook drops out by itself.
+- **Each email is raised once.** Every email ever queued is recorded by its internet message ID (Graph's own id changes when an email moves), so one you've seen and kept in the folder doesn't come back. The first version re-queued everything still in the folders on every run, and the same six emails were put to their owner twice. **What's waiting stays in the queue until you `delete`, `keep` or `clear` it**, and an email deleted in Outlook drops out by itself. A `keep` can be undone with `requeue` (1.33.0, [below](#undoing-a-keep-kept-and-requeue-1330)).
 - **The test for a rule is "does this need me to do something?"** A notification that only says something happened should be a delete rule. Hence the flow-failures check: a failure digest only matters if the flow is still failing.
 - **flow-failures never guesses that a flow is fine.** Power Automate doesn't say whether a flow has worked since, so each flow needs a `[[flow_check]]` saying what a good run leaves behind. With `pending`, a flow has recovered if nothing pending is newer than its newest output. Without it, if its output is newer than the digest. A flow without a check is raised.
 - **github-runs asks GitHub whether the workflow has passed since.** It reads the repository, workflow and branch from a "[owner/repo] Run failed: build - main (abc1234)" email, and asks the GitHub CLI (`gh run list`, as you) for that branch's latest finished run of that workflow. A success since deletes the email; a failure, or anything it can't tell (no `gh`, not signed in, no finished run), is raised with what it found.
@@ -245,7 +246,7 @@ background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync 
   - **A handler only runs when the run may write**: never in a dry run, nor with `--writes journal` or `refuse`, because it writes outside mail-triage. `run --dry-run` and `which` say which handler would run.
   - **`mail-triage handle <n>`** hands one email over by hand: a queued one by number, or any email by Graph id (`--handler NAME` if no rule names one). For testing a handler, and for an email that was queued before its rule existed.
   - **Mail is from people you don't control.** A handler that gives it to an AI model should treat it as data, not instructions, and keep a person between the draft and anyone else.
-- **One run at a time**, so the watcher and a run started by hand can't both act on the same email. `clear` and `keep` take the same lock, so a run in progress can't write back a queue you've just cleared.
+- **One run at a time**, so the watcher and a run started by hand can't both act on the same email. `clear`, `keep` and `requeue` take the same lock, so a run in progress can't write back a queue you've just cleared.
 - **A write that may have reached Microsoft is never sent again.** Reads (and the one POST that only reads, getSchedule) and removing a meeting from your calendar (a DELETE: finding it already gone counts as done) are retried after a 5xx or a dropped connection. Every other write (answering, declining, moving or cancelling a meeting, a hold, an invitation, forwarding, moving or marking an email) is sent once: only a 429 (throttled, so not processed) or a request that never connected is tried again. A 5xx, a timeout or a connection dropped after sending means it may have gone:
   - **an automatic calendar change** (an invite answered by a rule, a decline on your days off, your own meeting cancelled on a day off, a double-booking rule, a 1:1 cancelled or moved for leave, a proposed new time accepted) **counts as done and is never made again**; it's listed in `deleted` under "Couldn't confirm: …" saying to check the calendar, and the watcher notifies ("N calendar changes may or may not have gone"). A proposal whose move may have gone is left in its folder.
   - **a change made by hand** (`move`, `leave --decline`, `invite`, `respond`, `cancel`, `hold`, and since 1.32.0 `restore`) says so, asks you to check Outlook, exits 1, and **is recorded, so a later command never sends it again by itself** (1.30.0; below). `send-invite` has its own record (below), as a forward does (above).
@@ -624,6 +625,80 @@ Restored to the Inbox (read). mail-triage leaves it alone from now on.
 - **Exit codes:** 0 for a preview, a restore, or nothing to do; 1 when the move's answer was lost, Microsoft refused
   it, or it was skipped for an earlier lost one; 2 when it was refused before anything was sent. A journal run
   (`--writes journal`) moves and records nothing.
+
+## Undoing a keep: `kept` and `requeue` (1.33.0)
+
+`keep` takes an item off the queue and leaves it where it is. Since 1.33.0 each item it takes off is recorded exactly as
+it was in the queue (every field: the recommendation, the clashes, the check), in **`kept_file`** (top level; default
+`%LOCALAPPDATA%\mail-triage\kept.json`; runtime state), so it can be put back:
+
+```
+mail-triage kept
+  1. 2026-11-23  someone@example.org
+     Quick question about the migration
+     [no rule matched] kept 2026-11-23 09:14:03
+`mail-triage requeue <n>` puts one back on the queue.
+mail-triage requeue 1
+```
+
+- **`requeue <n|id> ...`** puts each back on the queue **as it was, at the end**, so `list` shows it again with the next
+  number(s); it's taken off the kept record. It takes the number `kept` shows, or the item's id (the Graph id `list`
+  and `keep` use), or its internet message ID; the latest record if the same item was kept twice.
+- **Local only**: neither `keep` nor `requeue` reads or writes the mailbox. Like any queued email, one that has left its
+  folder since (moved or deleted in Outlook) drops off the queue at the next run, and an invite answered in Outlook
+  meanwhile drops off as any answered invite does.
+- **Refused, changing nothing**: a reference nothing kept matches (exit 1), or an item that's in the queue already
+  (raised again meanwhile), saying as which number.
+- **Numbers never change** while a record is kept, and aren't reused. A record goes when it's requeued, or after 60 days.
+  Items kept before 1.33.0 weren't recorded, so can't be requeued. `clear` isn't recorded either: it's "mark all seen".
+- `kept --json`: each record's `n`, `kept` (local time), `id`, `key`, `type`, `from`, `subject`, `received`, `rule` and
+  `recommendation`.
+- `requeue` takes the run lock, as `keep` and `clear` do, so a run in progress can't write back a queue it has changed.
+
+## The shared activity journal (1.33.0)
+
+With **`journal_file`** set (top level, or in the base file so every tool shares it: by convention
+`journal_file = "%EA_LOCAL%/journal.jsonl"`), each thing mail-triage does is also **one JSON line in a journal shared by
+the tools**, written through background-tools-lib's
+[ActivityJournal](https://github.com/gareth-jones-zen/background-tools-lib#activityjournal), for a "while you were
+away" view. Without it, nothing is written (the default). It isn't `--journal`, which is where `--writes journal`
+records the writes it didn't send.
+
+```json
+{"id":"3f9c0a1b2c4d","when":"2026-11-25T07:42:10.512+00:00","tool":"mail-triage","what":"delete","by":"auto","subject":"Your weekly digest","rule":"Vendor newsletters","why":"Read on the web if at all","item":"<abc123@news.example.com>","undo":"mail-triage restore 3f2a9c1b7d40","sensitivity":"private"}
+```
+
+- **Only what really happened**: never a dry run, a preview, or a write `--writes journal` or `refuse` didn't send. A
+  preview rule (`act = false`) writes no line. An automatic calendar change whose answer was lost has
+  `"outcome": "unconfirmed"`.
+- **Never a message body.** The subject, as `list` and `deleted` show it, with `"sensitivity": "private"` so a screen
+  shown to others can hide it; a line with no subject (`clear`) is `normal`.
+- **Writing it never fails or undoes the action**: a problem is logged (`journal: couldn't write to ...`) and the run
+  carries on.
+- `by` is `auto` for what a run (the watcher) did, `hand` for a command. `rule` is the rule's name, the heading for
+  what isn't a rule (`Answered invitations`, `Declined: on leave`...), or `by hand`. `why` is what the record says (a
+  check's result, what a handler did) and then the rule's own `why` from the settings. `item` is the email's internet
+  message ID, or the event's id for a calendar change.
+
+| `what` | When | `undo` |
+|---|---|---|
+| `delete` | a rule, a check that passed, a handler's `then`, the requests sweep, `delete` by hand; Sent Items' kinds | `mail-triage restore <id>` for an email in Deleted Items (the id `deleted --json` gives); none from Sent Items |
+| `file` | a rule, a handler's `then`, `file` by hand, Sent Items' forward copies | none (move it back in Outlook) |
+| `forward` | a forward rule, `forward --yes` | none: it's gone to someone |
+| `handle` | a handler that leaves the email in its folder | none |
+| `accept`, `tentative`, `decline` | answered without asking (no clash, already accepted and shortened, days off), `invite --yes`, `respond --yes`, `leave --decline --yes`; a double-booking rule's decline | `mail-triage respond <event> decline` (or `accept`) for one meeting or occurrence; none for a whole series answered without asking |
+| `move` | a double-booking rule, `[one_to_ones]`/`[catch_ups]`, a new time proposed and accepted, `move --yes` | `mail-triage move <event> <old start> <old end>`, where it's known and on one day |
+| `cancel` | your meeting on a day off, a 1:1 or catch-up cancelled, `cancel --yes` | none: attendees were told |
+| `remove` | your own block on a day off, `cancel --yes` of a block | none |
+| `hold`, `send-invite` | `hold --yes`, `send-invite --yes` | `mail-triage cancel <event>` |
+| `keep` | `keep` | `mail-triage requeue <id>` |
+| `requeue` | `requeue` | `mail-triage keep <id>` |
+| `restore` | `restore --yes` | `mail-triage delete <Graph id>` (the email in the Inbox) |
+| `clear` | `clear` | none |
+
+An `undo` is the command as you'd type it: those that write to Microsoft preview without `--yes`, as always, so a UI
+shows the preview first; `keep` and `requeue` are local and act at once. Reading the journal back (since a time, by
+tool) is the library's `Journal.Read`; the file's format is in its README.
 
 ## JSON for other programs: `list --json` and `deleted --json`
 

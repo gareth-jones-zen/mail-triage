@@ -51,6 +51,9 @@ public static class Cli
             mail-triage list                the queue, numbered (--json for the file as it is)
             mail-triage delete 2 5          delete queued emails, by number (or by Graph id)
             mail-triage keep 1 3            take them off the queue and leave them in the folder
+            mail-triage kept                what keep took off the queue (the last 60 days), numbered (--json for the UI)
+            mail-triage requeue 4           put a kept item back on the queue as it was (by its number in `kept`, or its id),
+                                            at the end; local only, nothing in the mailbox changes
             mail-triage clear               empty the queue (each email stays in its folder, never raised again)
             mail-triage deleted             what the rules deleted since the last clear, by rule (--all: the last 60 days),
                                             with the note in each meeting email answered without asking, numbered
@@ -126,7 +129,8 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
-         "move", "hold", "send-invite", "respond", "cancel", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward", "restore"];
+         "move", "hold", "send-invite", "respond", "cancel", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward", "restore",
+         "kept", "requeue"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -147,6 +151,7 @@ public static class Cli
     {
         ["run"] = (["--dry-run", "--scheduled"], []),
         ["list"] = (["--json"], []),
+        ["kept"] = (["--json"], []),
         ["deleted"] = (["--all", "--json"], []),
         ["restore"] = (["--yes", "--again"], []),
         ["summary"] = (["--json"], []),
@@ -234,7 +239,7 @@ public static class Cli
         }
         switch (a.Command)
         {
-            case "delete" or "resolve" or "keep":
+            case "delete" or "resolve" or "keep" or "requeue":
                 Count(1, int.MaxValue, "refs");
                 break;
             case "which":
@@ -366,7 +371,9 @@ public static class Cli
         }
         if (args.Command == "summary")
             return Summary(settings, args.Flag("--json"), host);
-        if (args.Command is "clear" or "raised" or "keep")
+        if (args.Command == "kept")
+            return KeptCommand(settings, args.Flag("--json"), host);
+        if (args.Command is "clear" or "raised" or "keep" or "requeue")
         {
             // Locked like a run, so a run in progress can't write back a queue that's just been cleared.
             try
@@ -375,6 +382,8 @@ public static class Cli
                 {
                     if (args.Command == "keep")
                         Triage.Keep(settings, args.Positional, log);
+                    else if (args.Command == "requeue")
+                        Kept.Requeue(settings, args.Positional, log);   // 1.33.0
                     else
                         Triage.Clear(settings, log);
                 }
@@ -520,6 +529,22 @@ public static class Cli
     private static RunReport RunOnce(Settings settings, IGraph graph, Args args, Action<string> log, bool dryRun) =>
         RunWith(settings, graph, Door(args, graph, args.Writes, settings), dryRun, log);
 
+    /// <summary>`kept` (1.33.0): what `keep` took off the queue, newest last, each with the number `requeue` takes.</summary>
+    private static int KeptCommand(Settings settings, bool json, CliHost host)
+    {
+        var all = Kept.All(settings);
+        if (json)
+        {
+            Print(host.Out, PyJson.Dump(new JsonArray(all.Select(r => (JsonNode)Kept.Json(r)).ToArray()), 2, false));
+            return 0;
+        }
+        foreach (var r in all)
+            Print(host.Out, $"{r.N,3}. {PyStr.Head(r.Item.Fmt("received", "None"), 10)}  {r.Item.Fmt("from", "None")}\n"
+                            + $"     {r.Item.Fmt("subject", "None")}\n     [{r.Item.Fmt("rule", "None")}] kept {r.Kept.Replace('T', ' ')}");
+        Print(host.Out, all.Count == 0 ? "Nothing kept in the last 60 days." : "`mail-triage requeue <n>` puts one back on the queue.");
+        return 0;
+    }
+
     private static int List(Settings settings, bool json, CliHost host)
     {
         var items = Triage.Queue(settings);
@@ -630,7 +655,8 @@ public static class Cli
             (int Answered, int NotDone) answered;
             using (Locks.Exclusive(Watcher.RunLock(settings), 600, "triage run"))
                 answered = Triage.Answer(settings, calendar, args.Positional[1..], args.Positional[0], args.Value("--note") ?? "", !args.Flag("--silent"), log,
-                    series: args.Flag("--series"), move: args.Flag("--move"), again: args.Flag("--again"), say: line => Print(host.Err, line));
+                    series: args.Flag("--series"), move: args.Flag("--move"), again: args.Flag("--again"), say: line => Print(host.Err, line),
+                    journal: door.Mode == WriteMode.Live);
             return answered.NotDone > 0 ? 1 : 0;   // 1.30.0: a lost answer, or one skipped for an earlier one, exits 1
         }
         if (args.Command == "move")
@@ -745,6 +771,9 @@ public static class Cli
                 UnconfirmedWrites.Clear(settings, moveKey, "sent again with --again, and confirmed", log);
             log($"moved  {Py.Str(e.Get("subject"))}: {InviteTriage.Day(oldStart)} -> {InviteTriage.Day(start)}–{InviteTriage.Hm(end)}"
                 + (InviteTriage.People(e).Count <= 1 ? "" : " (attendees get an update)"));
+            Activity.Write(settings, log, "move", ActivityJournal.By.Hand, e.Str("subject"), "by hand",
+                $"{InviteTriage.Day(oldStart)}–{InviteTriage.Hm(oldEnd)} -> {InviteTriage.Day(start)}–{InviteTriage.Hm(end)}"
+                + (others.Count > 0 ? $"; {others.Count} told" : "; no one else invited"), eventId, Activity.MoveBack(eventId, oldStart, oldEnd));   // 1.33.0
             return 0;
         }
         var days = long.Parse(args.Value("--days") ?? "60", System.Globalization.CultureInfo.InvariantCulture);
@@ -808,8 +837,14 @@ public static class Cli
                     "decline", $"{InviteTriage.Day(d.Start)}, {CalendarWrites.Scope(e)}", d.End), lost, log);
                 Print(host.Err, "    Microsoft didn't confirm this decline, so it may have gone: check Outlook before declining it again.");
             }
-            else if (pending is not null && door.Mode == WriteMode.Live)
-                UnconfirmedWrites.Clear(settings, UnconfirmedWrites.Key("respond", id), "sent again with --again, and confirmed", log);
+            else
+            {
+                if (pending is not null && door.Mode == WriteMode.Live)
+                    UnconfirmedWrites.Clear(settings, UnconfirmedWrites.Key("respond", id), "sent again with --again, and confirmed", log);
+                if (door.Mode == WriteMode.Live)   // 1.33.0
+                    Activity.Write(settings, log, "decline", ActivityJournal.By.Hand, $"{e.StrOr("subject")}: {InviteTriage.Day(d.Start)}–{InviteTriage.Hm(d.End)}",
+                        "leave --decline", d.Respond ? $"on leave; note: \"{d.Note}\"" : "on leave; no response requested", id, Activity.Answer(id, "decline"));
+            }
         }
         if (unconfirmed > 0)
             Print(host.Err, $"{unconfirmed} decline(s) may or may not have gone (above): never sent twice. Each is recorded, so the next "
@@ -1065,7 +1100,7 @@ public static class Cli
                 Print(host.Out, "Nothing changed. `mail-triage sent --yes` does it" + (first ? ", and from then on each run tidies what's new." : "."));
                 return 0;
             }
-            SentItems.Apply(settings, mailbox, state, findings, first, log);
+            SentItems.Apply(settings, mailbox, state, findings, first, log, ActivityJournal.By.Hand);
             foreach (var line in SentItems.Describe(findings, first, read, true, settings.Sent))
                 Print(host.Out, line);
             if (door.Mode != WriteMode.Live)

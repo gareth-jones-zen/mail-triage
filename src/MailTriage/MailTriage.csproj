@@ -5,6 +5,7 @@
     <ProjectReference Include="$(BackgroundToolsLib)src\ClaudeHeadless\ClaudeHeadless.csproj" />
     <ProjectReference Include="$(BackgroundToolsLib)src\PyCompat\PyCompat.csproj" />
     <ProjectReference Include="$(BackgroundToolsLib)src\CalendarDays\CalendarDays.csproj" />
+    <ProjectReference Include="$(BackgroundToolsLib)src\ActivityJournal\ActivityJournal.csproj" />
     <PackageReference Include="Tomlyn" Version="2.11.1" />
   </ItemGroup>
   <ItemGroup>

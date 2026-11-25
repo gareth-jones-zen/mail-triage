@@ -601,6 +601,9 @@ public static class OneToOnePlanner
             };
             if (unknown is not null)
                 Unconfirmed.Mark(entry, unknown, rule);
+            if (d.Act && !dryRun)   // a preview (act = false) did nothing, so it isn't journalled
+                Activity.Mark(entry, d.Action == "cancel" ? "cancel" : "move", meeting.Req("id"),
+                    d.Action == "cancel" ? null : Activity.MoveBack(meeting.Req("id"), d.Start, d.End));
             acted.Add(entry);
             log(unknown is not null ? $"{verb} may have gone, not resent  [{mode.Label} and {cause}] {Describe(d)}: {unknown}"
                 : $"{(dryRun || !d.Act ? "would be " + verb : verb)}  [{mode.Label} and {cause}] {Describe(d)}");

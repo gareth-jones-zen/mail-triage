@@ -324,6 +324,9 @@ public static class DoubleBookingPlanner
             };
             if (unknown is not null)
                 Unconfirmed.Mark(entry, unknown, label);
+            if (config.Act)   // a preview (act = false) did nothing, so it isn't journalled
+                Activity.Mark(entry, r.Action == "move" ? "move" : "decline", other.Id,
+                    r.Action == "move" ? Activity.MoveBack(other.Id, other.Start, other.End) : Activity.Answer(other.Id, "decline"));
             acted.Add(entry);
             log(unknown is not null ? $"double booking: {Did(r, true)} may have gone, not resent  [{r.Rule.Name}]: {unknown}"
                 : $"{(dryRun || !config.Act ? "double booking: " + Did(r, true) : "double booking: " + Did(r, false))}  [{r.Rule.Name}]");

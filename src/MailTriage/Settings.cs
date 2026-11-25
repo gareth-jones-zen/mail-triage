@@ -451,6 +451,15 @@ public sealed class Settings
     /// update's note can say what changed. Runtime state; an entry not seen for a year is forgotten.</summary>
     public string NotesFile { get; init; } = System.IO.Path.Combine(Local, "notes.json");
 
+    /// <summary>What `keep` took off the queue (1.33.0), each item as it was, so `requeue` can put it back. Kept for
+    /// KeepDays (60 days).</summary>
+    public string KeptFile { get; init; } = System.IO.Path.Combine(Local, "kept.json");
+
+    /// <summary>The shared activity journal (1.33.0, background-tools-lib's ActivityJournal): one JSON line for each thing
+    /// mail-triage did, for "while you were away". Null (the default, no journal_file) writes none. Not --journal, which
+    /// is where `--writes journal` records the writes it didn't send.</summary>
+    public string? JournalFile { get; init; }
+
     /// <summary>[notes] and [[note_rule]] (1.31.0): the note quoted in `deleted` for an email answered without asking, and
     /// the meetings whose notes are also raised in the queue. Never null: quoting is on unless switched off.</summary>
     public NotesSettings Notes { get; set; } = new();
@@ -536,7 +545,7 @@ public sealed class Settings
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule", "leave",
         "calendar_months_ahead", "sent", "sent_file", "hold", "sent_invites_file", "unconfirmed_file", "catch_ups", "catch_up_skip", "catch_up",
-        "notes", "note_rule", "notes_file",
+        "notes", "note_rule", "notes_file", "kept_file", "journal_file",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -723,6 +732,8 @@ public sealed class Settings
             SentInvitesFile = PathOr("sent_invites_file", System.IO.Path.Combine(Local, "sent-invites.json")),
             UnconfirmedFile = PathOr("unconfirmed_file", System.IO.Path.Combine(Local, "unconfirmed.json")),
             NotesFile = PathOr("notes_file", System.IO.Path.Combine(Local, "notes.json")),
+            KeptFile = PathOr("kept_file", System.IO.Path.Combine(Local, "kept.json")),
+            JournalFile = Toml.Truthy(raw.Get("journal_file")) ? ToPath(Toml.Str(raw.Get("journal_file")), baseDir, env) : null,
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
             Schedule = schedule,
