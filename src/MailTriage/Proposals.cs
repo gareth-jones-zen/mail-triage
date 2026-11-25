@@ -84,9 +84,11 @@ public static class Proposals
 
     /// <summary>Someone declined (or tentatively accepted) one of your meetings and proposed a new time. With
     /// accept_proposals, one you're free for is accepted: that occurrence moves and the proposal is deleted. The rest
-    /// are queued as emails, each once, saying why. (queue items, acted, keys seen).</summary>
+    /// are queued as emails, each once, saying why. (queue items, acted, keys seen).
+    /// <para>1.31.0: the proposer's note (the proposal's body, boilerplate gone) goes with each one accepted, for `deleted`
+    /// and any [[note_rule]] (notes).</para></summary>
     public static (List<JsonObject> Items, List<JsonObject> Acted, HashSet<string> Seen) Run(Settings settings, Mailbox mailbox, ICalendar calendar,
-        JsonObject raised, Action<string> log, bool dryRun = false, DateTime? now = null)
+        JsonObject raised, Action<string> log, bool dryRun = false, DateTime? now = null, NoteTaker? notes = null)
     {
         var at = now ?? Clock.Now;
         var items = new List<JsonObject>();
@@ -108,10 +110,11 @@ public static class Proposals
                 // No $select: Graph reads it against the base message type and refuses proposedNewTime with a
                 // 400 (13 Nov 2026, which failed every run for an hour). The whole message carries it.
                 (bool Ok, string Why, (string Id, DateTime Start, DateTime End)? Plan) judged;
+                JsonObject? full = null;
                 try
                 {
-                    var full = mailbox.Graph.Request($"/me/messages/{m.Req("id")}"
-                                                     + "?$expand=microsoft.graph.eventMessage/event($select=id,isOrganizer,isCancelled)", scopes: MailAndCalendar);
+                    full = mailbox.Graph.Request($"/me/messages/{m.Req("id")}"
+                                                 + "?$expand=microsoft.graph.eventMessage/event($select=id,isOrganizer,isCancelled,subject)", scopes: MailAndCalendar);
                     if (!full.Truthy("proposedNewTime"))
                         continue;   // an ordinary reply: nothing to decide
                     judged = Judge(settings, calendar, m, full, at);
@@ -138,6 +141,16 @@ public static class Proposals
                     };
                     if (unknown is not null)
                         Unconfirmed.Mark(entry, unknown, "Accepted: new time proposed, and free");
+                    if (notes is not null)
+                    {
+                        var proposer = m.Get("from").Get("emailAddress") is var who && who.StrOr("name") is { Length: > 0 } pn ? pn : who.StrOr("address");
+                        var meeting = full.Get("event").StrOr("subject") is { Length: > 0 } es ? es : Notes.MeetingSubject(m.StrOr("subject"));
+                        var did = $"Accepted {proposer}'s new time for '{meeting}', {InviteTriage.Day(plan!.Value.Start)}–{InviteTriage.Hm(plan.Value.End)}"
+                                  + (unknown is not null ? " (Microsoft didn't confirm the move: check the calendar)." : ".");
+                        // The proposal's body is the proposer's comment, read already: no second read.
+                        notes.Annotate(entry, notes.Take(new NoteTaker.Email(m, name, NoteTaker.Kind.Reply, did, meeting, ("", settings.Email ?? ""),
+                            Body: full.Get("body") ?? new JsonObject())));
+                    }
                     acted.Add(entry);
                     log(unknown is not null ? $"new time may have gone, not resent; the proposal is left in its folder  [{why}] {Py.Str(m.Get("subject"))}: {unknown}"
                         : $"{(dryRun ? "would accept" : "new time accepted")}  [{why}] {Py.Str(m.Get("subject"))}");
@@ -160,6 +173,9 @@ public static class Proposals
         return (items, acted, seen);
     }
 
+    /// <summary>What's read of a meeting for the note in its email (1.31.0): its subject, organiser and series.</summary>
+    private const string NoteFields = "subject,organizer,seriesMasterId";
+
     /// <summary>Invitation emails in a folder whose meeting is answered, cancelled or gone (a decline removes it).
     /// Outlook deletes the invitation when you respond there; a response through Graph leaves it behind.
     ///
@@ -181,7 +197,7 @@ public static class Proposals
             }
             if (m.Str("@odata.type") != "#microsoft.graph.eventMessageRequest")
                 continue;
-            var full = WithEvent(graph, m.Req("id"), "?$select=id&$expand=microsoft.graph.eventMessage/event($select=id,responseStatus,isCancelled)");
+            var full = WithEvent(graph, m.Req("id"), "?$select=id&$expand=microsoft.graph.eventMessage/event($select=id,responseStatus,isCancelled," + NoteFields + ")");
             if (full is null)
                 continue;   // the email itself has gone (answered or deleted in Outlook since it was listed)
             var e = full.Get("event") as JsonObject ?? [];
@@ -189,6 +205,7 @@ public static class Proposals
             if (!e.Truthy("id") || e.Truthy("isCancelled") || (response is not null && Answered.Contains(response)))
             {
                 m["answer"] = !e.Truthy("id") ? "gone" : e.Truthy("isCancelled") ? "cancelled" : response;
+                m["event"] = e.DeepClone();   // for its note (1.31.0)
                 output.Add(m);
             }
         }
@@ -200,7 +217,7 @@ public static class Proposals
     /// you organise. The message is read whole: meetingMessageType can't be $select-ed on the messages collection.</summary>
     private static JsonObject? Cancellation(IGraph graph, JsonObject m)
     {
-        var full = WithEvent(graph, m.Req("id"), "?$expand=microsoft.graph.eventMessage/event($select=id,isCancelled,isOrganizer)");
+        var full = WithEvent(graph, m.Req("id"), "?$expand=microsoft.graph.eventMessage/event($select=id,isCancelled,isOrganizer," + NoteFields + ")");
         if (full is null || full.Str("meetingMessageType") != "meetingCancelled")
             return null;
         var e = full.Get("event") as JsonObject ?? [];
@@ -213,6 +230,9 @@ public static class Proposals
         }
         else
             return null;
+        m["event"] = e.DeepClone();   // for its note (1.31.0): the meeting, and the body already read whole
+        if (full.Get("body") is { } body)
+            m["body"] = body.DeepClone();
         return m;
     }
 

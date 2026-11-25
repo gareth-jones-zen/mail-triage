@@ -52,7 +52,8 @@ public static class Cli
             mail-triage delete 2 5          delete queued emails, by number (or by Graph id)
             mail-triage keep 1 3            take them off the queue and leave them in the folder
             mail-triage clear               empty the queue (each email stays in its folder, never raised again)
-            mail-triage deleted             what the rules deleted since the last clear, by rule (--all: the last 60 days)
+            mail-triage deleted             what the rules deleted since the last clear, by rule (--all: the last 60 days),
+                                            with the note in each meeting email answered without asking
             mail-triage summary             one line for a session briefing: what's queued and what the rules deleted
                                             since the last clear, by rule (--json for the counts)
             mail-triage which <sender> [subject]   which rule an email would meet
@@ -585,7 +586,9 @@ public static class Cli
                 Print(host.Out, $"    {PyStr.Head(item.Fmt("received", "None"), 10)}  {item.Fmt("from", "None")}: {PyStr.Head(item.Fmt("subject", "None"), 90)}"
                                 + (item.Truthy("to") ? $"  -> filed to {Py.Str(item.Get("to"))}" : "")
                                 + (item.Truthy("accepted") ? $"  -> accepted ({Py.Str(item.Get("accepted"))})" : "")
-                                + (item.Truthy("did") ? $"  -> {Py.Str(item.Get("did"))}" : ""));
+                                + (item.Truthy("did") ? $"  -> {Py.Str(item.Get("did"))}" : "")
+                                // 1.31.0: what its sender wrote, or what changed in the meeting's description
+                                + (item.Str("note") is { Length: > 0 } note ? $"\n      {item.Str("note_by") ?? "note"}: \"{note}\"" : ""));
         }
         return 0;
     }

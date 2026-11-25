@@ -31,6 +31,43 @@ public static class Triage
 
     public static string Key(JsonObject message) => message.Str("internetMessageId") is { Length: > 0 } k ? k : message.Req("id");
 
+    /// <summary>The sender's name, or their address.</summary>
+    private static string SenderName(JsonObject message) =>
+        message.Get("from").Get("emailAddress") is var who && who.StrOr("name") is { Length: > 0 } name ? name : who.StrOr("address");
+
+    /// <summary>A `deleted` record with the note an acted entry carried (1.31.0).</summary>
+    private static JsonObject WithNote(JsonObject entry, JsonObject acted)
+    {
+        foreach (var key in new[] { "note", "note_by" })
+            if (acted.Str(key) is { } value)
+                entry[key] = value;
+        return entry;
+    }
+
+    /// <summary>An invitation or cancellation email the requests sweep deletes, for its note (1.31.0): the organiser's
+    /// message carries the whole meeting body, so the note is what changed in it.</summary>
+    private static NoteTaker.Email RequestNote(JsonObject m, string folder, bool cancellation)
+    {
+        var e = m.Get("event");
+        var meeting = e.StrOr("subject") is { Length: > 0 } es ? es : Notes.MeetingSubject(m.StrOr("subject"));
+        var organiser = e.Get("organizer").Get("emailAddress") is JsonObject o
+            ? (o.StrOr("name"), o.StrOr("address").ToLowerInvariant())
+            : (m.Get("from").Get("emailAddress").StrOr("name"), m.Get("from").Get("emailAddress").StrOr("address").ToLowerInvariant());
+        var who = SenderName(m);
+        var did = cancellation
+            ? $"{who} cancelled '{meeting}'" + (m.Has("remove") ? ": it's been removed from your calendar." : ", and it was already off your calendar.")
+            : $"Deleted {who}'s invitation to '{meeting}', as " + Py.Str(m.Get("answer")) switch
+            {
+                "accepted" => "you've accepted it.",
+                "tentativelyAccepted" => "you've accepted it tentatively.",
+                "declined" => "you've declined it.",
+                "cancelled" => "the meeting is cancelled.",
+                _ => "the meeting has gone from your calendar.",
+            };
+        return new NoteTaker.Email(m, folder, NoteTaker.Kind.Organiser, did, meeting, organiser, Body: m.Get("body"),
+            EventId: e.Str("id"), SeriesId: e.Str("seriesMasterId"));
+    }
+
     /// <summary>message.get("from", {}).get("emailAddress", {}).get("address", ""), failing where Python would.</summary>
     public static string Sender(JsonObject message)
     {
@@ -98,6 +135,7 @@ public static class Triage
             if (i.Get("key") is { } k)
                 waiting.TryAdd(Py.Str(k), i);
         var resolved = new HashSet<string>(StringComparer.Ordinal);
+        var notes = NoteTaker.For(settings, mailbox, raised, dryRun, log);   // 1.31.0: the notes in what's answered without asking
 
         foreach (var folder in settings.Folders)
         {
@@ -224,6 +262,12 @@ public static class Triage
                 }
                 if (action == "delete")
                 {
+                    // 1.31.0: a meeting reply a rule deletes (an acceptance) keeps its sender's note, read before it moves.
+                    var said = notes is not null && rule is not null && message.Str("@odata.type") == "#microsoft.graph.eventMessageResponse"
+                        ? notes.Take(new NoteTaker.Email(message, folder.Name, NoteTaker.Kind.Reply,
+                            $"Deleted {SenderName(message)}'s reply '{message.Fmt("subject")}' (rule '{rule.Name}').", Notes.MeetingSubject(message.Fmt("subject")),
+                            ("", settings.Email ?? "")))
+                        : null;
                     if (!dryRun)
                     {
                         mailbox.Delete(message.Req("id"));
@@ -236,6 +280,7 @@ public static class Triage
                             entry["check"] = note;
                         if (did is not null)
                             entry["did"] = did;
+                        notes?.Annotate(entry, said);
                         items.Add((JsonNode)entry);
                     }
                     log($"{(dryRun ? "would delete" : "deleted")}  {label}");
@@ -341,16 +386,16 @@ public static class Triage
             }
             if (invites.ProposalsFolders.Count > 0)
             {
-                var (pItems, pActed, pSeen) = Proposals.Run(settings, mailbox, cal, raised, log, dryRun);
+                var (pItems, pActed, pSeen) = Proposals.Run(settings, mailbox, cal, raised, log, dryRun, notes: notes);
                 added.AddRange(pItems);
                 seen.UnionWith(pSeen);
                 foreach (var a in pActed)
-                    items.Add((JsonNode)new JsonObject
+                    items.Add((JsonNode)WithNote(new JsonObject
                     {
                         ["when"] = NowMicro(), ["folder"] = "Calendar", ["received"] = a.GetCopy("received"), ["from"] = a.GetCopy("from"),
                         ["subject"] = a.GetCopy("subject"), ["rule"] = a.Str("rule") ?? "Accepted: new time proposed, and free",
                         [a.Has("rule") ? "did" : "accepted"] = a.GetCopy("why"),
-                    });
+                    }, a));
             }
             seen.UnionWith(pendingKeys);   // an invite answered elsewhere (in Outlook) drops off the queue
             added.AddRange(inviteItems);
@@ -375,9 +420,12 @@ public static class Triage
             }
             foreach (var name in invites.RequestsFolders)
             {
-                foreach (var m in Proposals.AnsweredRequests(mailbox.Graph, mailbox.FolderId(name)))
+                // Oldest first (1.31.0), so each meeting's description is compared with the version before it.
+                foreach (var m in Proposals.AnsweredRequests(mailbox.Graph, mailbox.FolderId(name))
+                             .OrderBy(m => m.Str("receivedDateTime") ?? "", StringComparer.Ordinal))
                 {
                     var cancellation = m.Has("remove") || Py.Str(m.Get("answer")).StartsWith("cancelled,", StringComparison.Ordinal);
+                    var said = notes?.Take(RequestNote(m, name, cancellation));   // before the email moves (a moved email has a new id)
                     if (!dryRun)
                     {
                         // The meeting comes off the calendar first, so a failure leaves the email to try again next run.
@@ -391,6 +439,7 @@ public static class Triage
                         };
                         if (m.Has("remove"))
                             entry["did"] = "removed from the calendar";
+                        notes?.Annotate(entry, said);
                         items.Add((JsonNode)entry);
                     }
                     log($"{(dryRun ? "would delete" : "deleted")}  [{(cancellation ? "cancellation" : "answered invitation")}: "
@@ -399,10 +448,16 @@ public static class Triage
                 }
             }
         }
-        // Still waiting from earlier runs, and still in the folder (one deleted by hand in Outlook drops out).
+        if (notes is not null)
+        {
+            added.AddRange(notes.Items);   // raised once each; the email itself has gone to Deleted Items
+            notes.Save();
+        }
+        // Still waiting from earlier runs, and still in the folder (one deleted by hand in Outlook drops out). A note
+        // (1.31.0) has no email left in a folder to see: it waits until it's kept or cleared.
         var newKeys = added.Select(i => Py.Str(i.Get("key"))).ToHashSet(StringComparer.Ordinal);
-        var carried = previous.Where(i => i.Get("key") is { } k && seen.Contains(Py.Str(k)) && !newKeys.Contains(Py.Str(k))
-                                          && !resolved.Contains(Py.Str(k))).ToList();
+        var carried = previous.Where(i => i.Get("key") is { } k && (seen.Contains(Py.Str(k)) || i.Str("type") == Notes.Type)
+                                          && !newKeys.Contains(Py.Str(k)) && !resolved.Contains(Py.Str(k))).ToList();
         if (!dryRun)
         {
             StateFiles.Save(settings.StateFile, raised);
@@ -493,6 +548,9 @@ public static class Triage
         var invites = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) == "invite").Select(i => items[i].Fmt("subject")).ToList();
         if (invites.Count > 0)
             throw new LookupException($"{invites[0]} is an invite, not an email: answer it with `mail-triage invite decline <n>`.");
+        var noted = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) == Notes.Type).Select(i => items[i].Fmt("subject")).ToList();
+        if (noted.Count > 0)
+            throw new LookupException($"{noted[0]} is a note on an email already deleted: `mail-triage keep <n>` takes it off the queue.");
         var meetings = ids.Where(i => TypeOf(items.GetValueOrDefault(i)) is "one-to-one" or "double-booking" or "own-meeting").Select(i => items[i].Fmt("subject")).ToList();
         if (meetings.Count > 0)
             throw new LookupException($"{meetings[0]} is your own meeting, not an email: change it in Outlook (or `mail-triage move`), "
@@ -517,6 +575,8 @@ public static class Triage
             : Queue(settings).FirstOrDefault(i => i.Str("id") == reference);
         if (TypeOf(item) is "invite" or "one-to-one" or "double-booking" or "own-meeting")
             throw new LookupException($"{item!.Fmt("subject")} is a meeting, not an email.");
+        if (TypeOf(item) == Notes.Type)
+            throw new LookupException($"{item!.Fmt("subject")} is a note on an email already deleted: `mail-triage keep <n>` takes it off the queue.");
         var id = item?.Req("id") ?? reference;
         var message = mailbox.Graph.Request($"/me/messages/{id}?$select={Mailbox.Fields}", scopes: mailbox.ReadScopes);
         var rule = settings.RuleFor(Sender(message), $"{message.Fmt("subject")}\n{message.Fmt("bodyPreview")}");
@@ -575,6 +635,8 @@ public static class Triage
         var chosen = Pick(settings, refs);
         if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking" or "own-meeting"))
             throw new LookupException("A meeting can't be filed: answer an invite with `mail-triage invite`.");
+        if (chosen.Any(i => TypeOf(i) == Notes.Type))
+            throw new LookupException("A note's email is already in Deleted Items: `mail-triage keep <n>` takes the note off the queue.");
         var box = mailbox ?? throw new InvalidOperationException("No mailbox.");
         var folderId = box.FolderPath(to);
         foreach (var item in chosen)
@@ -669,6 +731,8 @@ public static class Triage
         var chosen = Pick(settings, refs);
         if (chosen.Any(i => TypeOf(i) is "invite" or "one-to-one" or "double-booking" or "own-meeting"))
             throw new LookupException("A meeting can't be forwarded.");
+        if (chosen.Any(i => TypeOf(i) == Notes.Type))
+            throw new LookupException("A note's email is already in Deleted Items: forward it from Outlook if it should go on.");
         Rule? named = null;
         if (ruleName is not null)
             named = settings.Rules.FirstOrDefault(r => r.Name == ruleName)

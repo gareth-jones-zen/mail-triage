@@ -342,6 +342,40 @@ public sealed class DoubleBookingRules
     public List<DoubleBookingRule> Rules { get; set; } = [];
 }
 
+/// <summary>[notes] (1.31.0): whether `deleted` quotes the note in an email answered without asking, and the
+/// [[note_rule]]s whose notes are raised in the queue too.</summary>
+public sealed class NotesSettings
+{
+    public static readonly string[] Keys = ["quote_in_deleted"];
+
+    /// <summary>On unless switched off: each email answered without asking keeps its sender's note in `deleted`.</summary>
+    public bool QuoteInDeleted { get; set; } = true;
+    public List<NoteRule> Rules { get; } = [];
+
+    /// <summary>Whether a run needs to read notes at all: quoting is on, or a rule may raise one.</summary>
+    public bool Wanted => QuoteInDeleted || Rules.Count > 0;
+}
+
+/// <summary>A meeting whose notes are raised in the queue as well as quoted in `deleted` (1.31.0): every condition given
+/// must hold. subject matches the meeting's subject or the email's; organiser and sender match "name address", as
+/// [[invite_rule]]'s organiser does. Patterns ignore case.</summary>
+public sealed class NoteRule
+{
+    public static readonly string[] Conditions = ["subject", "organiser", "sender"];
+    public static readonly string[] Keys = ["name", .. Conditions, "why"];
+
+    public required string Name { get; init; }
+    public string? Subject { get; init; }
+    public string? Organiser { get; init; }
+    public string? Sender { get; init; }
+    public string Why { get; init; } = "";
+
+    public bool Matches(string meetingSubject, string emailSubject, (string Name, string Address) organiser, (string Name, string Address) sender) =>
+        (Subject is null || PyRegex.IsMatch(Subject, meetingSubject, true) || PyRegex.IsMatch(Subject, emailSubject, true))
+        && (Organiser is null || (organiser.Address.Length > 0 && PyRegex.IsMatch(Organiser, $"{organiser.Name} {organiser.Address}", true)))
+        && (Sender is null || PyRegex.IsMatch(Sender, $"{sender.Name} {sender.Address}", true));
+}
+
 /// <summary>The settings file: which folders to triage, and the rules (config.py). Regular expressions are Python's,
 /// and only the part of Python's dialect that .NET reads the same way is accepted (PyRegex).</summary>
 public sealed class Settings
@@ -412,6 +446,14 @@ public sealed class Settings
     /// again: a change that's visibly there clears the record; one that isn't is skipped (never resent) unless --again.
     /// Runtime state: kept until the meeting has ended.</summary>
     public string UnconfirmedFile { get; init; } = System.IO.Path.Combine(Local, "unconfirmed.json");
+
+    /// <summary>The meeting descriptions seen in the invitation emails mail-triage deleted (1.31.0), by meeting, so the next
+    /// update's note can say what changed. Runtime state; an entry not seen for a year is forgotten.</summary>
+    public string NotesFile { get; init; } = System.IO.Path.Combine(Local, "notes.json");
+
+    /// <summary>[notes] and [[note_rule]] (1.31.0): the note quoted in `deleted` for an email answered without asking, and
+    /// the meetings whose notes are also raised in the queue. Never null: quoting is on unless switched off.</summary>
+    public NotesSettings Notes { get; set; } = new();
 
     /// <summary>[sent] (1.19.0): what's tidied from Sent Items; null when there's no [sent], and nothing is touched there.</summary>
     public SentSettings? Sent { get; set; }
@@ -494,6 +536,7 @@ public sealed class Settings
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule", "leave",
         "calendar_months_ahead", "sent", "sent_file", "hold", "sent_invites_file", "unconfirmed_file", "catch_ups", "catch_up_skip", "catch_up",
+        "notes", "note_rule", "notes_file",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -679,6 +722,7 @@ public sealed class Settings
             SentFile = PathOr("sent_file", System.IO.Path.Combine(Local, "sent.json")),
             SentInvitesFile = PathOr("sent_invites_file", System.IO.Path.Combine(Local, "sent-invites.json")),
             UnconfirmedFile = PathOr("unconfirmed_file", System.IO.Path.Combine(Local, "unconfirmed.json")),
+            NotesFile = PathOr("notes_file", System.IO.Path.Combine(Local, "notes.json")),
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
             Schedule = schedule,
@@ -947,6 +991,7 @@ public sealed class Settings
         ReadLeave(raw, full, settings);
         ReadGroups(raw, full, settings);
         ReadDoubleBookings(raw, full, settings);
+        ReadNotes(raw, full, settings);
         if (settings.Folders.Count == 0 && settings.Invites is null)
             throw new SettingsException($"{full} names no [[folder]] to triage, and no [invites].");
         return settings;
@@ -1257,6 +1302,51 @@ public sealed class Settings
             });
         }
         settings.DoubleBookings = config;
+    }
+
+    /// <summary>[notes] and [[note_rule]] (1.31.0). Read strictly, unknown keys included, like the double-booking rules: a
+    /// misspelt condition would otherwise be dropped, and the rule would raise more than it says.</summary>
+    private static void ReadNotes(TomlTable raw, string full, Settings settings)
+    {
+        var config = new NotesSettings();
+        if (raw.Get("notes") is { } sectionValue)
+        {
+            var section = sectionValue as TomlTable ?? throw new SettingsException($"[notes] in {full} should be a table.");
+            foreach (var key in section.Keys)
+                if (!NotesSettings.Keys.Contains(key))
+                    throw new SettingsException($"[notes] in {full} has {Py.ReprString(key)}: it takes {string.Join(", ", NotesSettings.Keys)}.");
+            if (section.Get("quote_in_deleted") is { } quote)
+                config.QuoteInDeleted = quote as bool? ?? throw new SettingsException($"quote_in_deleted in [notes] in {full} should be true or false.");
+        }
+        var i = 0;
+        foreach (var item in Toml.Tables(raw.Get("note_rule")))
+        {
+            i++;
+            var name = item.Get("name") is { } n ? Toml.Str(n) : $"note rule {i}";
+            string Problem(string what) => $"Note rule {Py.ReprString(name)} in {full}: {what}";
+            foreach (var key in item.Keys)
+                if (!NoteRule.Keys.Contains(key))
+                    throw new SettingsException(Problem($"{Py.ReprString(key)} isn't a setting (it takes {string.Join(", ", NoteRule.Keys)})."));
+            foreach (var key in NoteRule.Conditions)
+            {
+                if (item.Get(key) is not { } pattern)
+                    continue;
+                if (pattern is not string text || text.Length == 0)
+                    throw new SettingsException(Problem($"{key} should be a regular expression."));
+                if (PyRegex.Problem(text) is { } why)
+                    throw new SettingsException(Problem($"{key} isn't a valid regular expression ({why})."));
+            }
+            if (!NoteRule.Conditions.Any(item.ContainsKey))
+                throw new SettingsException(Problem($"it needs at least one of {string.Join(", ", NoteRule.Conditions)}, or it would raise every note."));
+            if (config.Rules.Any(r => r.Name == name))
+                throw new SettingsException($"Two note rules in {full} are called {Py.ReprString(name)}.");
+            config.Rules.Add(new NoteRule
+            {
+                Name = name, Subject = item.Get("subject") as string, Organiser = item.Get("organiser") as string, Sender = item.Get("sender") as string,
+                Why = item.Get("why") is { } w ? Toml.Str(w) : "",
+            });
+        }
+        settings.Notes = config;
     }
 
     /// <summary>config.create_default.</summary>

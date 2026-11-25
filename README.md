@@ -256,7 +256,7 @@ background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync 
   - **`leave --decline`** checks its own earlier declines on every listing, preview and `--yes`: one still in your leave undeclined is skipped (unless `--again`); one that has dropped out (declined, or gone) is read again and cleared.
   - A record is kept until the meeting has ended (one whose end isn't known, an answer to a series, for 60 days). A journal run (`--writes journal`) records nothing. **Runs (the watcher) neither read nor write `unconfirmed_file`**: their own lost answers count as done, as above.
   - **Exit codes:** 1 when a write's answer was lost: `move`, `leave --decline --yes` (it was 0 until 1.30.0), `invite --yes` (a lost answer used to stop it with a bare failure), `respond`, `cancel`, `hold`, `send-invite` and `forward`. 1 too when a write was skipped for an earlier lost one (`move`, `leave`, `invite`, `respond`, `cancel`, `hold`; `forward` leaves it queued, also 1; `send-invite` refuses it with 2, as before). 0 when everything went or there was nothing to do, and for any preview; 2 for a refusal before anything was sent (a usage error, an unknown event, someone else's meeting).
-- **Unattended deletes stay visible.** Everything the rules delete is recorded, and `mail-triage deleted` lists what went since you last cleared the queue, grouped by rule (`--all` for the last 60 days). `list` says how many. A rule that starts catching the wrong mail shows up there, and the email is still in Deleted Items.
+- **Unattended deletes stay visible.** Everything the rules delete is recorded, and `mail-triage deleted` lists what went since you last cleared the queue, grouped by rule (`--all` for the last 60 days). `list` says how many. A rule that starts catching the wrong mail shows up there, and the email is still in Deleted Items. A meeting email answered without asking shows its sender's note there too (1.31.0, below).
 - **The watcher runs once at start, then every `every_minutes` within `hours`**, so logging on in the evening still clears the day's mail, and checking Outlook in the afternoon finds the folders already tidy. One watcher per settings file; it logs `alive` hourly and notifies a failure once, until a run succeeds.
 - **The watcher never opens a browser.** A lapsed sign-in is notified, and `mail-triage sign-in` at a console fixes it.
 
@@ -492,6 +492,69 @@ mail-triage double-bookings      # each upcoming double booking, and what the ru
 - **Keep all the `[[double_booking_rule]]` tables together** (as for every kind of `[[...]]` table): one split by
   another table is refused, rather than silently losing the rules before the break. Settings are checked strictly: an
   unknown key, an unknown group, an `action` other than move or decline, or a `note` on a move is an error.
+
+### The note in what's answered without asking (1.31.0)
+
+Whoever writes to you about a meeting often says something worth reading: why they proposed a new time, what they've
+added to the agenda. When mail-triage answers or deletes their email without asking, that note went to Deleted Items
+unseen. A new time proposed for a 1:1 was accepted, rightly, but the line explaining it had to be found in Deleted
+Items. Now **`mail-triage deleted` shows the note under each such email**:
+
+```
+  Accepted: new time proposed, and free (1)
+    2026-11-12  pat@example.com: New Time Proposed: Weekly 1-2-1 - Alex  -> accepted (Pat Lee proposes Fri 13 Nov 12:00–12:30 instead of Thu 12 Nov 12:00, and you're free)
+      Pat Lee wrote: "Running late from another meeting - can we start at 12?"
+
+  Answered invitations (1)
+    2026-11-11  sam@example.com: Updated: Planning
+      description changed: "Please read the plan first."
+```
+
+- **Which emails:** every meeting email deleted without asking: a new time proposed and accepted, invitation emails
+  tidied once their meeting is answered (by `auto_accept`, `accept_shortened`, a days-off decline, or by you),
+  cancellation notices (and the cancelled meeting removed), and meeting replies a `[[rule]]` deletes (such as "Accepted:
+  ..." with a comment). Older records have no note.
+- **What counts as the note:** for a reply (a new time proposed, an acceptance or decline with a comment), what its
+  sender wrote, with the boilerplate taken out: Teams (and Zoom) join blocks and everything after them, "Caution:
+  external" and "You don't often get email from" banners, quoted history ("-----Original Appointment-----", a
+  From:/Sent: header, "On ... wrote:"), and link addresses. For an organiser's invitation, update or cancellation, which
+  carries the whole meeting body, **what changed in the description since the last version mail-triage saw of that
+  meeting**, labelled "description changed" (or "removed: ..." when lines were only taken out). With no earlier
+  version (the first invitation, or an update to a meeting whose earlier emails went before 1.31.0), nothing is shown,
+  never the whole body. Empty, or nothing but boilerplate: no note.
+- **One line**, whitespace collapsed, cut at about 300 characters.
+- The descriptions are kept in **`notes_file`** (top level; default `%LOCALAPPDATA%\mail-triage\notes.json`; runtime
+  state), by meeting, up to 4,000 characters each; one not seen for a year is forgotten.
+- A note that can't be read is logged and left out: it never stops a run, or the action.
+
+```toml
+[notes]
+quote_in_deleted = true          # the default: false leaves notes out of `deleted` (and reads none, without note rules)
+
+[[note_rule]]                    # these notes are raised in the queue too
+name = "Notes on my 1:1"
+subject = '^Weekly 1-2-1 - Alex$'   # the meeting's subject, or the email's (optional)
+sender = 'pat@example\.com'         # who wrote it: "name address" (optional)
+# organiser = '...'                 # the meeting's organiser: "name address" (optional)
+why = "Pat's notes on changes to our 1:1 are worth reading"
+```
+
+- **`[[note_rule]]`: a note on a named meeting is raised in the queue as well**, once per email, as an item to read
+  (`"type": "note"`), while the action still happens as before and the email still goes to Deleted Items:
+
+  ```
+    3. 2026-11-12  pat@example.com
+       New Time Proposed: Weekly 1-2-1 - Alex
+       [Notes on my 1:1] WORTH A LOOK: Accepted Pat Lee's new time for 'Weekly 1-2-1 - Alex', Fri 13 Nov 12:00–12:30. Pat Lee wrote: "Running late from another meeting - can we start at 12?"
+  ```
+
+  Every condition given must hold, and at least one is needed. Patterns ignore case; `sender` and `organiser` match
+  the person's name and address together, as `[[invite_rule]]`'s `organiser` does. Only an email with a note is
+  raised. It stays queued until you `keep <n>` or `clear` it; `delete`, `file`, `forward` and `handle` refuse it, as
+  its email has already gone. It works with `quote_in_deleted = false` too.
+- **Settings are checked strictly:** an unknown key in `[notes]` or a `[[note_rule]]`, a rule with no condition, or a
+  pattern that isn't a valid regular expression is an error. **Keep the `[[note_rule]]` tables together.** Versions
+  before 1.31.0 refuse `[notes]`, `[[note_rule]]` and `notes_file`, so add them only after upgrading.
 
 ## Sent Items: tidied by kind, never real mail
 
@@ -849,7 +912,9 @@ JSON, so another program (an assistant, a script) can work from it. An invite's 
 `"type": "invite"`, `"recommendation"`, `"series"`, `"occurrence"`, `"occurrences"`, `"decline"` (the occurrences to
 decline), `"note"`, `"responseRequested"` and `"clashes"` (each with `"to"` and `"to_end"` if it can move), and its
 `folder` is `"Calendar"`. A 1:1 that `[one_to_ones]` couldn't settle has `"type": "one-to-one"`, the occurrence's id,
-the report's name in `"from"`, and the reason and suggestion in `"check"`:
+the report's name in `"from"`, and the reason and suggestion in `"check"`. A note a `[[note_rule]]` raised (1.31.0) has
+`"type": "note"`, the note in `"preview"`, the rule's name in `"rule"`, what was done and the note in `"check"`, and
+`"key"` starting `note:`:
 
 ```json
 {"checked": "2026-11-10T09:00:00", "review": [{"n": 1, "folder": "Newsletters", "id": "<Graph id>",
