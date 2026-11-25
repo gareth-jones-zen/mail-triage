@@ -133,7 +133,15 @@ public static class Restores
     {
         if (e.Str("key") is { Length: > 0 } key)
             return FindIn(mailbox, "deleteditems", key);
-        var query = new List<(string, string)> { ("$filter", $"receivedDateTime eq {e.Req("received")}"), ("$select", Fields) };
+        // Within the second Graph gives: Exchange keeps finer times, so "eq" a time Graph printed in seconds finds nothing.
+        if (!DateTimeOffset.TryParse(e.Req("received"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var at))
+            return [];
+        var received = at.ToUniversalTime();
+        static string Utc(DateTimeOffset t) => t.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+        var query = new List<(string, string)>
+        {
+            ("$filter", $"receivedDateTime ge {Utc(received)} and receivedDateTime lt {Utc(received.AddSeconds(1))}"), ("$select", Fields),
+        };
         return mailbox.Graph.Pages($"/me/mailFolders/deleteditems/messages?{Url.Encode(query)}", mailbox.ReadScopes)
             .Where(m => string.Equals(Triage.Sender(m), e.Str("from"), StringComparison.OrdinalIgnoreCase) && m.StrOr("subject") == e.StrOr("subject"))
             .ToList();

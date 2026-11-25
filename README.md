@@ -600,7 +600,8 @@ Restored to the Inbox (read). mail-triage leaves it alone from now on.
   --all` agree. Each record also has an id (12 hex characters, from what it records, so it never changes), which
   `deleted --json` gives; `restore` takes either, or the email's internet message ID. A program should use the id.
 - **Finding it.** Since 1.32.0 each record keeps the email's internet message ID, which Graph keeps when an email
-  moves; `restore` looks for it in Deleted Items by that. An older record is matched by its received time, sender and
+  moves; `restore` looks for it in Deleted Items by that. An older record is matched by its received time (within the
+  second Graph gives: Exchange keeps finer times, so an exact match finds nothing; fixed in 1.32.1), sender and
   subject; if more than one email in Deleted Items matches, it's refused (restore it in Outlook). An email no longer in
   Deleted Items (emptied, or moved in Outlook) is refused; one already back in the Inbox is said to be, and `--yes`
   then only records it as restored.

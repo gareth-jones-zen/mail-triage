@@ -70,7 +70,10 @@ public sealed partial class RestoreTests : IDisposable
                 if (ById().Match(filter) is { Success: true } byKey)
                     found = found.Where(m => m.Str("internetMessageId") == byKey.Groups[1].Value.Replace("''", "'"));
                 else if (ByTime().Match(filter) is { Success: true } byTime)
-                    found = found.Where(m => m.Str("receivedDateTime") == byTime.Groups[1].Value);
+                    found = found.Where(m => string.CompareOrdinal(m.Str("receivedDateTime"), byTime.Groups[1].Value) >= 0
+                                             && string.CompareOrdinal(m.Str("receivedDateTime"), byTime.Groups[2].Value) < 0);
+                else
+                    throw new InvalidOperationException($"unexpected filter {filter}");
             }
             return found.Select(m => (JsonObject)m.DeepClone()).ToList();
         }
@@ -80,7 +83,7 @@ public sealed partial class RestoreTests : IDisposable
         [GeneratedRegex("^internetMessageId eq '(.*)'$")]
         private static partial Regex ById();
 
-        [GeneratedRegex(@"^receivedDateTime eq (\S+)$")]
+        [GeneratedRegex(@"^receivedDateTime ge (\S+) and receivedDateTime lt (\S+)$")]
         private static partial Regex ByTime();
 
         private (List<JsonObject> Folder, JsonObject Message)? Locate(string id) =>
