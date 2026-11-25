@@ -17,7 +17,8 @@ mail-triage delete 1     # mark read, move to Deleted Items
 mail-triage keep 2       # off the queue, left in the folder
 mail-triage file 2 --to Inbox/Projects   # move it to a folder, left unread
 mail-triage forward 2    # what the forward rule it matches would do; --yes to forward, mark read, file (1.9.0)
-mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule
+mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule, numbered
+mail-triage restore 7    # one of those back to the Inbox: a preview; --yes to move it (1.32.0)
 mail-triage summary      # one line for a session briefing: what's queued and deleted (--json: the counts)
 ```
 
@@ -247,7 +248,7 @@ background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync 
 - **One run at a time**, so the watcher and a run started by hand can't both act on the same email. `clear` and `keep` take the same lock, so a run in progress can't write back a queue you've just cleared.
 - **A write that may have reached Microsoft is never sent again.** Reads (and the one POST that only reads, getSchedule) and removing a meeting from your calendar (a DELETE: finding it already gone counts as done) are retried after a 5xx or a dropped connection. Every other write (answering, declining, moving or cancelling a meeting, a hold, an invitation, forwarding, moving or marking an email) is sent once: only a 429 (throttled, so not processed) or a request that never connected is tried again. A 5xx, a timeout or a connection dropped after sending means it may have gone:
   - **an automatic calendar change** (an invite answered by a rule, a decline on your days off, your own meeting cancelled on a day off, a double-booking rule, a 1:1 cancelled or moved for leave, a proposed new time accepted) **counts as done and is never made again**; it's listed in `deleted` under "Couldn't confirm: …" saying to check the calendar, and the watcher notifies ("N calendar changes may or may not have gone"). A proposal whose move may have gone is left in its folder.
-  - **a change made by hand** (`move`, `leave --decline`, `invite`, `respond`, `cancel`, `hold`) says so, asks you to check Outlook, exits 1, and **is recorded, so a later command never sends it again by itself** (1.30.0; below). `send-invite` has its own record (below), as a forward does (above).
+  - **a change made by hand** (`move`, `leave --decline`, `invite`, `respond`, `cancel`, `hold`, and since 1.32.0 `restore`) says so, asks you to check Outlook, exits 1, and **is recorded, so a later command never sends it again by itself** (1.30.0; below). `send-invite` has its own record (below), as a forward does (above).
   - **moving, deleting or marking an email** fails that run (logged); the next run reads the folder again, and an email that has already moved isn't there to move twice. That's also why `delete`, `file`, `sent --yes` and the `then` of `handle` need no record: a move that went leaves nothing to move again (Graph answers 404), and it tells no one. A handler itself is never run twice for one email (`handled_file`).
 - **A lost answer by hand is recorded and checked (1.30.0).** Until 1.29.0 a command typed by hand only avoided resending within the same command: nothing was kept, so the next `move --yes` or `leave --decline --yes` offered the same write again, with only a printed warning in the way. Now each write by hand whose answer is lost is written to **`unconfirmed_file`** (top level; default `%LOCALAPPDATA%\mail-triage\unconfirmed.json`; runtime state, beside the others): what it was (a move, an answer, a cancel or delete, a hold), which event (for a hold, its time and subject), the intended change, when, and the error. Each record and each clear is logged (`unconfirmed: recorded …`, `unconfirmed: cleared …: it went`), as is each skip and resend.
   - **The next preview or `--yes` for the same event reads it again.** If the change is visibly there (moved to that time, the answer sent, declined or gone from the calendar, cancelled or deleted, the hold in your calendar), the record is cleared and it says so: *An earlier move of "…" (to Thu 26 Nov 10:00–10:30) on Mon 23 Nov 09:00 went: it's there now, so it isn't sent again.* If the same change was asked for again, there's nothing to do (exit 0); a different one (another time, another answer) goes ahead as a new write.
@@ -255,8 +256,8 @@ background-tools-lib's `ReportLeaveTitles`, the titles calendar-team-leave-sync 
   - **`invite` stops at a lost answer**: nothing after it in that invite is sent (the rest of the occurrences, any `--move`), the invite stays queued saying so, and the record keeps what of it had already gone, so the next `invite` of it never sends those again: it checks the lost one, then carries on.
   - **`leave --decline`** checks its own earlier declines on every listing, preview and `--yes`: one still in your leave undeclined is skipped (unless `--again`); one that has dropped out (declined, or gone) is read again and cleared.
   - A record is kept until the meeting has ended (one whose end isn't known, an answer to a series, for 60 days). A journal run (`--writes journal`) records nothing. **Runs (the watcher) neither read nor write `unconfirmed_file`**: their own lost answers count as done, as above.
-  - **Exit codes:** 1 when a write's answer was lost: `move`, `leave --decline --yes` (it was 0 until 1.30.0), `invite --yes` (a lost answer used to stop it with a bare failure), `respond`, `cancel`, `hold`, `send-invite` and `forward`. 1 too when a write was skipped for an earlier lost one (`move`, `leave`, `invite`, `respond`, `cancel`, `hold`; `forward` leaves it queued, also 1; `send-invite` refuses it with 2, as before). 0 when everything went or there was nothing to do, and for any preview; 2 for a refusal before anything was sent (a usage error, an unknown event, someone else's meeting).
-- **Unattended deletes stay visible.** Everything the rules delete is recorded, and `mail-triage deleted` lists what went since you last cleared the queue, grouped by rule (`--all` for the last 60 days). `list` says how many. A rule that starts catching the wrong mail shows up there, and the email is still in Deleted Items. A meeting email answered without asking shows its sender's note there too (1.31.0, below).
+  - **Exit codes:** 1 when a write's answer was lost: `move`, `leave --decline --yes` (it was 0 until 1.30.0), `invite --yes` (a lost answer used to stop it with a bare failure), `respond`, `cancel`, `hold`, `send-invite`, `forward` and `restore`. 1 too when a write was skipped for an earlier lost one (`move`, `leave`, `invite`, `respond`, `cancel`, `hold`, `restore`; `forward` leaves it queued, also 1; `send-invite` refuses it with 2, as before). 0 when everything went or there was nothing to do, and for any preview; 2 for a refusal before anything was sent (a usage error, an unknown event, someone else's meeting).
+- **Unattended deletes stay visible.** Everything the rules delete is recorded, and `mail-triage deleted` lists what went since you last cleared the queue, grouped by rule (`--all` for the last 60 days). `list` says how many. A rule that starts catching the wrong mail shows up there, and the email is still in Deleted Items: **`mail-triage restore <n>` brings it back** (1.32.0, [below](#restoring-an-email-restore-1320)). A meeting email answered without asking shows its sender's note there too (1.31.0, below). Since 1.32.0 an email you `delete` by hand is recorded too, under "Emails deleted by hand".
 - **The watcher runs once at start, then every `every_minutes` within `hours`**, so logging on in the evening still clears the day's mail, and checking Outlook in the afternoon finds the folders already tidy. One watcher per settings file; it logs `alive` hourly and notifies a failure once, until a run succeeds.
 - **The watcher never opens a browser.** A lapsed sign-in is notified, and `mail-triage sign-in` at a console fixes it.
 
@@ -555,6 +556,117 @@ why = "Pat's notes on changes to our 1:1 are worth reading"
 - **Settings are checked strictly:** an unknown key in `[notes]` or a `[[note_rule]]`, a rule with no condition, or a
   pattern that isn't a valid regular expression is an error. **Keep the `[[note_rule]]` tables together.** Versions
   before 1.31.0 refuse `[notes]`, `[[note_rule]]` and `notes_file`, so add them only after upgrading.
+
+## Restoring an email: `restore` (1.32.0)
+
+An email mail-triage deleted is in Deleted Items, so a rule that caught the wrong one could always be undone in
+Outlook. `restore` does it from the command line (and from anything built on it): **it moves the email back to the
+Inbox, once you've seen what it will move.**
+
+```
+mail-triage deleted
+3 deleted, 2026-11-20 09:00 to 2026-11-23 09:00:
+
+  Vendor newsletters (2)
+    6. 2026-11-20  offers@news.example.com: Weekly offers
+    8. 2026-11-23  offers@news.example.com: Your invoice for November  [restored to the Inbox 2026-11-23 09:05]
+
+  Emails deleted by hand (1)
+    7. 2026-11-21  someone@elsewhere.example.org: A question
+
+Back to the Inbox: `mail-triage restore <n>` (a preview; --yes to move it).
+
+mail-triage restore 6
+Would move this email from Deleted Items back to the Inbox:
+  From      offers@news.example.com
+  Subject   Weekly offers
+  Received  2026-11-20 08:00:00 UTC
+  Deleted   2026-11-20 09:00, rule "Vendor newsletters"
+  Goes to   the Inbox, read as it is (its read state isn't changed)
+  Then      mail-triage leaves it alone: no rule deletes it again, and it isn't queued as new
+Nothing moved. Run again with --yes to restore it: `mail-triage restore 6 --yes`.
+
+mail-triage restore 6 --yes
+...
+Restored to the Inbox (read). mail-triage leaves it alone from now on.
+```
+
+- **Which emails:** any `deleted` record of an email that went to Deleted Items: a rule's delete, a check that passed,
+  a handler whose `then` is delete, the invitation and cancellation emails and accepted proposals the sweeps tidy, and
+  (since 1.32.0) `delete` by hand. Not a calendar change, an email filed or forwarded and left in its folder, or a Sent
+  Items message (restore that in Outlook): those are refused, saying why, with exit 2.
+- **Numbers and ids.** `deleted` numbers every record, and the number stays the record's own while it's kept (60
+  days): a new one takes the next number, and pruning old ones doesn't renumber the rest, so `deleted` and `deleted
+  --all` agree. Each record also has an id (12 hex characters, from what it records, so it never changes), which
+  `deleted --json` gives; `restore` takes either, or the email's internet message ID. A program should use the id.
+- **Finding it.** Since 1.32.0 each record keeps the email's internet message ID, which Graph keeps when an email
+  moves; `restore` looks for it in Deleted Items by that. An older record is matched by its received time, sender and
+  subject; if more than one email in Deleted Items matches, it's refused (restore it in Outlook). An email no longer in
+  Deleted Items (emptied, or moved in Outlook) is refused; one already back in the Inbox is said to be, and `--yes`
+  then only records it as restored.
+- **Without `--yes` it only shows what it would move**: sender, subject, when it was received, when and why it was
+  deleted (the rule, or by hand), and that it goes to the Inbox with its read state as it is. Nothing is moved and
+  nothing recorded.
+- **With `--yes` it moves it once** (under the run lock, so the watcher can't act on it meanwhile), reads it back in
+  the Inbox, logs it, and records it as restored: `deleted` shows `[restored to the Inbox <when>]`. Its read state is
+  left as it is (a rule's delete marked it read, so it comes back read). Restoring one already restored does nothing.
+- **It isn't deleted again, and it isn't raised as new.** Restoring counts as keeping it: the email is recorded as
+  raised (the state file), which every pass of a run skips, so the rule that deleted it leaves it alone, even when that
+  rule acts in the Inbox, and it isn't queued: you've just chosen it, and it's in your Inbox. It's also recorded as
+  `restored:<internet message ID>`, which the requests sweep skips, so a restored invitation email isn't tidied away
+  again either. Other emails the rule matches are deleted as before.
+- **A move whose answer is lost is never resent.** It's recorded in `unconfirmed_file` (as `restore:<id>`, with the
+  email's internet message ID), like every write by hand, kept from the rules meanwhile (in case it went), shown by
+  `deleted` as `[restore may have gone: check the Inbox]`, and exits 1. The next `restore` of it looks in the Inbox:
+  there, and the record is cleared and it's marked restored; not there, and it's skipped (exit 1) until you've checked
+  Outlook and run it with `--again --yes`, which moves it once more.
+- **Exit codes:** 0 for a preview, a restore, or nothing to do; 1 when the move's answer was lost, Microsoft refused
+  it, or it was skipped for an earlier lost one; 2 when it was refused before anything was sent. A journal run
+  (`--writes journal`) moves and records nothing.
+
+## JSON for other programs: `list --json` and `deleted --json`
+
+Both print UTF-8 JSON: an array, `[]` when there's nothing.
+
+**`list --json`** is the queue file's `review` list as it is (unchanged since it was added): each item's `n`, `id` (the
+Graph id, or the meeting's for a calendar item), `key`, `folder`, `received`, `from`, `subject`, `preview`, `rule`,
+`check` when there is one and `webLink`; a calendar item or a note also has `type` (`invite`, `one-to-one`,
+`double-booking`, `own-meeting`, `note`; an email has none) and an invite its `recommendation` and the rest described
+under [The queue file](#the-queue-file).
+
+**`deleted --json`** (1.32.0), with `--all` for everything kept: each record, oldest first:
+
+```json
+[
+  {
+    "n": 6,
+    "id": "3f2a9c1b7d40",
+    "message_id": "<abc123@news.example.com>",
+    "from": "offers@news.example.com",
+    "subject": "Weekly offers",
+    "received": "2026-11-20T08:00:00Z",
+    "deleted_at": "2026-11-20T09:00:01.123456",
+    "folder": "Newsletters",
+    "rule": "Vendor newsletters",
+    "did": null,
+    "note": null,
+    "restorable": true,
+    "why_not": null,
+    "restored": null,
+    "restored_at": null
+  }
+]
+```
+
+- `n` and `id` are what `restore` takes; `message_id` is the email's internet message ID (null for an older record or
+  a calendar change). `received` is Graph's (UTC); `deleted_at` is local time, as the record keeps it.
+- `rule` is the rule's name, the heading for what isn't a rule (`Answered invitations`, `Holds`...), or **`by hand`**
+  for an email you deleted with `delete`.
+- `restorable` is whether `restore` would try it: an email that went to Deleted Items and isn't restored. Otherwise
+  `why_not` says why (a calendar change, filed, already restored...). Whether it's still in Deleted Items is only known
+  when `restore` looks.
+- `restored` is null, `"restored"`, or `"unconfirmed"` (the move's answer was lost: `restore` of it again checks the
+  Inbox and settles it); `restored_at` is when.
 
 ## Sent Items: tidied by kind, never real mail
 

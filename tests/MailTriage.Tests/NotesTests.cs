@@ -435,4 +435,23 @@ public sealed class NoteRunTests : IDisposable
         Assert.Contains("already deleted", Assert.Throws<LookupException>(() => Triage.Delete(config, null, ["1"], Quiet)).Message);
         Assert.Contains("keep", Assert.Throws<LookupException>(() => Triage.File(config, null, ["1"], "Inbox/Somewhere", Quiet)).Message);
     }
+
+    /// <summary>1.32.0: the sweeps record each email they delete by its key, so `restore` can find it in Deleted Items, and
+    /// an invitation restored by hand isn't swept into Deleted Items again.</summary>
+    [Fact]
+    public void Sweeps_record_keys_for_restore_and_leave_a_restored_invitation_alone()
+    {
+        var config = Config();
+        var graph = new NotesGraph();
+        Proposal(graph, "Running late");
+        Invitation(graph, "i1", "2026-11-10T08:00:00Z", "Agenda");
+        Invitation(graph, "i2", "2026-11-11T08:00:00Z", "Agenda, again");
+        StateFiles.Save(config.StateFile, new JsonObject { [Restores.Marker + "i2"] = "2026-11-11T10:00:00" });
+        Run(config, graph);
+        Assert.Equal(["i1", "p1"], graph.Moved.Order(StringComparer.Ordinal));
+        Assert.Equal("i2", Assert.Single(graph.Folders["Invites"]).Str("id"));
+        var deleted = Deleted(config);
+        Assert.Equal("<p1@example.com>", Assert.Single(deleted, r => r.Str("rule") == "Accepted: new time proposed, and free").Str("key"));
+        Assert.Equal("i1", Assert.Single(deleted, r => r.Str("rule") == "Answered invitations").Str("key"));
+    }
 }

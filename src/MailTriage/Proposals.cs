@@ -141,6 +141,8 @@ public static class Proposals
                     };
                     if (unknown is not null)
                         Unconfirmed.Mark(entry, unknown, "Accepted: new time proposed, and free");
+                    else if (!dryRun)
+                        entry["key"] = k;   // 1.32.0: deleted, so `restore` can find it in Deleted Items
                     if (notes is not null)
                     {
                         var proposer = m.Get("from").Get("emailAddress") is var who && who.StrOr("name") is { Length: > 0 } pn ? pn : who.StrOr("address");
@@ -186,7 +188,7 @@ public static class Proposals
     public static List<JsonObject> AnsweredRequests(IGraph graph, string folderId)
     {
         var output = new List<JsonObject>();
-        const string query = "$top=50&$select=id,subject,from,receivedDateTime";
+        const string query = "$top=50&$select=id,internetMessageId,subject,from,receivedDateTime";   // the key: 1.32.0
         foreach (var m in graph.Pages($"/me/mailFolders/{folderId}/messages?{query}", Mailbox.Scopes))
         {
             if (m.Str("@odata.type") == "#microsoft.graph.eventMessage")

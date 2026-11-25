@@ -17,6 +17,10 @@ public interface IMailWriter
 
     /// <summary>Mark read, and nothing else.</summary>
     void MarkRead(string messageId);
+
+    /// <summary>Move an email back to the Inbox (1.32.0: `restore`), its read state left as it is. Sent once, never resent
+    /// (IGraph.RequestOnce). Returns the moved message (Live), or null when the write was only journalled.</summary>
+    JsonObject? Restore(string messageId);
 }
 
 /// <summary>Every change to the calendar goes through one of these. Each notifies other people.</summary>
@@ -160,6 +164,9 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
 
     public void MarkRead(string messageId) =>
         send(new WriteCall("PATCH", $"/me/messages/{messageId}", new JsonObject { ["isRead"] = true }), MailScopes);
+
+    public JsonObject? Restore(string messageId) =>
+        sendOnce(new WriteCall("POST", $"/me/messages/{messageId}/move", new JsonObject { ["destinationId"] = "inbox" }), MailScopes);
 
     public void Respond(string eventId, string action, string note, bool send)
     {

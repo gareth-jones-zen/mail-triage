@@ -53,8 +53,12 @@ public static class Cli
             mail-triage keep 1 3            take them off the queue and leave them in the folder
             mail-triage clear               empty the queue (each email stays in its folder, never raised again)
             mail-triage deleted             what the rules deleted since the last clear, by rule (--all: the last 60 days),
-                                            with the note in each meeting email answered without asking
-            mail-triage summary             one line for a session briefing: what's queued and what the rules deleted
+                                            with the note in each meeting email answered without asking, numbered
+                                            (--json: each record, with its id and whether it can be restored)
+            mail-triage restore 7 [--yes]   an email mail-triage deleted (by its number or id in `deleted`), from Deleted
+                                            Items back to the Inbox, read state as it is; without --yes, a preview;
+                                            no rule deletes it again, and it isn't queued as new
+            mail-triage summary           one line for a session briefing: what's queued and what the rules deleted
                                             since the last clear, by rule (--json for the counts)
             mail-triage which <sender> [subject]   which rule an email would meet
             mail-triage handle 3 [--handler NAME]  give a queued email (or any, by Graph id) to its rule's handler, then
@@ -109,7 +113,7 @@ public static class Cli
             mail-triage double-bookings     each upcoming double booking, and what the [[double_booking_rule]]s would do
                                             with it (changes nothing)
 
-            A calendar write by hand whose answer was lost (move, leave --decline, invite, respond, cancel, hold) is
+            A write by hand whose answer was lost (move, leave --decline, invite, respond, cancel, hold, restore) is
             recorded: the next preview or --yes for it reads the event again, says if it went, and otherwise skips it
             (exit 1); --again sends it, once you've checked Outlook.
 
@@ -122,7 +126,7 @@ public static class Cli
 
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
-         "move", "hold", "send-invite", "respond", "cancel", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward"];
+         "move", "hold", "send-invite", "respond", "cancel", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward", "restore"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -143,7 +147,8 @@ public static class Cli
     {
         ["run"] = (["--dry-run", "--scheduled"], []),
         ["list"] = (["--json"], []),
-        ["deleted"] = (["--all"], []),
+        ["deleted"] = (["--all", "--json"], []),
+        ["restore"] = (["--yes", "--again"], []),
         ["summary"] = (["--json"], []),
         ["invite"] = (["--silent", "--series", "--move", "--yes", "--again"], ["--note"]),
         ["move"] = (["--yes", "--again"], []),
@@ -235,7 +240,7 @@ public static class Cli
             case "which":
                 Count(1, 2, "sender");
                 break;
-            case "handle":
+            case "handle" or "restore":
                 Count(1, 1, "ref");
                 break;
             case "invite":
@@ -352,7 +357,13 @@ public static class Cli
         if (args.Command == "list")
             return List(settings, args.Flag("--json"), host);
         if (args.Command == "deleted")
-            return DeletedCommand(Triage.Deleted(settings, args.Flag("--all")), host);
+        {
+            var listed = Restores.Listed(settings, args.Flag("--all"));
+            if (!args.Flag("--json"))
+                return DeletedCommand(listed, host);
+            Print(host.Out, PyJson.Dump(new JsonArray(listed.Select(x => (JsonNode)Restores.Json(x)).ToArray()), 2, false));   // 1.32.0
+            return 0;
+        }
         if (args.Command == "summary")
             return Summary(settings, args.Flag("--json"), host);
         if (args.Command is "clear" or "raised" or "keep")
@@ -391,6 +402,9 @@ public static class Cli
                 return DoubleBookingsCommand(settings, graph, host);
             if (args.Command == "days-off")
                 return DaysOffCommand(args, settings, graph, host);
+            if (args.Command == "restore")
+                return Restores.Run(settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), args.Positional[0],
+                    args.Flag("--yes"), args.Flag("--again"), log, line => Print(host.Out, line), host.Sleep);
             if (args.Command == "sent")
                 return SentCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command == "hold")
@@ -560,36 +574,45 @@ public static class Cli
         return 0;
     }
 
-    private static int DeletedCommand(List<JsonObject> items, CliHost host)
+    private static int DeletedCommand(List<Restores.Numbered> listed, CliHost host)
     {
-        if (items.Count == 0)
+        if (listed.Count == 0)
         {
             Print(host.Out, "Nothing deleted by the rules since the queue was last cleared.");
             return 0;
         }
         static string When(JsonObject i) => PyStr.Head(i.Req("when"), 16).Replace("T", " ");
-        Print(host.Out, $"{items.Count} deleted, {When(items[0])} to {When(items[^1])}:");
-        var byRule = new List<(string Rule, List<JsonObject> Group)>();
-        foreach (var item in items)
+        Print(host.Out, $"{listed.Count} deleted, {When(listed[0].Entry)} to {When(listed[^1].Entry)}:");
+        var byRule = new List<(string Rule, List<Restores.Numbered> Group)>();
+        foreach (var x in listed)
         {
-            var rule = item.Str("rule") is { Length: > 0 } r ? r : "(no rule)";
+            var rule = x.Entry.Str("rule") is { Length: > 0 } r ? r : "(no rule)";
             var index = byRule.FindIndex(g => g.Rule == rule);
             if (index < 0)
-                byRule.Add((rule, [item]));
+                byRule.Add((rule, [x]));
             else
-                byRule[index].Group.Add(item);
+                byRule[index].Group.Add(x);
         }
         foreach (var (rule, group) in byRule.OrderBy(g => -g.Group.Count))
         {
             Print(host.Out, $"\n  {rule} ({group.Count})");
-            foreach (var item in group)
-                Print(host.Out, $"    {PyStr.Head(item.Fmt("received", "None"), 10)}  {item.Fmt("from", "None")}: {PyStr.Head(item.Fmt("subject", "None"), 90)}"
+            foreach (var (n, _, item) in group)
+                // 1.32.0: each with its number, for `restore`, and whether it's been restored
+                Print(host.Out, $"    {n}. {PyStr.Head(item.Fmt("received", "None"), 10)}  {item.Fmt("from", "None")}: {PyStr.Head(item.Fmt("subject", "None"), 90)}"
                                 + (item.Truthy("to") ? $"  -> filed to {Py.Str(item.Get("to"))}" : "")
                                 + (item.Truthy("accepted") ? $"  -> accepted ({Py.Str(item.Get("accepted"))})" : "")
                                 + (item.Truthy("did") ? $"  -> {Py.Str(item.Get("did"))}" : "")
+                                + Restores.State(item) switch
+                                {
+                                    "restored" => $"  [restored to the Inbox {PyStr.Head(item.Get("restored").StrOr("at"), 16).Replace("T", " ")}]",
+                                    "unconfirmed" => "  [restore may have gone: check the Inbox]",
+                                    _ => "",
+                                }
                                 // 1.31.0: what its sender wrote, or what changed in the meeting's description
                                 + (item.Str("note") is { Length: > 0 } note ? $"\n      {item.Str("note_by") ?? "note"}: \"{note}\"" : ""));
         }
+        if (listed.Any(x => Restores.WhyNot(x.Entry) is null && Restores.State(x.Entry) is null))
+            Print(host.Out, "\nBack to the Inbox: `mail-triage restore <n>` (a preview; --yes to move it).");
         return 0;
     }
 

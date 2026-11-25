@@ -35,10 +35,11 @@ public static class Triage
     private static string SenderName(JsonObject message) =>
         message.Get("from").Get("emailAddress") is var who && who.StrOr("name") is { Length: > 0 } name ? name : who.StrOr("address");
 
-    /// <summary>A `deleted` record with the note an acted entry carried (1.31.0).</summary>
+    /// <summary>A `deleted` record with the note an acted entry carried (1.31.0), and the key of a proposal it deleted
+    /// (1.32.0), so `restore` can find it in Deleted Items.</summary>
     private static JsonObject WithNote(JsonObject entry, JsonObject acted)
     {
-        foreach (var key in new[] { "note", "note_by" })
+        foreach (var key in new[] { "note", "note_by", "key" })
             if (acted.Str(key) is { } value)
                 entry[key] = value;
         return entry;
@@ -157,7 +158,7 @@ public static class Triage
                             {
                                 ["when"] = NowMicro(), ["folder"] = folder.Name, ["received"] = message.GetCopy("receivedDateTime"),
                                 ["from"] = Sender(message), ["subject"] = message.GetCopy("subject", ""), ["rule"] = passed.Rule.Name,
-                                ["check"] = passed.Why,
+                                ["check"] = passed.Why, ["key"] = key,
                             });
                             resolved.Add(key);
                         }
@@ -275,6 +276,7 @@ public static class Triage
                         {
                             ["when"] = NowMicro(), ["folder"] = folder.Name, ["received"] = message.GetCopy("receivedDateTime"),
                             ["from"] = Sender(message), ["subject"] = message.GetCopy("subject", ""), ["rule"] = rule is not null ? rule.Name : "",
+                            ["key"] = key,   // 1.32.0: what `restore` finds it by in Deleted Items
                         };
                         if (note is { Length: > 0 })
                             entry["check"] = note;
@@ -424,6 +426,8 @@ public static class Triage
                 foreach (var m in Proposals.AnsweredRequests(mailbox.Graph, mailbox.FolderId(name))
                              .OrderBy(m => m.Str("receivedDateTime") ?? "", StringComparer.Ordinal))
                 {
+                    if (raised.ContainsKey(Restores.Marker + Key(m)))
+                        continue;   // 1.32.0: restored by hand from Deleted Items, so left where it is
                     var cancellation = m.Has("remove") || Py.Str(m.Get("answer")).StartsWith("cancelled,", StringComparison.Ordinal);
                     var said = notes?.Take(RequestNote(m, name, cancellation));   // before the email moves (a moved email has a new id)
                     if (!dryRun)
@@ -436,6 +440,7 @@ public static class Triage
                         {
                             ["when"] = NowMicro(), ["folder"] = name, ["received"] = m.Get("receivedDateTime").Copy(), ["from"] = Sender(m),
                             ["subject"] = m.GetCopy("subject", ""), ["rule"] = cancellation ? "Cancelled meetings" : "Answered invitations",
+                            ["key"] = Key(m),
                         };
                         if (m.Has("remove"))
                             entry["did"] = "removed from the calendar";
@@ -466,6 +471,8 @@ public static class Triage
             foreach (var entry in items.ToList())
                 if (PyStr.CompareCodePoints(entry.Req("when"), cutoff) >= 0)
                     kept.Add(entry!.DeepClone());
+            if (items.Count > kept.Count)
+                record[Restores.PrunedField] = Restores.Pruned(record) + items.Count - kept.Count;   // 1.32.0: so `deleted`'s numbers stay put
             record["items"] = kept;
             StateFiles.Save(settings.DeletedFile, record);
             SaveQueue(settings, [.. carried, .. added]);
@@ -556,14 +563,50 @@ public static class Triage
             throw new LookupException($"{meetings[0]} is your own meeting, not an email: change it in Outlook (or `mail-triage move`), "
                                       + "then `mail-triage keep <n>`.");
         var box = mailbox ?? throw new InvalidOperationException("No mailbox.");
-        foreach (var id in ids)
+        // 1.32.0: each one is recorded for `deleted` (under "Emails deleted by hand"), so `restore` can bring it back. Only a
+        // write that really goes is recorded: a journal sends nothing.
+        var live = box.Writer is GraphWrites { Sends: true };
+        var record = StateFiles.LoadObject(settings.DeletedFile, () => new JsonObject { ["items"] = new JsonArray() });
+        var recorded = record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.");
+        try
         {
-            box.Delete(id);
-            var item = items.GetValueOrDefault(id);
-            log($"deleted by hand  {(item is not null ? item.Fmt("from") + ": " + item.Fmt("subject") : PyStr.Head(id, 24) + "…")}");
+            foreach (var id in ids)
+            {
+                var item = items.GetValueOrDefault(id);
+                var message = item is null && live ? ReadForRecord(box, id) : null;   // any email by its Graph id: read before it moves
+                box.Delete(id);
+                log($"deleted by hand  {(item is not null ? item.Fmt("from") + ": " + item.Fmt("subject") : PyStr.Head(id, 24) + "…")}");
+                if (!live || (item is null && message is null))
+                    continue;
+                recorded.Add((JsonNode)new JsonObject
+                {
+                    ["when"] = NowMicro(), ["folder"] = item?.Str("folder") ?? "", ["received"] = item is not null ? item.GetCopy("received") : message!.GetCopy("receivedDateTime"),
+                    ["from"] = item is not null ? item.GetCopy("from") : Sender(message!), ["subject"] = (item ?? message)!.GetCopy("subject", ""),
+                    ["rule"] = Restores.ByHandRule, ["by_hand"] = true, ["key"] = item is not null ? item.GetCopy("key") : Key(message!),
+                });
+            }
+        }
+        finally
+        {
+            if (live)
+                StateFiles.Save(settings.DeletedFile, record);
         }
         SaveQueue(settings, Queue(settings).Where(i => !ids.Contains(i.Req("id"))).ToList());
         return ids.Count;
+    }
+
+    /// <summary>An email by its Graph id, for the record of a delete by hand; null when it can't be read (it's still deleted).</summary>
+    private static JsonObject? ReadForRecord(Mailbox mailbox, string id)
+    {
+        try
+        {
+            var m = mailbox.Graph.Request($"/me/messages/{id}?$select={Mailbox.Fields}", scopes: mailbox.ReadScopes);
+            return m.Truthy("internetMessageId") ? m : null;
+        }
+        catch (M365Graph.GraphRequestException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Give one email to a handler by hand: a queued email (by number or id), or any email by its Graph id.
@@ -612,6 +655,8 @@ public static class Triage
         };
         if (handler.Then == "file")
             entry["to"] = handler.To;
+        if (handler.Then == "delete")
+            entry["key"] = Key(message);   // 1.32.0: for `restore`
         if (handler.Then != "review")
         {
             (record["items"] as JsonArray ?? throw new InvalidDataException($"{settings.DeletedFile} has no items list.")).Add((JsonNode)entry);
