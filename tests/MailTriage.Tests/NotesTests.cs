@@ -86,6 +86,83 @@ public sealed class NoteTextTests
         Assert.Null(Notes.Changed("Agenda: roadmap", "Agenda: roadmap"));
     }
 
+    // 1.34.0: a plain acceptance whose body is only the sender's signature and their organisation's disclaimer has no note.
+    private const string Signature = """
+        [https://www.example.co.uk/images/logo_meeting.png]
+        Pat Lee
+        Technology Director
+        Example Ltd
+        Proud to be a certified B Corporation
+        This message is private and confidential. If you have received this message in error, please notify us and remove it from your system.
+        """;
+
+    [Theory]
+    [InlineData(Signature)]
+    [InlineData("[https://www.example.co.uk/images/logo_meeting.png] Pat Lee Technology Director Proud to be a certified B Corporation This message is private and confidential. If you have received this message in error, please notify us and remove it from your system.")]
+    [InlineData("Pat Lee | Technology Director | Example Ltd")]
+    [InlineData("Kind regards,\nPat")]
+    [InlineData("Thanks\n\n-- \nP. Lee, Example Ltd")]
+    public void A_signature_alone_is_no_note(string body) => Assert.Null(Notes.Comment(body, sender: "Pat Lee"));
+
+    [Theory]
+    [InlineData("This message is private and confidential. If you have received this message in error, please notify us.")]
+    [InlineData("If you are not the intended recipient, please delete this email.\nPlease consider the environment before printing this email.")]
+    [InlineData("DISCLAIMER: The information in this email is confidential.")]
+    [InlineData("Your request was accepted.\nSent by Microsoft 365\n---------------\nMTG Room 1.A.2")]
+    public void A_disclaimer_alone_is_no_note(string body) => Assert.Null(Notes.Comment(body, sender: "Someone Else"));
+
+    [Theory]
+    [InlineData("[https://www.example.co.uk/images/logo.png]")]
+    [InlineData("[cid:image001.png@01DB0000.12345670]\n[https://www.example.co.uk/images/badge.png] [https://www.example.co.uk/x.jpg]")]
+    public void Image_placeholders_alone_are_no_note(string body) => Assert.Null(Notes.Comment(body, sender: "Pat Lee"));
+
+    [Theory]
+    [InlineData("Fine by me, I'll bring the roadmap.\n\n" + Signature)]
+    [InlineData("Fine by me, I'll bring the roadmap.\nKind regards,\nPat")]
+    [InlineData("Fine by me, I'll bring the roadmap. Pat Lee Technology Director Example Ltd")]
+    [InlineData("Fine by me, I'll bring the roadmap.\n-- \nPL")]
+    public void A_note_keeps_its_words_and_loses_its_signature(string body) =>
+        Assert.Equal("Fine by me, I'll bring the roadmap.", Notes.Comment(body, sender: "Pat Lee"));
+
+    [Fact]
+    public void A_surname_first_display_name_is_still_their_signature() =>
+        Assert.Equal("Running late, start at 12?", Notes.Comment("Running late, start at 12?\nPat Lee\nTechnology Director", sender: "Lee, Pat (Example Ltd)"));
+
+    [Fact]
+    public void A_note_above_a_quoted_original_keeps_only_the_new_text()
+    {
+        Assert.Equal("Can we cover the budget too?", Notes.Comment("""
+            Can we cover the budget too?
+            Pat Lee
+            Technology Director
+            -----Original Message-----
+            From: Alex Smith
+            Sent: 20 November 2026 09:00
+            Subject: Weekly 1-2-1 - Alex
+            The agenda
+            """, sender: "Pat Lee"));
+        Assert.Equal("Can we cover the budget too?",
+            Notes.Comment("Can we cover the budget too?\nFrom: Alex Smith <alex@example.com> Sent: 20 November 2026 09:00 To: Pat Lee Subject: Planning", sender: "Pat Lee"));
+    }
+
+    [Fact]
+    public void A_dial_in_block_is_furniture() =>
+        Assert.Equal("See you there", Notes.Comment("See you there\nOr call in (audio only)\n+44 20 0000 0000,,123# United Kingdom, London\nPhone conference ID: 123 456#", sender: ""));
+
+    [Fact]
+    public void The_ignore_list_cuts_from_its_match_on()
+    {
+        const string body = "Happy to move it.\nExample Ltd is a member of the Made Up Association. Calls may be recorded.";
+        Assert.Equal("Happy to move it. Example Ltd is a member of the Made Up Association. Calls may be recorded.", Notes.Comment(body, sender: "Pat Lee"));
+        IReadOnlyList<string> ignore = [.. Notes.DefaultIgnore, @"^example ltd is a member\b"];
+        Assert.Equal("Happy to move it.", Notes.Comment(body, ignore, "Pat Lee"));
+        Assert.Null(Notes.Comment("Example Ltd is a member of the Made Up Association.", ignore, "Pat Lee"));
+    }
+
+    [Fact]
+    public void Without_a_name_an_organisers_description_keeps_its_lines() =>
+        Assert.Equal("Agenda: roadmap\nThanks\nPat Lee to present", Notes.Clean("Agenda: roadmap\nThanks\n--\nPat Lee to present"));
+
     [Theory]
     [InlineData("New Time Proposed: Weekly 1-2-1 - Alex", "Weekly 1-2-1 - Alex")]
     [InlineData("Canceled: Planning", "Planning")]
@@ -130,8 +207,21 @@ public sealed class NoteSettingsTests : IDisposable
         Assert.Equal(("My 1:1", "^Weekly 1-2-1 - Alex$", "pat@example\\.com", null), (rule.Name, rule.Subject, rule.Sender, rule.Organiser));
     }
 
+    [Fact]
+    public void The_ignore_list_adds_to_the_defaults()
+    {
+        Assert.Equal(Notes.DefaultIgnore, dir.Settings(Base).Notes.AllIgnore);
+        var notes = dir.Settings(Base + "[notes]\nignore = ['^example ltd is a member\\b', 'calls may be recorded']\n").Notes;
+        Assert.Equal(["^example ltd is a member\\b", "calls may be recorded"], notes.Ignore);
+        Assert.Equal([.. Notes.DefaultIgnore, "^example ltd is a member\\b", "calls may be recorded"], notes.AllIgnore);
+        Assert.All(Notes.DefaultIgnore, p => Assert.Null(PyCompat.PyRegex.Problem(p)));   // the defaults are Python's dialect too
+    }
+
     [Theory]
-    [InlineData("[notes]\nquote = true\n", "it takes quote_in_deleted")]
+    [InlineData("[notes]\nquote = true\n", "it takes quote_in_deleted, ignore")]
+    [InlineData("[notes]\nignore = 'disclaimer'\n", "should be a list of regular expressions")]
+    [InlineData("[notes]\nignore = ['']\n", "should be a list of regular expressions")]
+    [InlineData("[notes]\nignore = ['(']\n", "isn't a valid regular expression")]
     [InlineData("[notes]\nquote_in_deleted = \"yes\"\n", "should be true or false")]
     [InlineData("[[note_rule]]\nname = \"x\"\nwhy = \"y\"\n", "at least one of subject, organiser, sender")]
     [InlineData("[[note_rule]]\nsubject = \"x\"\nfrom = \"y\"\n", "'from' isn't a setting")]
@@ -423,6 +513,61 @@ public sealed class NoteRunTests : IDisposable
         Assert.Equal(["a1"], graph.BodyReads);
         Assert.Contains("WORTH A LOOK: Deleted Pat Lee's reply 'Accepted: Weekly 1-2-1 - Alex' (rule 'Meeting acceptances'). Pat Lee wrote:",
             Assert.Single(Triage.Queue(config)).Str("check"));
+    }
+
+    /// <summary>1.34.0: a plain "Accepted:" whose body is only a signature and a disclaimer isn't a note: nothing raised,
+    /// nothing quoted. A real note above a signature is raised without it, and the owner's ignore list is used.</summary>
+    private static void Acceptance(NotesGraph graph, string id, string body) => graph.Add("Inbox", new JsonObject
+    {
+        ["@odata.type"] = "#microsoft.graph.eventMessageResponse", ["id"] = id, ["internetMessageId"] = $"<{id}@example.com>",
+        ["subject"] = "Accepted: Weekly 1-2-1 - Alex", ["receivedDateTime"] = "2026-11-12T08:30:00Z", ["from"] = From("Pat Lee", "pat@example.com"),
+    }, new JsonObject { ["id"] = id, ["body"] = Text(body) });
+
+    [Fact]
+    public void An_acceptance_with_only_a_signature_raises_nothing()
+    {
+        var config = Config();
+        var graph = new NotesGraph();
+        Acceptance(graph, "a1", "[https://www.example.co.uk/images/logo_meeting.png]\nPat Lee\nTechnology Director\nProud to be a certified B Corporation\n"
+                                + "This message is private and confidential. If you have received this message in error, please notify us and remove it from your system.");
+        Run(config, graph);
+        Assert.Equal(["a1"], graph.Moved);   // still deleted by its rule
+        var record = Assert.Single(Deleted(config));
+        Assert.Equal("Meeting acceptances", record.Str("rule"));
+        Assert.False(record.Has("note"));
+        Assert.Empty(Triage.Queue(config));
+    }
+
+    [Fact]
+    public void An_acceptance_with_a_note_and_a_signature_raises_the_note_alone()
+    {
+        var config = Config();
+        var graph = new NotesGraph();
+        Acceptance(graph, "a1", "I'll bring the draft.\n\nKind regards,\nPat Lee\nTechnology Director\n[https://www.example.co.uk/images/logo.png]\n"
+                                + "This message is private and confidential.");
+        Run(config, graph);
+        Assert.Equal("I'll bring the draft.", Assert.Single(Deleted(config)).Str("note"));
+        Assert.EndsWith("Pat Lee wrote: \"I'll bring the draft.\"", Assert.Single(Triage.Queue(config)).Str("check"));
+    }
+
+    [Fact]
+    public void The_owners_ignore_list_is_used_in_a_run()
+    {
+        const string body = "Example Ltd is a member of the Made Up Association. Calls may be recorded.";
+        var graph = new NotesGraph();
+        Acceptance(graph, "a1", body);
+        var plain = Config();
+        Run(plain, graph);
+        Assert.Single(Triage.Queue(plain));   // without the setting, that's read as a note
+
+        Triage.Clear(plain, Quiet);
+        var graph2 = new NotesGraph();
+        Acceptance(graph2, "a2", body);
+        var config = Config(Rule + "\n[notes]\nignore = ['^example ltd is a member of the made up association\\b']\n");
+        Run(config, graph2);
+        Assert.Equal(2, Deleted(config).Count);
+        Assert.False(Deleted(config).Last().Has("note"));   // the second email: its "note" was boilerplate the setting names
+        Assert.Empty(Triage.Queue(config));
     }
 
     [Fact]

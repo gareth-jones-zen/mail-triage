@@ -516,14 +516,40 @@ Items. Now **`mail-triage deleted` shows the note under each such email**:
   tidied once their meeting is answered (by `auto_accept`, `accept_shortened`, a days-off decline, or by you),
   cancellation notices (and the cancelled meeting removed), and meeting replies a `[[rule]]` deletes (such as "Accepted:
   ..." with a comment). Older records have no note.
-- **What counts as the note:** for a reply (a new time proposed, an acceptance or decline with a comment), what its
-  sender wrote, with the boilerplate taken out: Teams (and Zoom) join blocks and everything after them, "Caution:
-  external" and "You don't often get email from" banners, quoted history ("-----Original Appointment-----", a
-  From:/Sent: header, "On ... wrote:"), and link addresses. For an organiser's invitation, update or cancellation, which
-  carries the whole meeting body, **what changed in the description since the last version mail-triage saw of that
-  meeting**, labelled "description changed" (or "removed: ..." when lines were only taken out). With no earlier
-  version (the first invitation, or an update to a meeting whose earlier emails went before 1.31.0), nothing is shown,
-  never the whole body. Empty, or nothing but boilerplate: no note.
+- **What counts as the note:** for a reply (a new time proposed, an acceptance or decline with a comment), **only what
+  its sender wrote themselves**. Taken out first:
+  - Teams (and Zoom) join blocks and their dial-in part ("Or call in (audio only)", "Phone conference ID"), and
+    everything after them; "Caution: external" and "You don't often get email from" banners; quoted history
+    ("-----Original Message-----", "-----Original Appointment-----", a From:/Sent: header on its own lines or run onto
+    one, "On ... wrote:", "> " lines); link addresses; and image placeholders ("[https://.../logo.png]", "[cid:...]").
+  - **The sender's signature** (1.34.0), recognised by their display name on the email: from a line that starts with
+    their name, or a sentence or sign-off followed by it ("Pat Lee", "Pat Lee | Technology Director | Example Ltd",
+    "See you then. Pat Lee Head of IT"), or a sign-off and their first name ("Thanks, Pat"), or a "-- " delimiter
+    line, to the end. "Lee, Pat (Example Ltd)" is read as Pat Lee. A sign-off on its own ("Kind regards,", "Thanks")
+    isn't a note either.
+  - **Disclaimers and other boilerplate** (1.34.0): from wherever an `ignore` pattern matches, to the end. The
+    built-in ones (below) cover the usual confidentiality notices, "Proud to be a certified B Corporation", "Please
+    consider the environment...", "Registered in England...", and a room's or resource's automatic "Your request was
+    accepted ... Sent by Microsoft 365".
+
+  **If nothing of the sender's own is left (no letter or digit), there's no note: nothing is quoted in `deleted` and
+  no `[[note_rule]]` raises it.** So a plain "Accepted: Weekly 1-2-1 - Alex" whose body is only this is no note:
+
+  ```
+  [https://www.example.co.uk/images/logo_meeting.png]
+  Pat Lee
+  Technology Director
+  Proud to be a certified B Corporation
+  This message is private and confidential. If you have received this message in error, please notify us ...
+  ```
+
+  while "I'll bring the draft." above the same signature is the note `I'll bring the draft.`, signature trimmed.
+
+  For an organiser's invitation, update or cancellation, which carries the whole meeting body, **what changed in the
+  description since the last version mail-triage saw of that meeting**, labelled "description changed" (or "removed:
+  ..." when lines were only taken out), with the same boilerplate and `ignore` patterns taken out (but not a
+  signature: a description's "Pat Lee to present" stays). With no earlier version (the first invitation, or an update
+  to a meeting whose earlier emails went before 1.31.0), nothing is shown, never the whole body.
 - **One line**, whitespace collapsed, cut at about 300 characters.
 - The descriptions are kept in **`notes_file`** (top level; default `%LOCALAPPDATA%\mail-triage\notes.json`; runtime
   state), by meeting, up to 4,000 characters each; one not seen for a year is forgotten.
@@ -532,6 +558,10 @@ Items. Now **`mail-triage deleted` shows the note under each such email**:
 ```toml
 [notes]
 quote_in_deleted = true          # the default: false leaves notes out of `deleted` (and reads none, without note rules)
+ignore = [                       # 1.34.0: more boilerplate, added to the built-in patterns (optional)
+  '^example ltd is a member of the made up association\b',
+  '\bcalls to our office may be recorded\b',
+]
 
 [[note_rule]]                    # these notes are raised in the queue too
 name = "Notes on my 1:1"
@@ -540,6 +570,26 @@ sender = 'pat@example\.com'         # who wrote it: "name address" (optional)
 # organiser = '...'                 # the meeting's organiser: "name address" (optional)
 why = "Pat's notes on changes to our 1:1 are worth reading"
 ```
+
+- **`ignore` (1.34.0): your organisation's disclaimer, or anything else that isn't a note.** Each is a regular
+  expression (Python's dialect, as the rules use; matched ignoring case) tried against each line of the email in turn:
+  where one first matches, the rest of the email from there on is dropped, and what came before it on that line is
+  kept. So a pattern for the disclaimer's opening words is enough. Write them as single-quoted TOML strings, so a
+  backslash stays a backslash. They're added to the built-in ones, which are always on and kept generic:
+
+  | Built-in pattern | Catches |
+  |---|---|
+  | `\bthis (e-?mail\|message\|communication)\b[^.]{0,100}?\b(private\|confidential\|privileged)\b` | "This message is private and confidential", "This email and any attachments are confidential" |
+  | `\bif you have received this (e-?mail\|message\|communication\|transmission) in error\b` | The usual "received this in error" |
+  | `\bif you are not the (intended\|named) (recipient\|addressee)\b` | "If you are not the intended recipient..." |
+  | `\bany (views\|opinions)( or opinions)? (expressed\|presented\|contained) in this (e-?mail\|message)\b` | "Any views or opinions expressed in this email..." |
+  | `\bproud to be an? (certified )?b ?corp(oration)?\b` | "Proud to be a certified B Corporation" |
+  | `\bplease consider the environment\b` | "Please consider the environment before printing" |
+  | `\bscanned for (viruses\|malware)\b` | "This email has been scanned for viruses" |
+  | `\bregistered (office\|in england\|in scotland\|in wales\|in northern ireland\|in ireland)\b` | Company registration lines |
+  | `^\W*(disclaimer\|confidentiality notice\|legal notice)\b` | A line headed "Disclaimer:" |
+  | `^your (meeting )?request (was\|has been) (accepted\|declined\|tentatively accepted)\b` | A room's or resource's automatic answer |
+  | `\bsent by microsoft (365\|exchange)\b` | Its "Sent by Microsoft 365" line |
 
 - **`[[note_rule]]`: a note on a named meeting is raised in the queue as well**, once per email, as an item to read
   (`"type": "note"`), while the action still happens as before and the email still goes to Deleted Items:
@@ -554,9 +604,10 @@ why = "Pat's notes on changes to our 1:1 are worth reading"
   the person's name and address together, as `[[invite_rule]]`'s `organiser` does. Only an email with a note is
   raised. It stays queued until you `keep <n>` or `clear` it; `delete`, `file`, `forward` and `handle` refuse it, as
   its email has already gone. It works with `quote_in_deleted = false` too.
-- **Settings are checked strictly:** an unknown key in `[notes]` or a `[[note_rule]]`, a rule with no condition, or a
-  pattern that isn't a valid regular expression is an error. **Keep the `[[note_rule]]` tables together.** Versions
-  before 1.31.0 refuse `[notes]`, `[[note_rule]]` and `notes_file`, so add them only after upgrading.
+- **Settings are checked strictly:** an unknown key in `[notes]` or a `[[note_rule]]`, a rule with no condition, an
+  `ignore` that isn't a list of patterns, or a pattern that isn't a valid regular expression is an error. **Keep the
+  `[[note_rule]]` tables together.** Versions before 1.31.0 refuse `[notes]`, `[[note_rule]]` and `notes_file`, and
+  versions before 1.34.0 refuse `ignore`, so add them only after upgrading.
 
 ## Restoring an email: `restore` (1.32.0)
 

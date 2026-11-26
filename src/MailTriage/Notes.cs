@@ -53,13 +53,53 @@ public static class Notes
     private static readonly Regex HeaderFrom = new(@"^From:\s*\S", I, Timeout);
     private static readonly Regex HeaderNext = new(@"^(Sent|Date):\s*\S", I, Timeout);
 
-    /// <summary>Lines that start a Teams (or Zoom) join block: it and everything after it is the meeting's furniture.</summary>
+    /// <summary>An Outlook reply header run onto one line ("From: Alex Smith Sent: 23 November 2026 10:00 To: ...").</summary>
+    private static readonly Regex HeaderOneLine = new(@"^From:\s*\S.*?\s(Sent|Date):\s*\S", I, Timeout);
+
+    /// <summary>Lines that start a Teams (or Zoom) join block, or its dial-in part: it and everything after it is the
+    /// meeting's furniture.</summary>
     private static readonly Regex[] JoinStarts =
     [
         new(@"^Microsoft Teams(\s+meeting)?(\s+Need help\?.*)?$", I, Timeout),
-        new(@"^Join (on your computer|the meeting now|Microsoft Teams Meeting|with a video conferencing device|Zoom Meeting)\b", I, Timeout),
+        new(@"^Join (on your computer|the meeting now|Microsoft Teams Meeting|with a video conferencing device|Zoom Meeting|by phone)\b", I, Timeout),
         new(@"^Click here to join the meeting\b", I, Timeout),
         new(@"^Meeting ID:\s*\d", I, Timeout),
+        new(@"^(Or call in( \(audio only\))?|Dial[- ]in( by phone)?|Phone conference ID|Conference ID|Find a local number)\b", I, Timeout),
+    ];
+
+    /// <summary>The usual signature delimiter, "-- " on its own line (trimmed to "--"): what follows is the signature.</summary>
+    private static readonly Regex SignatureDelimiter = new(@"^--$", RegexOptions.CultureInvariant, Timeout);
+
+    /// <summary>An image as Graph writes it in a text body: "[https://.../logo.png]", "[cid:image001.png@01DA...]".</summary>
+    private static readonly Regex ImagePlaceholder = new(@"\[(?:cid:|https?://)[^\]]*\]", I, Timeout);
+
+    /// <summary>A sign-off on its own ("Thanks", "Kind regards,"): not a note.</summary>
+    private const string SignOff = @"(?:many thanks|thanks(?: very much| again| all)?|thank you|kind regards|best regards|warm(?:est)? regards|regards|cheers|best wishes|all the best|best|ta|speak soon)";
+
+    private static readonly Regex SignOffLine = new($@"^{SignOff}\W*$", I, Timeout);
+
+    /// <summary>Something of the sender's own: a letter or a digit.</summary>
+    private static readonly Regex Substantive = new(@"[\p{L}\p{N}]", RegexOptions.CultureInvariant, Timeout);
+
+    /// <summary>The parts of a display name in brackets, "(Example Ltd)" or "[External]": not the person's name.</summary>
+    private static readonly Regex Bracketed = new(@"\([^)]*\)|\[[^\]]*\]", RegexOptions.CultureInvariant, Timeout);
+
+    /// <summary>The boilerplate patterns that are always on (1.34.0): where one matches, the rest of the email from there
+    /// on is boilerplate. Python's dialect, matched ignoring case, as `[notes] ignore` is; that setting adds to these.
+    /// Generic on purpose: an organisation's own disclaimer wording belongs in the setting.</summary>
+    public static readonly IReadOnlyList<string> DefaultIgnore =
+    [
+        @"\bthis (e-?mail|message|communication)\b[^.]{0,100}?\b(private|confidential|privileged)\b",   // "This message is private and confidential"
+        @"\bif you have received this (e-?mail|message|communication|transmission) in error\b",
+        @"\bif you are not the (intended|named) (recipient|addressee)\b",
+        @"\bany (views|opinions)( or opinions)? (expressed|presented|contained) in this (e-?mail|message)\b",
+        @"\bproud to be an? (certified )?b ?corp(oration)?\b",
+        @"\bplease consider the environment\b",
+        @"\bscanned for (viruses|malware)\b",
+        @"\bregistered (office|in england|in scotland|in wales|in northern ireland|in ireland)\b",
+        @"^\W*(disclaimer|confidentiality notice|legal notice)\b",
+        @"^your (meeting )?request (was|has been) (accepted|declined|tentatively accepted)\b",   // a room's or resource's automatic answer
+        @"\bsent by microsoft (365|exchange)\b",
     ];
 
     /// <summary>Lines dropped wherever they are: external-sender banners, and Outlook's own line on a proposal.</summary>
@@ -95,26 +135,62 @@ public static class Notes
         return WebUtility.HtmlDecode(text);
     }
 
-    /// <summary>The text with the boilerplate gone, a line for each paragraph: no link targets, no external-sender
-    /// banners, nothing from the first Teams join block or quoted history on, no separator lines. Empty when nothing of
-    /// the sender's own is left.</summary>
-    public static string Clean(string text)
+    /// <summary>The text with the boilerplate gone, a line for each paragraph: no link targets or image placeholders, no
+    /// external-sender banners, nothing from the first Teams join block, quoted history, signature delimiter or ignore
+    /// pattern on, no separator lines. With the sender's name (a reply), their signature goes too: from a line that
+    /// starts with their name (or a sentence followed by it), or a sign-off and their first name, or a "-- " delimiter,
+    /// on; and a sign-off on its own is dropped (sender "" for a reply with no name: the delimiter and sign-offs still
+    /// count). Ignore is the boilerplate patterns (Python's dialect, ignoring case): DefaultIgnore unless
+    /// given. Empty when nothing of the sender's own is left.</summary>
+    public static string Clean(string text, IReadOnlyList<string>? ignore = null, string? sender = null)
     {
         var lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Replace(' ', ' ').Split('\n')
-            .Select(l => Spaces.Replace(LinkTarget.Replace(l, ""), " ").Trim()).ToList();
+            .Select(l => Spaces.Replace(ImagePlaceholder.Replace(LinkTarget.Replace(l, ""), " "), " ").Trim()).ToList();
+        var patterns = (ignore ?? DefaultIgnore).Select(p => PyRegex.Get(p, true)).ToList();
+        var signature = Signature(sender);
         var kept = new List<string>();
         for (var i = 0; i < lines.Count; i++)
         {
             var line = lines[i];
-            if (HistoryStarts.Any(r => r.IsMatch(line)) || JoinStarts.Any(r => r.IsMatch(line)))
+            if (HistoryStarts.Any(r => r.IsMatch(line)) || JoinStarts.Any(r => r.IsMatch(line)) || HeaderOneLine.IsMatch(line)
+                || (sender is not null && SignatureDelimiter.IsMatch(line)))
                 break;
             if (HeaderFrom.IsMatch(line) && lines.Skip(i + 1).Take(4).Any(l => HeaderNext.IsMatch(l)))
                 break;   // an Outlook reply header (From:, Sent:, To:, Subject:): what follows is the message replied to
             if (line.StartsWith('>') || Furniture.IsMatch(line) || Dropped.Any(r => r.IsMatch(line)))
                 continue;
+            // Boilerplate or the signature starts on this line: keep what comes before it, and stop.
+            var cut = patterns.Select(p => p.Search(line)?.Index)
+                .Append(signature?.Match(line) is { Success: true } s ? s.Index : null)
+                .Where(at => at is not null).Min();
+            if (cut is { } at)
+            {
+                if (line[..at].Trim() is { Length: > 0 } before && !Furniture.IsMatch(before) && !SignOffLine.IsMatch(before))
+                    kept.Add(before);
+                break;
+            }
+            if (sender is not null && SignOffLine.IsMatch(line))
+                continue;
             kept.Add(line);
         }
-        return string.Join("\n", kept);
+        return kept.Any(Substantive.IsMatch) ? string.Join("\n", kept) : "";
+    }
+
+    /// <summary>Where the sender's signature starts in a line: their name at the start of the line, or after a sentence or a
+    /// sign-off ("Pat Lee Technology Director", "See you then. Pat Lee", "Thanks, Pat Lee"); or their first name alone, or
+    /// after a sign-off, ending the line ("Pat", "Cheers Pat"). "Lee, Pat" is read as Pat Lee too. Null with no name.</summary>
+    private static Regex? Signature(string? sender)
+    {
+        var name = Spaces.Replace(Bracketed.Replace(sender ?? "", " "), " ").Trim();
+        if (!Substantive.IsMatch(name))
+            return null;
+        var names = new List<string> { name };
+        if (name.Split(',', 2) is [var last, var first] && first.Trim().Length > 0 && last.Trim().Length > 0)
+            names.Add($"{first.Trim()} {last.Trim()}");   // "Lee, Pat"
+        var full = string.Join("|", names.Select(Regex.Escape));
+        var given = names[^1].Split(' ')[0];
+        var start = $@"(?:^|(?<=[.!?,;:])\s+)(?:{SignOff}\W+)?";
+        return new Regex($@"{start}(?:(?:{full})(?![\p{{L}}\p{{N}}])|{Regex.Escape(given)}\W*$)", I, Timeout);
     }
 
     /// <summary>One line, whitespace collapsed, cut to about max characters at a word.</summary>
@@ -129,7 +205,8 @@ public static class Notes
     }
 
     /// <summary>A reply's note: what its sender wrote, on one line, or null when there's nothing but boilerplate.</summary>
-    public static string? Comment(string text) => Clean(text) is { Length: > 0 } clean ? OneLine(clean) : null;
+    public static string? Comment(string text, IReadOnlyList<string>? ignore = null, string? sender = null) =>
+        Clean(text, ignore, sender) is { Length: > 0 } clean ? OneLine(clean) : null;
 
     /// <summary>What changed between two versions of a meeting's description (each already Clean): the lines added, on
     /// one line; or, if lines were only taken out, "removed: " and those. Null when they're the same.</summary>
@@ -230,10 +307,11 @@ public sealed class NoteTaker
             return null;
         }
         Note? note;
+        var ignore = settings.Notes.AllIgnore;
         if (email.Kind == Kind.Reply)
-            note = Notes.Comment(text) is { } said ? new Note(said, $"{(from.Name.Length > 0 ? from.Name : from.Address)} wrote") : null;
+            note = Notes.Comment(text, ignore, from.Name) is { } said ? new Note(said, $"{(from.Name.Length > 0 ? from.Name : from.Address)} wrote") : null;
         else
-            note = Described(email, Notes.Clean(text)) is { } change ? new Note(change, "description changed") : null;
+            note = Described(email, Notes.Clean(text, ignore)) is { } change ? new Note(change, "description changed") : null;
         if (note is null)
             return null;
         if (settings.Notes.Rules.FirstOrDefault(r => r.Matches(email.MeetingSubject, subject, email.Organiser, from)) is { } rule)
@@ -273,7 +351,8 @@ public sealed class NoteTaker
         var before = descriptions.Get(id) as JsonObject ?? (email.SeriesId is { Length: > 0 } series ? descriptions.Get(series) as JsonObject : null);
         if (before is not null && PyStr.CompareCodePoints(before.Str("received") ?? "", received) > 0)
             return null;   // a later version is already known: this one says nothing new
-        var change = before is null ? null : Notes.Changed(before.Str("text") ?? "", clean);
+        // The earlier version is cleaned again, so a pattern added since doesn't show its boilerplate as "removed".
+        var change = before is null ? null : Notes.Changed(Notes.Clean(before.Str("text") ?? "", settings.Notes.AllIgnore), clean);
         descriptions[id] = new JsonObject
         {
             ["text"] = clean.Length > Notes.KeptDescription ? clean[..Notes.KeptDescription] : clean, ["received"] = received,

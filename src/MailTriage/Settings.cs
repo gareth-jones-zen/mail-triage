@@ -343,14 +343,20 @@ public sealed class DoubleBookingRules
 }
 
 /// <summary>[notes] (1.31.0): whether `deleted` quotes the note in an email answered without asking, and the
-/// [[note_rule]]s whose notes are raised in the queue too.</summary>
+/// [[note_rule]]s whose notes are raised in the queue too; and (1.34.0) `ignore`, more boilerplate patterns.</summary>
 public sealed class NotesSettings
 {
-    public static readonly string[] Keys = ["quote_in_deleted"];
+    public static readonly string[] Keys = ["quote_in_deleted", "ignore"];
 
     /// <summary>On unless switched off: each email answered without asking keeps its sender's note in `deleted`.</summary>
     public bool QuoteInDeleted { get; set; } = true;
     public List<NoteRule> Rules { get; } = [];
+
+    /// <summary>`ignore` (1.34.0): the owner's boilerplate patterns (an organisation's disclaimer), added to Notes.DefaultIgnore.</summary>
+    public List<string> Ignore { get; } = [];
+
+    /// <summary>Every boilerplate pattern: the built-in ones, then the owner's.</summary>
+    public IReadOnlyList<string> AllIgnore => [.. MailTriage.Notes.DefaultIgnore, .. Ignore];
 
     /// <summary>Whether a run needs to read notes at all: quoting is on, or a rule may raise one.</summary>
     public bool Wanted => QuoteInDeleted || Rules.Count > 0;
@@ -1328,6 +1334,19 @@ public sealed class Settings
                     throw new SettingsException($"[notes] in {full} has {Py.ReprString(key)}: it takes {string.Join(", ", NotesSettings.Keys)}.");
             if (section.Get("quote_in_deleted") is { } quote)
                 config.QuoteInDeleted = quote as bool? ?? throw new SettingsException($"quote_in_deleted in [notes] in {full} should be true or false.");
+            if (section.Get("ignore") is { } ignore)
+            {
+                if (ignore is not TomlArray patterns)
+                    throw new SettingsException($"ignore in [notes] in {full} should be a list of regular expressions.");
+                foreach (var pattern in patterns)
+                {
+                    if (pattern is not string text || text.Length == 0)
+                        throw new SettingsException($"ignore in [notes] in {full} should be a list of regular expressions.");
+                    if (PyRegex.Problem(text) is { } why)
+                        throw new SettingsException($"ignore in [notes] in {full}: {Py.ReprString(text)} isn't a valid regular expression ({why}).");
+                    config.Ignore.Add(text);
+                }
+            }
         }
         var i = 0;
         foreach (var item in Toml.Tables(raw.Get("note_rule")))
