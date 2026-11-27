@@ -312,7 +312,8 @@ public sealed class SendInviteTests : IDisposable
             IReadOnlyDictionary<string, string>? headers = null) =>
             method == "GET" ? [] : throw new InvalidProgramException($"{method} {url} went through the retrying Request");
 
-        public JsonObject RequestOnce(string url, string method, JsonNode? body, IReadOnlyList<string>? scopes = null)
+        public JsonObject RequestOnce(string url, string method, JsonNode? body, IReadOnlyList<string>? scopes = null,
+            IReadOnlyDictionary<string, string>? headers = null)
         {
             Once.Add($"{method} {url}");
             return new JsonObject { ["id"] = "inv-1" };

@@ -506,6 +506,8 @@ internal sealed class ProposalGraph : IGraph, IMailWriter
     public void MarkRead(string messageId) => throw new InvalidOperationException("not in these tests");
 
     public JsonObject? Restore(string messageId) => throw new InvalidOperationException("not in these tests");
+
+    public void SendDraft(string messageId) => throw new InvalidOperationException("not in these tests");
 }
 
 public sealed class Proposals_ : IDisposable

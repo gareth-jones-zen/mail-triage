@@ -116,6 +116,12 @@ public static class Cli
             mail-triage double-bookings     each upcoming double booking, and what the [[double_booking_rule]]s would do
                                             with it (changes nothing)
 
+            mail-triage drafts [--all]      your Drafts folder, newest change first, numbered (--json for the UI)
+            mail-triage send-draft 1 [--full]   exactly what that draft would send, and its fingerprint; sends nothing
+            mail-triage send-draft 1 --yes --seen FINGERPRINT
+                                            send it, once, only if it's still what that preview showed; never sent
+                                            twice, and never resent after a lost answer (check Sent Items); no undo
+
             A write by hand whose answer was lost (move, leave --decline, invite, respond, cancel, hold, restore) is
             recorded: the next preview or --yes for it reads the event again, says if it went, and otherwise skips it
             (exit 1); --again sends it, once you've checked Outlook.
@@ -130,7 +136,7 @@ public static class Cli
     private static readonly string[] Commands =
         ["config", "sign-in", "run", "list", "delete", "resolve", "keep", "clear", "watch", "deleted", "summary", "raised", "which", "invite", "file",
          "move", "hold", "send-invite", "respond", "cancel", "sent", "leave", "one-to-ones", "double-bookings", "days-off", "autostart", "handle", "forward", "restore",
-         "kept", "requeue"];
+         "kept", "requeue", "drafts", "send-draft"];
 
     /// <summary>The parsed command line.</summary>
     internal sealed class Args
@@ -139,6 +145,8 @@ public static class Cli
         public WriteMode Writes = WriteMode.Live;
         public string? Journal;
         public string Command = "";
+        /// <summary>--help or -h after the command (1.35.0): that command's help.</summary>
+        public bool Help;
         public List<string> Positional = [];
         public HashSet<string> Flags = [];
         public Dictionary<string, string> Values = [];
@@ -168,6 +176,8 @@ public static class Cli
         ["respond"] = (["--yes", "--series", "--again"], ["--note"]),
         ["cancel"] = (["--yes", "--series", "--again"], ["--note"]),
         ["sent"] = (["--yes"], []),
+        ["drafts"] = (["--all", "--json"], []),
+        ["send-draft"] = (["--yes", "--full"], ["--seen"]),
     };
 
     internal static Args Parse(string[] argv)
@@ -211,6 +221,11 @@ public static class Cli
         for (; i < argv.Length; i++)
         {
             var arg = argv[i];
+            if (arg is "-h" or "--help")
+            {
+                a.Help = true;
+                return a;
+            }
             if (arg == "--")
             {
                 a.Positional.AddRange(argv[(i + 1)..]);
@@ -245,7 +260,7 @@ public static class Cli
             case "which":
                 Count(1, 2, "sender");
                 break;
-            case "handle" or "restore":
+            case "handle" or "restore" or "send-draft":
                 Count(1, 1, "ref");
                 break;
             case "invite":
@@ -326,6 +341,16 @@ public static class Cli
         if (args.Command is "-h" or "--help")
         {
             Print(host.Out, Usage);
+            return 0;
+        }
+        if (args.Help)
+        {
+            Print(host.Out, args.Command switch
+            {
+                "drafts" => SendDrafts.ListHelp,
+                "send-draft" => SendDrafts.SendHelp,
+                _ => Usage,
+            });
             return 0;
         }
         if (args.Command == "config")
@@ -414,6 +439,10 @@ public static class Cli
             if (args.Command == "restore")
                 return Restores.Run(settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), args.Positional[0],
                     args.Flag("--yes"), args.Flag("--again"), log, line => Print(host.Out, line), host.Sleep);
+            if (args.Command == "drafts")   // 1.35.0: reads only, without the run lock
+                return SendDrafts.List(settings, graph, args.Flag("--all"), args.Flag("--json"), host);
+            if (args.Command == "send-draft")   // 1.35.0: --yes gets the live door; a preview, one that refuses every write
+                return SendDrafts.Run(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command == "sent")
                 return SentCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command == "hold")

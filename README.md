@@ -18,6 +18,7 @@ mail-triage keep 2       # off the queue, left in the folder
 mail-triage requeue 1    # undo a keep: back on the queue as it was (its number in `kept`; 1.33.0)
 mail-triage file 2 --to Inbox/Projects   # move it to a folder, left unread
 mail-triage forward 2    # what the forward rule it matches would do; --yes to forward, mark read, file (1.9.0)
+mail-triage drafts       # your Drafts folder, numbered; `send-draft <n>` previews one, --yes --seen sends it (1.35.0)
 mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule, numbered
 mail-triage restore 7    # one of those back to the Inbox: a preview; --yes to move it (1.32.0)
 mail-triage summary      # one line for a session briefing: what's queued and deleted (--json: the counts)
@@ -742,6 +743,7 @@ records the writes it didn't send.
 | `cancel` | your meeting on a day off, a 1:1 or catch-up cancelled, `cancel --yes` | none: attendees were told |
 | `remove` | your own block on a day off, `cancel --yes` of a block | none |
 | `hold`, `send-invite` | `hold --yes`, `send-invite --yes` | `mail-triage cancel <event>` |
+| `send-draft` | `send-draft --yes --seen` (1.35.0); one whose answer was lost and couldn't be settled has `"outcome": "unconfirmed"` | none: it's gone to someone |
 | `keep` | `keep` | `mail-triage requeue <id>` |
 | `requeue` | `requeue` | `mail-triage keep <id>` |
 | `restore` | `restore --yes` | `mail-triage delete <Graph id>` (the email in the Inbox) |
@@ -794,6 +796,14 @@ under [The queue file](#the-queue-file).
   when `restore` looks.
 - `restored` is null, `"restored"`, or `"unconfirmed"` (the move's answer was lost: `restore` of it again checks the
   Inbox and settles it); `restored_at` is when.
+- An "Emails sent" record (`send-draft`, 1.35.0) is never `restorable`: `why_not` is "it was sent, not deleted: a sent
+  email can't be brought back".
+
+**`drafts --json`** (1.35.0), with `--all` for every draft: each draft, newest change first: `n` (its number now),
+`id` (the short id, stable: what a program should pass to `send-draft`), `graph_id`, `subject`, `modified` (Graph's,
+UTC), `to`, `cc` and `bcc` (counts), `external` (count), `attachments` (count, inline ones included), `kind` (`new`,
+`reply`, `reply-all`, `forward`, `can't tell`), `sendable`, `why_not` (null, or why it can't be sent) and `state`
+(null, or `sending`, `sent`, `unconfirmed` from `sent_drafts_file`).
 
 ## Sent Items: tidied by kind, never real mail
 
@@ -955,6 +965,134 @@ refused with nothing sent. If the send fails, or Microsoft returns no id, the ho
   since the hold still has it when the invitation is created. The hold is deleted after the send, which frees the
   room; if the room declined, the result says so: open the invitation in Outlook and add the room again (it isn't
   resent from here). A hold with a different room has that room freed when the hold is deleted.
+
+## Sending a draft: `drafts` and `send-draft` (1.35.0)
+
+```
+mail-triage drafts [--all] [--json]
+mail-triage send-draft <n | id> [--full]                 the preview: sends nothing, records nothing
+mail-triage send-draft <n | id> --yes --seen FINGERPRINT   sends it, once, if it's still what the preview showed
+```
+
+Sends an email you (or a session) drafted in Outlook, **as it is, once you've seen exactly what will go**, without
+opening Outlook. It's Graph's "send an existing draft" (`POST /me/messages/{id}/send`), so the draft goes with
+everything in it: a reply's quoted thread, inline images, files.
+
+```
+mail-triage drafts
+2 drafts changed in the last 14 days:
+   1. 4c1e09ab77d2  Fri 27 Nov 14:02  RE: Migration plan        reply-all, 4 people (1 external), 2 inline images (...)
+   2. 9a0f3310c5be  Thu 26 Nov 09:40  Notes for next week       can't be sent: it has no recipients (to, cc or bcc)
+`mail-triage send-draft <n>` shows exactly what would go (nothing is sent without --yes).
+
+mail-triage send-draft 1
+Would send this email from your mailbox (it can't be recalled once sent):
+  From      Alex Smith <alex@example.com>
+  To        Sam Jones <sam@example.com>
+            pat@partner.example (external)
+  Cc        Kim Lee <kim@example.com>
+            Jo Park <jo@example.com>
+  Bcc       (none)
+  Subject   RE: Migration plan
+  Kind      REPLY-ALL: the same 4 people as the last message in the thread (from Sam Jones, Fri 27 Nov 11:15)
+  Thread    nothing newer in the thread since this draft was last changed (Fri 27 Nov 14:02)
+  Sends as  normal importance; no read or delivery receipt; no reply-to
+  Attached  2 inline images (image001.png 40 KB, image002.png 18 KB); no files
+  Flags     1 EXTERNAL recipient
+  Body (what you wrote, then the quoted thread):
+    | Thanks both - yes, that works for me.
+    |
+    | [quoted thread: 7 lines, from "From: Sam Jones  Sent: 27 November 2026 11:15"; --full shows it]
+  Permission Mail.Send is granted to this sign-in
+Nothing sent. To send exactly this: mail-triage send-draft 1 --yes --seen 7be2a91c04fd
+```
+
+- **`drafts`** lists the Drafts folder, newest change first, changed in the last `list_days` (default 14; `--all` for
+  every draft). Each has a **number** (its position: numbers move as drafts come and go, so take one from a fresh
+  `drafts`) and a **short id** (the first 12 hex characters of the SHA-256 of its immutable Graph id: stable).
+  `send-draft` takes the number, the short id, or a full Graph id. It reads only, and takes no lock.
+- **The preview** shows from, every to, cc and bcc address (Bcc always, even empty; `(external)` on an address outside
+  `internal_domains`; an internal address with no name is noted, as a group counts as one), the subject, **the kind**
+  (new, reply, REPLY-ALL or forward, worked out from the conversation: the newest message in it that isn't a draft is the
+  one replied to; anyone added or dropped is named; "can't tell" where it can't), **whether anything newer arrived in
+  the thread** since the draft was last changed, importance, receipts and reply-to (anything but the defaults in
+  capitals), **every attachment from the attachments list** (Graph's `hasAttachments` is false for inline-only drafts,
+  so it isn't trusted; no attachment content is downloaded), **the flags** (each in capitals: external recipients, more
+  than `warn_recipients` people, a `warn` pattern in what was written, a newer message in the thread), and **the body as
+  text**: what was written in full, the quoted thread collapsed unless `--full`. Nothing adds a signature: what's there
+  is what goes. The **Permission** line asks for a Mail.Send token silently (never a browser, nothing sent to Graph).
+- **The fingerprint** (12 hex characters) is of everything the preview showed: the draft's id; from, to, cc, bcc and
+  reply-to (lower case, sorted, so order and case don't matter); subject, importance and the receipts; the body's type
+  and content exactly as stored (all of it, `--full` or not); and each attachment's name, size, type and inline flag.
+  Its first 8 characters cover all of that; the last 4 are one for each part (recipients, subject and how it's sent,
+  body, attachments), so a refusal can say what changed.
+- **`--yes` only sends with `--seen <that fingerprint>`.** Under the run lock it reads the draft again, checks every
+  refusal, and recomputes the fingerprint: **anything changed** (an edit in Outlook, or a different draft now at that
+  number) **and nothing is sent**: it says what changed, prints the new preview and its fingerprint, and exits 2. An
+  unchanged re-save in Outlook (a new change key) still matches. The approval is tied to the content, not a number.
+- **Refused before anything is sent (exit 2):** not in the Drafts folder, or not a draft; a meeting message (those go
+  through `send-invite`, `respond`, `cancel`); `from` (or `sender`) other than your own address (`email`): sending as
+  someone else isn't supported; no recipients; more than `max_recipients` people (send a mailing like that from Outlook,
+  deliberately); an empty subject; an empty body; a reply with nothing written above the quoted thread; `--yes`
+  without `--seen`, or `--seen` not matching; an unknown number or id. `send-draft` needs `email` (or `login_hint`).
+- **What it never does:** change, create or delete a draft, or send anything that isn't in Drafts. Change it in Outlook
+  (or redraft it), then preview again.
+
+### Never sent twice, never resent
+
+Each send is recorded in **`sent_drafts_file`** (top level; default `%LOCALAPPDATA%\mail-triage\sent-drafts.json`;
+runtime state), by its short id: **"sending" before the send, "sent" once Microsoft answers** (202, no body). Sending it
+again is "sent on ...: nothing to do" (exit 0); a sent draft has left Drafts anyway. The send is made once, as every
+write is (only a 429, or a request that never connected, is tried again), and with the immutable-id header, so the id
+it was sent by is the id of its copy in Sent Items. After it, the tool reads it back (up to four times, five seconds
+apart) and says where it is: "Sent to 4 people (1 external). In Sent Items, Fri 27 Nov 14:20.", or that Microsoft
+accepted it but it isn't in Sent Items yet (still exit 0: the 202 is the acceptance).
+
+**A send whose answer was lost** (a 5xx, a timeout, a dropped connection) is never resent. It's read back at once: no
+longer a draft, and it went (recorded "sent", exit 0). Otherwise (still in Drafts, in the Outbox, not found, or
+unreadable) it's recorded **"unconfirmed"**, in `unconfirmed_file` too (as `send-draft:<short id>`), listed by `deleted`
+as "MAY HAVE GONE", journalled with `outcome: unconfirmed`, and exits 1 with:
+
+```
+MAY HAVE GONE: check Sent Items in Outlook; this tool won't send it again. ...
+```
+
+**There's no `--again`**: if it didn't go, send it from Outlook. The next `send-draft` of it reads it again: no longer a
+draft, and it's settled as sent (the record cleared, exit 0); otherwise the same message (exit 1), and nothing is sent.
+A refusal from Microsoft (4xx) sent nothing: the record is dropped, it says why (exit 1), and it can be sent once fixed.
+A sign-in that's needed stops it before anything is sent (exit 1). A journal run (`--writes journal`) sends and records
+nothing.
+
+### What's recorded, and there's no undo
+
+| Where | What |
+|---|---|
+| `sent_drafts_file` | state, when, the fingerprint, the immutable id, the internet message ID, the subject, the kind, the to, cc and bcc addresses, the external count, the attachment count and total size. Never the body or attachment names. A sent entry is kept 60 days; one sending or unconfirmed until it's settled |
+| `deleted`, under **"Emails sent"** | when, the subject, "sent to 4 people (1 external), 2 attachments, reply-all": no addresses. `restore` refuses it: a sent email can't be brought back |
+| the journal | `what: "send-draft"`, the subject (private), `by hand`, the same counts, the internet message ID, **no `undo`** |
+| the log | "draft sent  <subject>: to 4 (1 external)" |
+
+**Once Microsoft accepts it, it's gone to people**: Graph has no recall, and Outlook's "undo send" is a delay in the
+Outlook app that a send through Graph doesn't get. The only undo is before the send: edit or delete the draft.
+
+```toml
+sent_drafts_file = "%EA_LOCAL%/mail-triage-sent-drafts.json"   # top level (1.35.0)
+
+[send_draft]                              # all optional; checked strictly (an unknown key or a bad pattern is an error)
+internal_domains = ["example.com", "example.co.uk"]   # default: the domain of `email`; a subdomain counts as outside
+warn_recipients = 10                      # flag more people than this
+max_recipients = 50                       # refuse more than this (not below warn_recipients)
+list_days = 14                            # how far back `drafts` lists
+warn = ['\[[^\]]*\]', '\bTBC\b', '[–—]']  # flagged in what was written (Python's dialect, ignoring case); replaces the default, which is these three
+```
+
+**Exit codes:** 0 a preview, sent, or already sent (nothing to do), or a journal run; 1 the answer was lost and couldn't
+be settled, Microsoft refused it, an earlier send may have gone, or a sign-in is needed; 2 refused before anything was
+sent. As with `restore`: anything but 0 or 2 means "it may have gone: check".
+
+**Permissions:** the send asks for **Mail.Send** (delegated, the only permission Graph's send takes), for that one
+call, as a forward rule does; previews and `drafts` need only what every read needs. A harness that asks before a
+command runs can match `mail-triage ... send-draft ... --yes` (the only form that sends).
 
 ## Answering and cancelling by hand: `respond` and `cancel` (1.22.0)
 

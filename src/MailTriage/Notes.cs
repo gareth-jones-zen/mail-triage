@@ -38,7 +38,7 @@ public static class Notes
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(1);
     private const RegexOptions I = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
 
-    private static readonly Regex LinkTarget = new(@"<(?:https?|mailto|tel):[^>\s]*>", I, Timeout);
+    internal static readonly Regex LinkTarget =new(@"<(?:https?|mailto|tel):[^>\s]*>", I, Timeout);
     private static readonly Regex Spaces = new(@"\s+", RegexOptions.CultureInvariant, Timeout);
 
     /// <summary>Lines from which the rest is someone else's: quoted history, a client's signature line, an Outlook
@@ -71,7 +71,7 @@ public static class Notes
     private static readonly Regex SignatureDelimiter = new(@"^--$", RegexOptions.CultureInvariant, Timeout);
 
     /// <summary>An image as Graph writes it in a text body: "[https://.../logo.png]", "[cid:image001.png@01DA...]".</summary>
-    private static readonly Regex ImagePlaceholder = new(@"\[(?:cid:|https?://)[^\]]*\]", I, Timeout);
+    internal static readonly Regex ImagePlaceholder =new(@"\[(?:cid:|https?://)[^\]]*\]", I, Timeout);
 
     /// <summary>A sign-off on its own ("Thanks", "Kind regards,"): not a note.</summary>
     private const string SignOff = @"(?:many thanks|thanks(?: very much| again| all)?|thank you|kind regards|best regards|warm(?:est)? regards|regards|cheers|best wishes|all the best|best|ta|speak soon)";
@@ -174,6 +174,15 @@ public static class Notes
             kept.Add(line);
         }
         return kept.Any(Substantive.IsMatch) ? string.Join("\n", kept) : "";
+    }
+
+    /// <summary>Whether line i starts quoted history (1.35.0, send-draft): an "Original Message" line, "On ... wrote:", an
+    /// Outlook From:/Sent: header (on one line, or From: with Sent: or Date: within the next four lines).</summary>
+    internal static bool StartsQuote(IReadOnlyList<string> lines, int i)
+    {
+        var line = lines[i].Trim();
+        return HistoryStarts[0].IsMatch(line) || HistoryStarts[1].IsMatch(line) || HeaderOneLine.IsMatch(line)
+               || (HeaderFrom.IsMatch(line) && lines.Skip(i + 1).Take(4).Any(l => HeaderNext.IsMatch(l.Trim())));
     }
 
     /// <summary>Where the sender's signature starts in a line: their name at the start of the line, or after a sentence or a

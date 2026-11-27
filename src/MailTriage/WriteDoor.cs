@@ -21,6 +21,11 @@ public interface IMailWriter
     /// <summary>Move an email back to the Inbox (1.32.0: `restore`), its read state left as it is. Sent once, never resent
     /// (IGraph.RequestOnce). Returns the moved message (Live), or null when the write was only journalled.</summary>
     JsonObject? Restore(string messageId);
+
+    /// <summary>Send a draft as it is (1.35.0: `send-draft`): POST /me/messages/{id}/send with Mail.Send, no body, the
+    /// immutable-id header. Sent once, never resent (IGraph.RequestOnce): a lost answer throws
+    /// GraphDeliveryUnknownException.</summary>
+    void SendDraft(string messageId);
 }
 
 /// <summary>Every change to the calendar goes through one of these. Each notifies other people.</summary>
@@ -123,12 +128,20 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
     private static readonly string[] SendScopes = ["Mail.Send"];
     private static readonly string[] CalendarScopes = ["Calendars.ReadWrite"];
     private readonly Func<WriteCall, string[], JsonObject?> send;
-    private readonly Func<WriteCall, string[], JsonObject?> sendOnce;
+    private readonly Func<WriteCall, string[], IReadOnlyDictionary<string, string>?, JsonObject?> sendOnce;
+
+    /// <summary>A draft's send (1.35.0): the immutable id it was read by, and Graph's required Content-Length: 0 for a POST
+    /// with no body.</summary>
+    internal static readonly IReadOnlyDictionary<string, string> SendDraftHeaders = new Dictionary<string, string>
+    {
+        ["Prefer"] = SendDrafts.ImmutableId,
+        ["Content-Length"] = "0",
+    };
 
     public GraphWrites(IGraph graph)
     {
         send = (call, scopes) => graph.Request(call.Url, call.Method, call.Body, scopes);
-        sendOnce = (call, scopes) => graph.RequestOnce(call.Url, call.Method, call.Body, scopes);
+        sendOnce = (call, scopes, headers) => graph.RequestOnce(call.Url, call.Method, call.Body, scopes, headers);
         Sends = true;
     }
 
@@ -139,7 +152,7 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
             sink(call);
             return null;
         };
-        sendOnce = send;
+        sendOnce = (call, scopes, _) => send(call, scopes);
     }
 
     /// <summary>Whether writes really reach Graph (Live), rather than a journal or a refusal: a forward is only
@@ -166,7 +179,10 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
         send(new WriteCall("PATCH", $"/me/messages/{messageId}", new JsonObject { ["isRead"] = true }), MailScopes);
 
     public JsonObject? Restore(string messageId) =>
-        sendOnce(new WriteCall("POST", $"/me/messages/{messageId}/move", new JsonObject { ["destinationId"] = "inbox" }), MailScopes);
+        sendOnce(new WriteCall("POST", $"/me/messages/{messageId}/move", new JsonObject { ["destinationId"] = "inbox" }), MailScopes, null);
+
+    public void SendDraft(string messageId) =>
+        sendOnce(new WriteCall("POST", $"/me/messages/{messageId}/send", null), SendScopes, SendDraftHeaders);
 
     public void Respond(string eventId, string action, string note, bool send)
     {
@@ -206,6 +222,6 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
     public JsonObject? Invite(JsonObject body, IReadOnlyCollection<string> people, IReadOnlyCollection<string> rooms)
     {
         SendInvites.CheckAttendees(body, people, rooms);
-        return sendOnce(new WriteCall("POST", "/me/events", body), CalendarScopes);
+        return sendOnce(new WriteCall("POST", "/me/events", body), CalendarScopes, null);
     }
 }

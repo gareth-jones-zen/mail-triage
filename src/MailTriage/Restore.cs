@@ -71,6 +71,8 @@ public static class Restores
     /// when the email went to Deleted Items (1.32.0); an older one is told by what it says.</summary>
     public static string? WhyNot(JsonObject e)
     {
+        if (e.Str("rule") == SendDrafts.Heading)   // 1.35.0
+            return "it was sent, not deleted: a sent email can't be brought back";
         if (e.Str("key") is { Length: > 0 })
             return null;
         if (Unconfirmed.Is(e) || e.Str("folder") == "Calendar")

@@ -382,6 +382,25 @@ public sealed class NoteRule
         && (Sender is null || PyRegex.IsMatch(Sender, $"{sender.Name} {sender.Address}", true));
 }
 
+/// <summary>[send_draft] (1.35.0): what `send-draft` counts as outside, flags and refuses, and how far back `drafts` lists.
+/// All optional; read strictly.</summary>
+public sealed class SendDraftSettings
+{
+    public static readonly string[] Keys = ["internal_domains", "warn_recipients", "max_recipients", "list_days", "warn"];
+
+    /// <summary>Square-bracket gaps, "TBC", and en and em dashes: what a draft left for the owner to finish usually has.</summary>
+    public static readonly IReadOnlyList<string> DefaultWarn = [@"\[[^\]]*\]", @"\bTBC\b", "[–—]"];
+
+    /// <summary>Lower case; empty means the domain of `email`. A subdomain is outside: only an exact match is internal.</summary>
+    public List<string> InternalDomains { get; } = [];
+    public long WarnRecipients { get; set; } = 10;
+    public long MaxRecipients { get; set; } = 50;
+    public long ListDays { get; set; } = 14;
+
+    /// <summary>Python's dialect, ignoring case, checked on what was written (not the quoted thread). Replaces the default.</summary>
+    public List<string> Warn { get; set; } = [.. DefaultWarn];
+}
+
 /// <summary>The settings file: which folders to triage, and the rules (config.py). Regular expressions are Python's,
 /// and only the part of Python's dialect that .NET reads the same way is accepted (PyRegex).</summary>
 public sealed class Settings
@@ -460,6 +479,14 @@ public sealed class Settings
     /// <summary>What `keep` took off the queue (1.33.0), each item as it was, so `requeue` can put it back. Kept for
     /// KeepDays (60 days).</summary>
     public string KeptFile { get; init; } = System.IO.Path.Combine(Local, "kept.json");
+
+    /// <summary>Each draft `send-draft` has sent (1.35.0), by its short id: "sending" before the send, "sent" once Microsoft
+    /// answers, "unconfirmed" when the answer was lost and it couldn't be settled, so none is ever sent twice. Holds the
+    /// addresses (never the body); a sent entry is kept KeepDays, the others until settled.</summary>
+    public string SentDraftsFile { get; init; } = System.IO.Path.Combine(Local, "sent-drafts.json");
+
+    /// <summary>[send_draft] (1.35.0). Never null.</summary>
+    public SendDraftSettings SendDraft { get; set; } = new();
 
     /// <summary>The shared activity journal (1.33.0, background-tools-lib's ActivityJournal): one JSON line for each thing
     /// mail-triage did, for "while you were away". Null (the default, no journal_file) writes none. Not --journal, which
@@ -551,7 +578,7 @@ public sealed class Settings
         "log_file", "notify", "every_minutes", "hours", "weekdays", "folder", "handler", "rule", "flow_check", "invites",
         "invite_rule", "movable_block", "one_to_ones", "one_to_one", "groups", "double_bookings", "double_booking_rule", "schedule", "leave",
         "calendar_months_ahead", "sent", "sent_file", "hold", "sent_invites_file", "unconfirmed_file", "catch_ups", "catch_up_skip", "catch_up",
-        "notes", "note_rule", "notes_file", "kept_file", "journal_file",
+        "notes", "note_rule", "notes_file", "kept_file", "journal_file", "sent_drafts_file", "send_draft",
     ];
 
     /// <summary>~ and %VARIABLES% expanded, with the variables given (the base's [paths], then the environment).</summary>
@@ -739,6 +766,7 @@ public sealed class Settings
             UnconfirmedFile = PathOr("unconfirmed_file", System.IO.Path.Combine(Local, "unconfirmed.json")),
             NotesFile = PathOr("notes_file", System.IO.Path.Combine(Local, "notes.json")),
             KeptFile = PathOr("kept_file", System.IO.Path.Combine(Local, "kept.json")),
+            SentDraftsFile = PathOr("sent_drafts_file", System.IO.Path.Combine(Local, "sent-drafts.json")),
             JournalFile = Toml.Truthy(raw.Get("journal_file")) ? ToPath(Toml.Str(raw.Get("journal_file")), baseDir, env) : null,
             LogFile = PathOr("log_file", System.IO.Path.Combine(Local, "mail-triage.log")),
             Notify = (string)notify,
@@ -1009,6 +1037,7 @@ public sealed class Settings
         ReadGroups(raw, full, settings);
         ReadDoubleBookings(raw, full, settings);
         ReadNotes(raw, full, settings);
+        ReadSendDraft(raw, full, settings);
         if (settings.Folders.Count == 0 && settings.Invites is null)
             throw new SettingsException($"{full} names no [[folder]] to triage, and no [invites].");
         return settings;
@@ -1377,6 +1406,55 @@ public sealed class Settings
             });
         }
         settings.Notes = config;
+    }
+
+    /// <summary>[send_draft] (1.35.0), read strictly: an unknown key, a bad pattern, a domain that isn't one, or
+    /// max_recipients below warn_recipients is an error.</summary>
+    private static void ReadSendDraft(TomlTable raw, string full, Settings settings)
+    {
+        var config = new SendDraftSettings();
+        if (raw.Get("send_draft") is { } sectionValue)
+        {
+            var section = sectionValue as TomlTable ?? throw new SettingsException($"[send_draft] in {full} should be a table.");
+            foreach (var key in section.Keys)
+                if (!SendDraftSettings.Keys.Contains(key))
+                    throw new SettingsException($"[send_draft] in {full} has {Py.ReprString(key)}: it takes {string.Join(", ", SendDraftSettings.Keys)}.");
+            if (section.Get("internal_domains") is { } domains)
+            {
+                if (domains is not TomlArray list || list.Count == 0
+                    || list.Any(d => d is not string s || !PyRegex.Get(@"^[a-z0-9-]+(\.[a-z0-9-]+)+$", true).FullMatch(s.Trim())))
+                    throw new SettingsException($"internal_domains in [send_draft] in {full} should be a list of domains, such as [\"example.com\"] (no @).");
+                config.InternalDomains.AddRange(list.Cast<string>().Select(d => d.Trim().ToLowerInvariant()).Distinct());
+            }
+            long Number(string key, long fallback, long least)
+            {
+                if (section.Get(key) is not { } value)
+                    return fallback;
+                if (value is not long n || n < least)
+                    throw new SettingsException($"{key} in [send_draft] in {full} should be a whole number, at least {least}.");
+                return n;
+            }
+            config.WarnRecipients = Number("warn_recipients", config.WarnRecipients, 1);
+            config.MaxRecipients = Number("max_recipients", config.MaxRecipients, 1);
+            config.ListDays = Number("list_days", config.ListDays, 1);
+            if (config.MaxRecipients < config.WarnRecipients)
+                throw new SettingsException($"max_recipients ({config.MaxRecipients}) in [send_draft] in {full} is below warn_recipients ({config.WarnRecipients}).");
+            if (section.Get("warn") is { } warn)
+            {
+                if (warn is not TomlArray patterns)
+                    throw new SettingsException($"warn in [send_draft] in {full} should be a list of regular expressions.");
+                config.Warn = [];
+                foreach (var pattern in patterns)
+                {
+                    if (pattern is not string text || text.Length == 0)
+                        throw new SettingsException($"warn in [send_draft] in {full} should be a list of regular expressions.");
+                    if (PyRegex.Problem(text) is { } why)
+                        throw new SettingsException($"warn in [send_draft] in {full}: {Py.ReprString(text)} isn't a valid regular expression ({why}).");
+                    config.Warn.Add(text);
+                }
+            }
+        }
+        settings.SendDraft = config;
     }
 
     /// <summary>config.create_default.</summary>
