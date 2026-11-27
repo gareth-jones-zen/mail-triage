@@ -6,7 +6,7 @@ using PyCompat;
 
 namespace MailTriage.Tests;
 
-/// <summary>1.35.0: `drafts` lists the Drafts folder; `send-draft` previews a draft exactly, with a fingerprint, and sends it
+/// <summary>1.36.0: `drafts` lists the Drafts folder; `send-draft` previews a draft exactly, with a fingerprint, and sends it
 /// once with `--yes --seen` that fingerprint, never twice and never again after a lost answer. The people and mail are made
 /// up. "Now" is Fri 27 Nov 2026, 15:00 (UTC is local).</summary>
 public sealed partial class SendDraftTests : IDisposable

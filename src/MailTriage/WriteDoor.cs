@@ -22,7 +22,7 @@ public interface IMailWriter
     /// (IGraph.RequestOnce). Returns the moved message (Live), or null when the write was only journalled.</summary>
     JsonObject? Restore(string messageId);
 
-    /// <summary>Send a draft as it is (1.35.0: `send-draft`): POST /me/messages/{id}/send with Mail.Send, no body, the
+    /// <summary>Send a draft as it is (1.36.0: `send-draft`): POST /me/messages/{id}/send with Mail.Send, no body, the
     /// immutable-id header. Sent once, never resent (IGraph.RequestOnce): a lost answer throws
     /// GraphDeliveryUnknownException.</summary>
     void SendDraft(string messageId);
@@ -130,7 +130,7 @@ internal sealed class GraphWrites : IMailWriter, ICalendarWriter
     private readonly Func<WriteCall, string[], JsonObject?> send;
     private readonly Func<WriteCall, string[], IReadOnlyDictionary<string, string>?, JsonObject?> sendOnce;
 
-    /// <summary>A draft's send (1.35.0): the immutable id it was read by, and Graph's required Content-Length: 0 for a POST
+    /// <summary>A draft's send (1.36.0): the immutable id it was read by, and Graph's required Content-Length: 0 for a POST
     /// with no body.</summary>
     internal static readonly IReadOnlyDictionary<string, string> SendDraftHeaders = new Dictionary<string, string>
     {

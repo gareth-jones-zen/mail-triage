@@ -176,7 +176,7 @@ public static class Notes
         return kept.Any(Substantive.IsMatch) ? string.Join("\n", kept) : "";
     }
 
-    /// <summary>Whether line i starts quoted history (1.35.0, send-draft): an "Original Message" line, "On ... wrote:", an
+    /// <summary>Whether line i starts quoted history (1.36.0, send-draft): an "Original Message" line, "On ... wrote:", an
     /// Outlook From:/Sent: header (on one line, or From: with Sent: or Date: within the next four lines).</summary>
     internal static bool StartsQuote(IReadOnlyList<string> lines, int i)
     {

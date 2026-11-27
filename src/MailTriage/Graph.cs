@@ -22,7 +22,7 @@ public interface IGraph
         IReadOnlyDictionary<string, string>? headers = null) =>
         Request(url, method, body, scopes, headers);
 
-    /// <summary>Whether a token for these scopes can be had silently (1.35.0: send-draft's Permission line): true, false
+    /// <summary>Whether a token for these scopes can be had silently (1.36.0: send-draft's Permission line): true, false
     /// (a sign-in would be needed), or null when it can't be told (a fake, or the check itself failed). Never opens a
     /// browser and calls nothing on Graph.</summary>
     bool? Granted(IReadOnlyList<string> scopes) => null;

@@ -10,7 +10,7 @@ namespace MailTriage;
 /// `refuse` didn't send. Never a message body: the subject, as `list` and `deleted` already show it, with sensitivity
 /// "private" so a screen shown to others can hide it. Writing never fails or undoes the action: a problem is logged.
 /// <para>What each line's `what` is: delete, file, forward, handle, accept, tentative, decline, move, cancel, remove (your
-/// own block taken out), hold, send-invite, keep, requeue, restore, clear; and (1.35.0) send-draft, with no undo.</para></summary>
+/// own block taken out), hold, send-invite, keep, requeue, restore, clear; and (1.36.0) send-draft, with no undo.</para></summary>
 internal static class Activity
 {
     public const string Tool = "mail-triage";

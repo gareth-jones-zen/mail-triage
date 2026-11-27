@@ -9,7 +9,7 @@ using WinBackground;
 
 namespace MailTriage;
 
-/// <summary>`drafts` and `send-draft` (1.35.0): send an Outlook draft, as it is, once the owner has seen exactly what will
+/// <summary>`drafts` and `send-draft` (1.36.0): send an Outlook draft, as it is, once the owner has seen exactly what will
 /// go. The preview reads only and prints a fingerprint of everything it showed; `--yes` sends only with `--seen` that
 /// fingerprint, after reading the draft again under the run lock, so an edit in Outlook (or a different draft at that
 /// number) is refused, never sent unseen. The send is Graph's POST /me/messages/{id}/send (Mail.Send), made once.

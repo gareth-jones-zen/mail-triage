@@ -145,7 +145,7 @@ public static class Cli
         public WriteMode Writes = WriteMode.Live;
         public string? Journal;
         public string Command = "";
-        /// <summary>--help or -h after the command (1.35.0): that command's help.</summary>
+        /// <summary>--help or -h after the command (1.36.0): that command's help.</summary>
         public bool Help;
         public List<string> Positional = [];
         public HashSet<string> Flags = [];
@@ -439,9 +439,9 @@ public static class Cli
             if (args.Command == "restore")
                 return Restores.Run(settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), args.Positional[0],
                     args.Flag("--yes"), args.Flag("--again"), log, line => Print(host.Out, line), host.Sleep);
-            if (args.Command == "drafts")   // 1.35.0: reads only, without the run lock
+            if (args.Command == "drafts")   // 1.36.0: reads only, without the run lock
                 return SendDrafts.List(settings, graph, args.Flag("--all"), args.Flag("--json"), host);
-            if (args.Command == "send-draft")   // 1.35.0: --yes gets the live door; a preview, one that refuses every write
+            if (args.Command == "send-draft")   // 1.36.0: --yes gets the live door; a preview, one that refuses every write
                 return SendDrafts.Run(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);
             if (args.Command == "sent")
                 return SentCommand(args, settings, graph, args.Flag("--yes") ? Door(args, graph, args.Writes, settings) : WriteDoor.Refusing(), log, host);

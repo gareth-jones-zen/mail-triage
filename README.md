@@ -18,7 +18,7 @@ mail-triage keep 2       # off the queue, left in the folder
 mail-triage requeue 1    # undo a keep: back on the queue as it was (its number in `kept`; 1.33.0)
 mail-triage file 2 --to Inbox/Projects   # move it to a folder, left unread
 mail-triage forward 2    # what the forward rule it matches would do; --yes to forward, mark read, file (1.9.0)
-mail-triage drafts       # your Drafts folder, numbered; `send-draft <n>` previews one, --yes --seen sends it (1.35.0)
+mail-triage drafts       # your Drafts folder, numbered; `send-draft <n>` previews one, --yes --seen sends it (1.36.0)
 mail-triage deleted      # what the rules deleted since you last cleared the queue, by rule, numbered
 mail-triage restore 7    # one of those back to the Inbox: a preview; --yes to move it (1.32.0)
 mail-triage summary      # one line for a session briefing: what's queued and deleted (--json: the counts)
@@ -743,7 +743,7 @@ records the writes it didn't send.
 | `cancel` | your meeting on a day off, a 1:1 or catch-up cancelled, `cancel --yes` | none: attendees were told |
 | `remove` | your own block on a day off, `cancel --yes` of a block | none |
 | `hold`, `send-invite` | `hold --yes`, `send-invite --yes` | `mail-triage cancel <event>` |
-| `send-draft` | `send-draft --yes --seen` (1.35.0); one whose answer was lost and couldn't be settled has `"outcome": "unconfirmed"` | none: it's gone to someone |
+| `send-draft` | `send-draft --yes --seen` (1.36.0); one whose answer was lost and couldn't be settled has `"outcome": "unconfirmed"` | none: it's gone to someone |
 | `keep` | `keep` | `mail-triage requeue <id>` |
 | `requeue` | `requeue` | `mail-triage keep <id>` |
 | `restore` | `restore --yes` | `mail-triage delete <Graph id>` (the email in the Inbox) |
@@ -796,10 +796,10 @@ under [The queue file](#the-queue-file).
   when `restore` looks.
 - `restored` is null, `"restored"`, or `"unconfirmed"` (the move's answer was lost: `restore` of it again checks the
   Inbox and settles it); `restored_at` is when.
-- An "Emails sent" record (`send-draft`, 1.35.0) is never `restorable`: `why_not` is "it was sent, not deleted: a sent
+- An "Emails sent" record (`send-draft`, 1.36.0) is never `restorable`: `why_not` is "it was sent, not deleted: a sent
   email can't be brought back".
 
-**`drafts --json`** (1.35.0), with `--all` for every draft: each draft, newest change first: `n` (its number now),
+**`drafts --json`** (1.36.0), with `--all` for every draft: each draft, newest change first: `n` (its number now),
 `id` (the short id, stable: what a program should pass to `send-draft`), `graph_id`, `subject`, `modified` (Graph's,
 UTC), `to`, `cc` and `bcc` (counts), `external` (count), `attachments` (count, inline ones included), `kind` (`new`,
 `reply`, `reply-all`, `forward`, `can't tell`), `sendable`, `why_not` (null, or why it can't be sent) and `state`
@@ -966,7 +966,7 @@ refused with nothing sent. If the send fails, or Microsoft returns no id, the ho
   room; if the room declined, the result says so: open the invitation in Outlook and add the room again (it isn't
   resent from here). A hold with a different room has that room freed when the hold is deleted.
 
-## Sending a draft: `drafts` and `send-draft` (1.35.0)
+## Sending a draft: `drafts` and `send-draft` (1.36.0)
 
 ```
 mail-triage drafts [--all] [--json]
@@ -1076,7 +1076,7 @@ nothing.
 Outlook app that a send through Graph doesn't get. The only undo is before the send: edit or delete the draft.
 
 ```toml
-sent_drafts_file = "%EA_LOCAL%/mail-triage-sent-drafts.json"   # top level (1.35.0)
+sent_drafts_file = "%EA_LOCAL%/mail-triage-sent-drafts.json"   # top level (1.36.0)
 
 [send_draft]                              # all optional; checked strictly (an unknown key or a bad pattern is an error)
 internal_domains = ["example.com", "example.co.uk"]   # default: the domain of `email`; a subdomain counts as outside

@@ -382,7 +382,7 @@ public sealed class NoteRule
         && (Sender is null || PyRegex.IsMatch(Sender, $"{sender.Name} {sender.Address}", true));
 }
 
-/// <summary>[send_draft] (1.35.0): what `send-draft` counts as outside, flags and refuses, and how far back `drafts` lists.
+/// <summary>[send_draft] (1.36.0): what `send-draft` counts as outside, flags and refuses, and how far back `drafts` lists.
 /// All optional; read strictly.</summary>
 public sealed class SendDraftSettings
 {
@@ -480,12 +480,12 @@ public sealed class Settings
     /// KeepDays (60 days).</summary>
     public string KeptFile { get; init; } = System.IO.Path.Combine(Local, "kept.json");
 
-    /// <summary>Each draft `send-draft` has sent (1.35.0), by its short id: "sending" before the send, "sent" once Microsoft
+    /// <summary>Each draft `send-draft` has sent (1.36.0), by its short id: "sending" before the send, "sent" once Microsoft
     /// answers, "unconfirmed" when the answer was lost and it couldn't be settled, so none is ever sent twice. Holds the
     /// addresses (never the body); a sent entry is kept KeepDays, the others until settled.</summary>
     public string SentDraftsFile { get; init; } = System.IO.Path.Combine(Local, "sent-drafts.json");
 
-    /// <summary>[send_draft] (1.35.0). Never null.</summary>
+    /// <summary>[send_draft] (1.36.0). Never null.</summary>
     public SendDraftSettings SendDraft { get; set; } = new();
 
     /// <summary>The shared activity journal (1.33.0, background-tools-lib's ActivityJournal): one JSON line for each thing
@@ -1408,7 +1408,7 @@ public sealed class Settings
         settings.Notes = config;
     }
 
-    /// <summary>[send_draft] (1.35.0), read strictly: an unknown key, a bad pattern, a domain that isn't one, or
+    /// <summary>[send_draft] (1.36.0), read strictly: an unknown key, a bad pattern, a domain that isn't one, or
     /// max_recipients below warn_recipients is an error.</summary>
     private static void ReadSendDraft(TomlTable raw, string full, Settings settings)
     {
